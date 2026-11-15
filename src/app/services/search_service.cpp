@@ -212,6 +212,20 @@ void applyExtensionFacets(SearchResponse& resp) {
 // Glob matching compiled once per pattern. Path filters apply the same handful of
 // patterns to every candidate document, so the compiled form is cached per thread and
 // the cache is cleared if it ever grows past a small bound.
+// Path patterns match the whole stored path. A pattern that starts with a single '*' ("*.md",
+// "*inside*") or is relative ("src/*.cpp") matches anywhere in it, so it gets a "**/" prefix;
+// '*' alone never crosses '/', so without it such a pattern could not match an absolute path.
+static std::string normalizeSearchPathGlob(std::string pattern) {
+    const bool leadingSingleStar =
+        !pattern.empty() && pattern.front() == '*' && (pattern.size() == 1 || pattern[1] != '*');
+    const bool relative = !pattern.empty() && pattern.front() != '*' && pattern.front() != '/' &&
+                          pattern.find(":/") == std::string::npos && pattern.find("**/") != 0;
+    if (leadingSingleStar || relative) {
+        pattern.insert(0, "**/");
+    }
+    return pattern;
+}
+
 static bool wildcardMatch(const std::string& text, const std::string& pattern) {
     thread_local std::unordered_map<std::string, GlobMatcher> matchers;
     auto it = matchers.find(pattern);
@@ -647,7 +661,11 @@ public:
         if (normalizedReq.pathPatterns.empty() && !normalizedReq.pathPattern.empty()) {
             normalizedReq.pathPatterns.push_back(normalizedReq.pathPattern);
         }
-        if (!normalizedReq.scopePathPrefix.empty()) {
+        // Path patterns are ORed, so adding the scope's patterns to the caller's would let any
+        // in-scope path through and void the caller's filter. The scope is enforced separately
+        // (PathScope) on every result path; its patterns only narrow candidate gathering when
+        // the caller gave none.
+        if (!normalizedReq.scopePathPrefix.empty() && normalizedReq.pathPatterns.empty()) {
             auto scopePatterns = utils::buildCwdScopePatterns(normalizedReq.scopePathPrefix);
             normalizedReq.pathPatterns.insert(normalizedReq.pathPatterns.end(),
                                               scopePatterns.begin(), scopePatterns.end());
@@ -773,25 +791,7 @@ public:
                     return false;
                 }
                 if (yams::common::hasWildcard(rawPattern)) {
-                    std::string normalized = rawPattern;
-                    // Normalize glob patterns for path matching:
-                    // - "*.ext" should match any path ending in .ext (prepend **/)
-                    // - "dir/*.ext" should match dir/*.ext (prepend **)
-                    // - "**/pattern" and "/pattern" are already absolute
-                    if (!normalized.empty() && normalized.front() == '*' &&
-                        (normalized.size() == 1 ||
-                         normalized[1] != '*')) { // NOLINT(bugprone-branch-clone)
-                        // Single * at start (e.g., "*.md") - match anywhere in path
-                        normalized = "**/" + normalized;
-                    } else if (!normalized.empty() && normalized.front() != '*' &&
-                               normalized.front() != '/' &&
-                               normalized.find(":/") == std::string::npos &&
-                               normalized.find("**/") != 0) {
-                        // Relative pattern without leading ** (e.g., "src/*.cpp") - match
-                        // anywhere
-                        normalized = "**/" + normalized;
-                    }
-                    return wildcardMatch(value, normalized);
+                    return wildcardMatch(value, normalizeSearchPathGlob(rawPattern));
                 }
                 return value.find(rawPattern) != std::string::npos;
             };
@@ -1851,12 +1851,9 @@ private:
                     continue;
                 }
                 if (yams::common::hasWildcard(patternRaw)) {
-                    std::string pattern = patternRaw;
-                    if (!pattern.empty() && pattern.front() != '*' && pattern.front() != '/' &&
-                        pattern.find(":/") == std::string::npos) {
-                        pattern.insert(pattern.begin(), '*');
-                    }
-                    if (wildcardMatch(filePath, pattern)) {
+                    // Same normalization as the non-hybrid path filter; this one prepended a
+                    // bare '*', which cannot cross '/', so "*inside*" never matched.
+                    if (wildcardMatch(filePath, normalizeSearchPathGlob(patternRaw))) {
                         return true;
                     }
                 } else if (filePath.find(patternRaw) != std::string::npos) {

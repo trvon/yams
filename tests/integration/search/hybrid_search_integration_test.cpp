@@ -488,15 +488,15 @@ TEST_CASE("HybridSearch - workspace scope filters engine and path-pattern result
 
     auto scoped = fixture.executeSearch(request);
     REQUIRE(scoped);
-    // Known gap, tracked separately: a document directly in the scope root can be missing from
-    // scoped hybrid results (it also is on experimental before this change), so this checks
-    // containment rather than the exact result set.
-    REQUIRE_FALSE(scoped.value().results.empty());
+    std::set<std::string> names;
     for (const auto& hit : scoped.value().results) {
         CAPTURE(hit.path);
         CHECK(hit.path.starts_with(canonicalScope + "/"));
-        CHECK(std::filesystem::path(hit.path).filename() != "outside.txt");
+        names.insert(std::filesystem::path(hit.path).filename().string());
     }
+    // inside.txt sits directly in the scope root: the scope's "<root>/**/*" pattern used to
+    // need at least one directory, so it was dropped.
+    CHECK(names == std::set<std::string>{"inside.txt", "deeper.txt"});
 
     request.pathsOnly = true;
     auto paths = fixture.executeSearch(request);
@@ -505,13 +505,14 @@ TEST_CASE("HybridSearch - workspace scope filters engine and path-pattern result
         CHECK(hit.path.starts_with(canonicalScope + "/"));
     }
 
+    // A caller's path pattern still applies inside a scope; scope patterns used to be ORed
+    // with it, so any in-scope path matched.
     request.pathsOnly = false;
-    request.pathPatterns = {"*.txt"};
+    request.pathPatterns = {"*inside*"};
     auto patterned = fixture.executeSearch(request);
     REQUIRE(patterned);
-    for (const auto& hit : patterned.value().results) {
-        CHECK(hit.path.starts_with(canonicalScope + "/"));
-    }
+    REQUIRE(patterned.value().results.size() == 1);
+    CHECK(std::filesystem::path(patterned.value().results.front().path).filename() == "inside.txt");
 }
 
 TEST_CASE("HybridSearch - Engine unavailable detection", "[integration][search][hybrid][error]") {
