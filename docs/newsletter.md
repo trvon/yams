@@ -13,6 +13,35 @@ Product updates and occasional deep-dives.
 - Benchmark updates
 - Design notes (search, storage, plugins)
 
+## 2026-11-15: 0.23.0, faster grep and a smaller memory peak
+
+0.23.0 ships the watching and grep fixes above, plus a pass on speed and memory.
+Numbers are from a 33,000-document store on one Linux workstation.
+
+- **Unscoped grep skips files that cannot match.** The daemon keeps a trigram
+  index of the bytes grep scans and fills it in the background, pausing under
+  load (about six minutes and 60 MB for this store). Grep then reads only the
+  files whose trigrams contain the pattern's required text: 2.0 to 2.2 s became
+  0.6 to 0.9 s, with the same files found. Files not yet indexed, or changed
+  since, are always scanned, so a partial index never hides a match. Turn it off
+  with `grep_trigram_index = false` under `[daemon]`.
+- **Commands inside a repository are faster.** Scope is resolved once per
+  directory instead of once per document, and the freshness check no longer
+  hashes unchanged files: `yams grep -l` in a repository went from 2,136 ms to
+  428 ms, and `yams get` from 684 ms to 151 ms.
+- **A smaller memory peak.** Lexical concept mining counts first and keeps
+  postings only for the concepts it selects, which cut its peak from about
+  800 MB to 258 MB. Topology and vector builds no longer copy their matrices
+  twice.
+- **Safer plugin installs.** Plugins without a checksum are refused, archive
+  extraction is hardened against symlink and path tricks, and installs are
+  serialized per directory.
+- **Smaller fixes.** Windows `data_dir` paths with backslashes survive a config
+  rewrite, and `--include` globs that contain `_` match.
+
+Upgrading runs schema migrations on first start; an older binary will not
+open the upgraded data directory.
+
 ## 2026-11: Watching, honest grep and measured routing
 
 A week of work on how YAMS keeps up with a project and how it answers.
