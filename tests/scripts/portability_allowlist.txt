@@ -27,7 +27,7 @@ include/yams/daemon/resource/gpu_info.h:368:portability/env-read # reviewed raw 
 include/yams/daemon/resource/gpu_info.h:385:portability/env-read # reviewed raw environment read
 include/yams/daemon/resource/gpu_info.h:439:portability/env-read # reviewed raw environment read
 include/yams/mcp/tool_registry.h:31:portability/env-read # reviewed raw environment read
-include/yams/metadata/connection_pool.h:288:portability/jthread # feature-test guarded std::jthread
+include/yams/metadata/connection_pool.h:295:portability/jthread # feature-test guarded std::jthread
 include/yams/metadata/metadata_repository.h:70:portability/env-read # reviewed raw environment read
 plugins/glint/gliner_session.cpp:37:portability/env-read # reviewed raw environment read
 plugins/onnx/model_provider.cpp:90:portability/env-read # reviewed raw environment read
@@ -69,7 +69,7 @@ plugins/ort_runtime/ort_runtime_loader.cpp:137:portability/env-read # reviewed r
 plugins/ort_runtime/ort_runtime_loader.cpp:140:portability/env-read # reviewed raw environment read
 plugins/ort_runtime/ort_runtime_loader.cpp:148:portability/env-read # reviewed raw environment read
 src/app/services/document_service.cpp:1255:portability/env-read # reviewed raw environment read
-src/app/services/search_service.cpp:514:portability/env-read # reviewed raw environment read
+src/app/services/search_service.cpp:528:portability/env-read # reviewed raw environment read
 src/benchmarks/internal_event_bus_benchmark.cpp:15:portability/env-read # reviewed raw environment read
 src/cli/commands/add_command.cpp:267:portability/env-read # reviewed raw environment read
 src/cli/commands/search_command.cpp:1091:portability/env-read # reviewed raw environment read
@@ -312,7 +312,7 @@ tests/unit/vector/vector_smoke_catch2_test.cpp:37:portability/env-read # reviewe
 tests/unit/vector/vector_sync_adapter_catch2_test.cpp:32:portability/env-read # reviewed raw environment read
 tests/unit/vector/vector_sync_adapter_catch2_test.cpp:38:portability/env-read # reviewed raw environment read
 tools/fuzzing/fuzz_plugin_abi_mount.cpp:18:portability/env-read # reviewed raw environment read
-tools/yams-cli/main.cpp:89:portability/env-read # reviewed raw environment read
+tools/yams-cli/main.cpp:90:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_colbert_session.cpp:61:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_colbert_session.cpp:62:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_colbert_session.cpp:79:portability/env-read # reviewed raw environment read

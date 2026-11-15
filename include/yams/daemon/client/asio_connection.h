@@ -54,6 +54,13 @@ struct AsioConnection {
 
     ~AsioConnection();
 
+    /// Declare that every thread running a caller-supplied (TransportOptions::executor) io_context
+    /// has been joined, as at process exit. A connection on such a stopped context then closes
+    /// its socket at once instead of waiting for a strand that will never run: no handler can
+    /// still be using the socket. Until this is declared, stopped() alone is not trusted, since
+    /// stop() does not wait for handlers already running on other threads.
+    static void declareCallerExecutorsJoined(bool joined = true) noexcept;
+
     void close();
     void cancel();
     void closeSocketOnStrand(bool cancelFirst, bool resetSocket);

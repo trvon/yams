@@ -39,12 +39,21 @@ bool isExpectedDisconnectError(const boost::system::error_code& ec) {
            msg.find("ECONNRESET") != std::string::npos;
 }
 
+std::atomic<bool>& callerExecutorsJoined() {
+    static std::atomic<bool> joined{false};
+    return joined;
+}
+
 bool isExecutorStopped(const boost::asio::strand<boost::asio::any_io_executor>& executor) {
     const auto& inner = executor.get_inner_executor();
     const auto* ioExecutor = inner.target<boost::asio::io_context::executor_type>();
     return ioExecutor != nullptr && ioExecutor->context().stopped();
 }
 } // namespace
+
+void AsioConnection::declareCallerExecutorsJoined(bool joined) noexcept {
+    callerExecutorsJoined().store(joined, std::memory_order_release);
+}
 
 AsioConnection::~AsioConnection() {
     try {
@@ -97,6 +106,17 @@ void AsioConnection::closeSocketOnStrand(bool cancelFirst, bool resetSocket) {
     }
 
     if (strand.running_in_this_thread()) {
+        closeOp();
+        return;
+    }
+
+    // A stopped io_context whose threads have all been joined never runs the dispatched close
+    // and has no handler left touching the socket, so close now rather than wait out the timeout.
+    // The CLI hits this on every exit: it joins its io_context's threads, then destroying the
+    // context destroys queued connections. stopped() alone is not enough, since stop() does not
+    // wait for handlers already running on other threads.
+    if (opts.executor.has_value() && callerExecutorsJoined().load(std::memory_order_acquire) &&
+        isExecutorStopped(strand)) {
         closeOp();
         return;
     }

@@ -12,8 +12,16 @@ std::string GlobMatcher::toRegex(std::string_view glob) {
         const char c = glob[i];
         if (c == '*') {
             if (i + 1 < glob.size() && glob[i + 1] == '*') {
-                regexStr += ".*"; // '**' crosses path separators
                 ++i;
+                if (i + 1 < glob.size() && glob[i + 1] == '/') {
+                    // "**/" is zero or more whole directories, so "src/**/main.cpp" matches
+                    // "src/main.cpp" and a scope pattern "<root>/**/*" matches files directly
+                    // in the root.
+                    regexStr += "(?:.*/)?";
+                    ++i;
+                } else {
+                    regexStr += ".*"; // '**' crosses path separators
+                }
             } else {
                 regexStr += "[^/]*"; // '*' stays within one segment
             }
