@@ -119,6 +119,14 @@ float BinaryQuantizer::estimatedCosineSimilarity(const BinaryVector& a, const Bi
 Result<std::shared_ptr<const BinaryQuantizedIndex>> BinaryQuantizedIndex::build(
     std::span<const std::size_t> ids, std::span<const std::vector<float>> vectors,
     std::size_t maxPrefixDimension, BinaryRotation rotation, std::uint64_t rotationSeed) {
+    std::vector<std::span<const float>> views(vectors.begin(), vectors.end());
+    return build(ids, std::span<const std::span<const float>>(views), maxPrefixDimension, rotation,
+                 rotationSeed);
+}
+
+Result<std::shared_ptr<const BinaryQuantizedIndex>> BinaryQuantizedIndex::build(
+    std::span<const std::size_t> ids, std::span<const std::span<const float>> vectors,
+    std::size_t maxPrefixDimension, BinaryRotation rotation, std::uint64_t rotationSeed) {
     if (ids.empty() || ids.size() != vectors.size()) {
         return Error{ErrorCode::InvalidArgument,
                      "BQ IDs and vectors must be non-empty and have equal sizes"};

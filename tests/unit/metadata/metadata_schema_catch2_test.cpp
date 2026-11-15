@@ -1645,3 +1645,47 @@ TEST_CASE("Migration version 37 indexes document graph cleanup predicates",
         CHECK((count.value() == 0));
     }
 }
+
+TEST_CASE("Migration version 46 empties a grep trigram index built before NUL handling",
+          "[unit][metadata][schema][migration]") {
+    StandaloneMigrationDb db{"migration_v46_grep_trigram_reset"};
+    REQUIRE(db.mm.migrateTo(45).has_value());
+    auto hasIndex = db.db.tableExists("grep_trigram_fts");
+    REQUIRE(hasIndex.has_value());
+    if (!hasIndex.value()) {
+        SKIP("SQLite build lacks the FTS5 trigram tokenizer");
+    }
+
+    REQUIRE(executeBound(db.db,
+                         R"(
+            INSERT INTO documents (
+                file_path, file_name, file_extension, file_size, sha256_hash, mime_type,
+                created_time, modified_time, indexed_time, content_extracted, extraction_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        )",
+                         "/tmp/a.out", "a.out", "", int64_t{64}, "doc-hash-v46",
+                         "application/x-executable", int64_t{1}, int64_t{1}, int64_t{1}, 1,
+                         "success")
+                .has_value());
+    auto docId =
+        querySingleInt64(db.db, "SELECT id FROM documents WHERE sha256_hash = ?", "doc-hash-v46");
+    REQUIRE(docId.has_value());
+    REQUIRE(executeBound(db.db, "INSERT INTO grep_trigram_fts(rowid, body) VALUES (?, ?)",
+                         docId.value(), "header only")
+                .has_value());
+    REQUIRE(executeBound(db.db,
+                         "INSERT INTO grep_trigram_coverage (document_id, sha256_hash, "
+                         "indexed_time) VALUES (?, ?, ?)",
+                         docId.value(), "doc-hash-v46", int64_t{1})
+                .has_value());
+
+    REQUIRE(db.mm.migrateTo(46).has_value());
+
+    auto coverage = querySingleInt64(db.db, "SELECT COUNT(*) FROM grep_trigram_coverage");
+    REQUIRE(coverage.has_value());
+    CHECK(coverage.value() == 0);
+    auto hits = querySingleInt64(
+        db.db, "SELECT COUNT(*) FROM grep_trigram_fts WHERE grep_trigram_fts MATCH '\"hea\"'");
+    REQUIRE(hits.has_value());
+    CHECK(hits.value() == 0);
+}

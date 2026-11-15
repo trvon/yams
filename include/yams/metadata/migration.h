@@ -294,6 +294,9 @@ private:
 
     // Version 44: Local per-path heads and metadata, independent of CAS hash identity.
     static Migration createDocumentPathHeads();
+    static Migration createGrepTrigramIndex();
+    // Version 46: Empty the grep trigram index built before NUL bytes were handled.
+    static Migration resetGrepTrigramIndex();
 };
 
 /**

@@ -116,6 +116,11 @@ public:
     build(std::span<const std::size_t> ids, std::span<const std::vector<float>> vectors,
           std::size_t maxPrefixDimension = 0, BinaryRotation rotation = BinaryRotation::None,
           std::uint64_t rotationSeed = kDefaultBinaryRotationSeed);
+    /// Same as above over views, so a caller holding vectors elsewhere need not copy them.
+    static Result<std::shared_ptr<const BinaryQuantizedIndex>>
+    build(std::span<const std::size_t> ids, std::span<const std::span<const float>> vectors,
+          std::size_t maxPrefixDimension = 0, BinaryRotation rotation = BinaryRotation::None,
+          std::uint64_t rotationSeed = kDefaultBinaryRotationSeed);
 
     [[nodiscard]] std::vector<BinaryQuantizedHit> search(std::span<const float> query,
                                                          std::size_t topK) const;

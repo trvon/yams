@@ -307,6 +307,14 @@ int main(int argc, char* argv[]) {
                     config.enableAutoRepair =
                         !(v == "0" || v == "false" || v == "off" || v == "no");
                 }
+                if (daemonSection.find("grep_trigram_index") != daemonSection.end()) {
+                    std::string v = daemonSection.at("grep_trigram_index");
+                    for (auto& c : v) {
+                        c = static_cast<char>(std::tolower(c));
+                    }
+                    config.enableGrepTrigramIndex =
+                        !(v == "0" || v == "false" || v == "off" || v == "no");
+                }
                 if (daemonSection.find("plugin_name_policy") != daemonSection.end()) {
                     config.pluginNamePolicy = daemonSection.at("plugin_name_policy");
                 }

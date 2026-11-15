@@ -41,7 +41,8 @@ private:
     std::size_t* previous_;
 };
 
-Result<std::vector<float>> normalized(std::span<const float> values) {
+// Squared norm of a vector that can be normalized, or the reason it cannot.
+Result<double> normalizableSquaredNorm(std::span<const float> values) {
     double squaredNorm = 0.0;
     for (const auto value : values) {
         if (!std::isfinite(value)) {
@@ -52,6 +53,15 @@ Result<std::vector<float>> normalized(std::span<const float> values) {
     if (squaredNorm <= 1e-16) {
         return Error{ErrorCode::InvalidArgument, "ANN vectors must have non-zero norm"};
     }
+    return squaredNorm;
+}
+
+Result<std::vector<float>> normalized(std::span<const float> values) {
+    auto norm = normalizableSquaredNorm(values);
+    if (!norm) {
+        return norm.error();
+    }
+    const double squaredNorm = norm.value();
 
     const auto inverseNorm = static_cast<float>(1.0 / std::sqrt(squaredNorm));
     std::vector<float> result(values.begin(), values.end());
@@ -91,6 +101,13 @@ StaticCosineAnnIndex::~StaticCosineAnnIndex() = default;
 Result<std::shared_ptr<const StaticCosineAnnIndex>>
 StaticCosineAnnIndex::build(std::span<const std::size_t> ids,
                             std::span<const std::vector<float>> vectors) {
+    std::vector<std::span<const float>> views(vectors.begin(), vectors.end());
+    return build(ids, std::span<const std::span<const float>>(views));
+}
+
+Result<std::shared_ptr<const StaticCosineAnnIndex>>
+StaticCosineAnnIndex::build(std::span<const std::size_t> ids,
+                            std::span<const std::span<const float>> vectors) {
     if (ids.empty() || ids.size() != vectors.size()) {
         return Error{ErrorCode::InvalidArgument,
                      "ANN IDs and vectors must be non-empty and have equal sizes"};
@@ -100,10 +117,11 @@ StaticCosineAnnIndex::build(std::span<const std::size_t> ids,
         return Error{ErrorCode::InvalidArgument, "ANN vector dimension must be non-zero"};
     }
 
+    // Validate everything first, so a bad input fails before any work; then normalize and insert
+    // one vector at a time. The index stores its own copy of each vector, so holding every
+    // normalized vector at once only doubled the build's peak memory.
     std::unordered_set<std::size_t> uniqueIds;
     uniqueIds.reserve(ids.size());
-    std::vector<std::vector<float>> normalizedVectors;
-    normalizedVectors.reserve(vectors.size());
     for (std::size_t index = 0; index < vectors.size(); ++index) {
         if (vectors[index].size() != dimension) {
             return Error{ErrorCode::InvalidArgument, "ANN vector dimensions must match"};
@@ -111,18 +129,18 @@ StaticCosineAnnIndex::build(std::span<const std::size_t> ids,
         if (!uniqueIds.insert(ids[index]).second) {
             return Error{ErrorCode::InvalidArgument, "ANN IDs must be unique"};
         }
-        auto normalizedVector = normalized(vectors[index]);
-        if (!normalizedVector) {
-            return normalizedVector.error();
+        // Check without building the normalized vector; it is built once, at insertion.
+        if (auto checked = normalizableSquaredNorm(vectors[index]); !checked) {
+            return checked.error();
         }
-        normalizedVectors.push_back(std::move(normalizedVector).value());
     }
 
     try {
         auto impl = std::make_unique<Impl>(dimension, vectors.size());
         impl->externalIds_.assign(ids.begin(), ids.end());
-        for (std::size_t index = 0; index < normalizedVectors.size(); ++index) {
-            impl->index_.insert_single_threaded(index, normalizedVectors[index]);
+        for (std::size_t index = 0; index < vectors.size(); ++index) {
+            auto normalizedVector = normalized(vectors[index]);
+            impl->index_.insert_single_threaded(index, normalizedVector.value());
         }
         auto mutableIndex =
             std::shared_ptr<StaticCosineAnnIndex>(new StaticCosineAnnIndex(std::move(impl)));

@@ -1194,6 +1194,14 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'grep_trigram_indexer',
+    'sources': files('unit/daemon/grep_trigram_indexer_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'grep'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'session_watcher',
     'sources': files('unit/daemon/session_watcher_catch2_test.cpp'),
     'deps': test_deps,
@@ -2804,6 +2812,15 @@ if catch2_dep.found()
     'sources': files('unit/metadata/query_helpers_integration_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'metadata', 'query-helpers'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
+    'name': 'grep_trigram_index',
+    'target': 'catch2_grep_trigram_index',
+    'sources': files('unit/metadata/grep_trigram_index_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'metadata', 'grep'],
     'timeout': 60,
   }]
 
