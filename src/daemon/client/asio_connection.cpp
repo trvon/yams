@@ -101,6 +101,14 @@ void AsioConnection::closeSocketOnStrand(bool cancelFirst, bool resetSocket) {
         return;
     }
 
+    // A stopped io_context never runs the dispatched close, so waiting for it only delays the
+    // same direct close the timeout path below performs. The CLI hits this on every exit: it
+    // stops and joins its io_context, then destroying it destroys queued connections.
+    if (isExecutorStopped(strand)) {
+        closeOp();
+        return;
+    }
+
     auto done = std::make_shared<std::promise<void>>();
     auto completed = std::make_shared<std::atomic<bool>>(false);
     auto future = done->get_future();

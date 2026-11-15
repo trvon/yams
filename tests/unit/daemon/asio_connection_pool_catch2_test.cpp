@@ -162,6 +162,30 @@ TEST_CASE("AsioConnection close does not hang when its executor is already stopp
     CHECK_FALSE(conn->socket);
 }
 
+TEST_CASE("AsioConnection closes at once when its executor is already stopped",
+          "[daemon][connection-pool][strand][shutdown][unit]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+    // The CLI stops its io_context, joins the threads, then destroys it; destroying the queued
+    // coroutine frames destroys their connections. Each close dispatched to the stopped strand
+    // and waited 500 ms before closing directly, which is most of a `yams get`'s exit.
+    boost::asio::io_context io;
+    TransportOptions opts;
+    opts.executor = io.get_executor();
+    auto conn = std::make_shared<AsioConnection>(opts);
+    conn->socket = std::make_unique<AsioConnection::socket_t>(conn->strand);
+    boost::system::error_code ec;
+    conn->socket->open(boost::asio::local::stream_protocol(), ec);
+    REQUIRE_FALSE(ec);
+    io.stop();
+
+    const auto start = std::chrono::steady_clock::now();
+    conn->close();
+    CHECK(std::chrono::steady_clock::now() - start < 100ms);
+    CHECK_FALSE(conn->socket);
+}
+
 TEST_CASE("AsioConnection bypasses a blocked strand during global teardown",
           "[daemon][connection-pool][strand][shutdown][unit]") {
 #ifdef _WIN32
