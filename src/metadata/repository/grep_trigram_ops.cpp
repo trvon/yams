@@ -45,6 +45,21 @@ std::size_t utf8SequenceLength(unsigned char lead) {
     return 1;
 }
 
+// Text as the trigram tokenizer must see it, for documents and literals alike. The tokenizer needs
+// UTF-8, so invalid bytes are replaced; a valid literal cannot span one. The bundled SQLite
+// trigram tokenizer also stops at a NUL code point, which would drop everything after the first
+// NUL in an executable or archive, so NUL becomes a space. Literals get the same mapping, so the
+// index still returns every document that contains them.
+std::string_view trigramText(std::string_view bytes, std::string& storage) {
+    auto text = common::ensureValidUtf8(bytes, storage);
+    if (text.find('\0') == std::string_view::npos)
+        return text;
+    if (text.data() != storage.data())
+        storage.assign(text);
+    std::ranges::replace(storage, '\0', ' ');
+    return storage;
+}
+
 // The FTS5 trigram tokenizer works on characters, so split the literal the same way.
 void appendCharacterTrigrams(std::string_view text, std::set<std::string>& out) {
     std::vector<std::string_view> chars;
@@ -94,10 +109,8 @@ Result<void> MetadataRepository::indexGrepTrigrams(int64_t documentId, std::stri
                                                    std::string_view bytes) {
     if (!grepTrigramIndexAvailable())
         return Error{ErrorCode::NotSupported, "grep trigram index unavailable"};
-    // The tokenizer needs UTF-8. Invalid bytes become U+FFFD; a valid literal cannot span one,
-    // so no trigram a literal could need is lost.
     std::string storage;
-    const auto text = common::ensureValidUtf8(bytes, storage);
+    const auto text = trigramText(bytes, storage);
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(
                          std::chrono::system_clock::now().time_since_epoch())
                          .count();
@@ -200,7 +213,7 @@ MetadataRepository::grepTrigramMatches(std::span<const std::string> literals) {
     std::set<std::string> grams;
     for (const auto& literal : literals) {
         std::string storage;
-        appendCharacterTrigrams(common::ensureValidUtf8(literal, storage), grams);
+        appendCharacterTrigrams(trigramText(literal, storage), grams);
     }
     if (grams.empty() || !grepTrigramIndexAvailable())
         return std::optional<std::vector<int64_t>>{};

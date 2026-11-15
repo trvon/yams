@@ -159,3 +159,25 @@ TEST_CASE("Grep trigram index tolerates bytes that are not valid UTF-8",
     CHECK(f.matches({"needle_one"}) == std::vector<int64_t>{doc});
     CHECK(f.matches({"needle_two"}) == std::vector<int64_t>{doc});
 }
+
+TEST_CASE("Grep trigram index reads past NUL bytes", "[metadata][grep][trigram][utf8]") {
+    // Executables and archives carry NUL bytes long before the text grep finds in them. The
+    // bundled SQLite trigram tokenizer stops at a NUL code point, so a document indexed with one
+    // would be marked covered while most of its trigrams were never stored.
+    TrigramFixture f;
+    const auto doc = f.addDocument("a.out", "hash-nul");
+    std::string bytes = "header";
+    bytes.push_back('\0');
+    bytes += "TODO later";
+    bytes.push_back('\0');
+    bytes.push_back('\0');
+    bytes += "admitDeferrable";
+    REQUIRE(f.repo->indexGrepTrigrams(doc, "hash-nul", bytes).has_value());
+    CHECK(f.matches({"TODO"}) == std::vector<int64_t>{doc});
+    CHECK(f.matches({"admitDeferrable"}) == std::vector<int64_t>{doc});
+
+    std::string withNul = "der";
+    withNul.push_back('\0');
+    withNul += "TOD";
+    CHECK(f.matches({withNul}) == std::vector<int64_t>{doc});
+}

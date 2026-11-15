@@ -384,7 +384,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createDocumentSnapshotMembership(),
             removeLegacyGrammarArtifacts(),
             createDocumentPathHeads(),
-            createGrepTrigramIndex()};
+            createGrepTrigramIndex(),
+            resetGrepTrigramIndex()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -3432,6 +3433,34 @@ Migration YamsMetadataMigrations::createGrepTrigramIndex() {
         }
         return db.execute("DROP TABLE IF EXISTS grep_trigram_coverage");
     };
+    return m;
+}
+
+Migration YamsMetadataMigrations::resetGrepTrigramIndex() {
+    Migration m;
+    m.version = 46;
+    m.name = "Rebuild the grep trigram index past NUL bytes";
+    m.created = std::chrono::system_clock::now();
+    // The first fill stopped tokenizing each document at its first NUL byte but still recorded
+    // the document as covered, so grep could skip binaries that contain a match. Which rows are
+    // affected is not recorded, so empty the index; the background indexer refills it, and
+    // grep scans every document until it does.
+    m.upFunc = [](Database& db) -> Result<void> {
+        auto exists = db.tableExists("grep_trigram_fts");
+        if (!exists) {
+            return exists.error();
+        }
+        if (exists.value()) {
+            if (auto cleared = db.execute(
+                    "INSERT INTO grep_trigram_fts(grep_trigram_fts) VALUES('delete-all')");
+                !cleared) {
+                return cleared.error();
+            }
+        }
+        return db.execute("DELETE FROM grep_trigram_coverage");
+    };
+    // Nothing to restore: an empty index is valid for v45.
+    m.downFunc = [](Database&) -> Result<void> { return {}; };
     return m;
 }
 
