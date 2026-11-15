@@ -361,6 +361,9 @@ jobs:
       always() &&
       needs.resolve-release.result == 'success' &&
       (needs.warm.result == 'success' || needs.warm.result == 'skipped')
+    # Legs marked allow_failure report their failure without failing the matrix result that
+    # create-release waits on.
+    continue-on-error: ${{ matrix.allow_failure == true }}
     strategy:
       fail-fast: false
       matrix:
@@ -424,6 +427,10 @@ jobs:
             expected_host_arch: aarch64
             docker_platform: linux/arm64
             arch_base_image: ghcr.io/menci/archlinuxarm@sha256:95491e07ec919efcbb134e3b228b7e5869938448985becaeaa4dc0e728a6499a
+            # One distro/arch lane must not hold back every other platform's release: a failure
+            # here is reported but does not block create-release (which still needs at least
+            # half the expected builds).
+            allow_failure: true
     runs-on: ${{ matrix.runs_on }}
     env:
       BUILD_DIR: build/release
