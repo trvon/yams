@@ -19,9 +19,14 @@
 * **chunking:** default to 64 KB chunks (4 KB min, 256 KB max) ([e505d72](https://github.com/trvon/yams/commit/e505d72b5339701ecb744ff6e4d6349a7c3a31bd))
 * **cli:** add JSON retrieval and research reports ([b27a410](https://github.com/trvon/yams/commit/b27a41018acc82a53d81321b7fa699bcb086cfcd))
 * **common:** add an exclusive file lock and a parent for createTempDirectory ([a4cbb6a](https://github.com/trvon/yams/commit/a4cbb6a20f94fa554a13d8bc34dc73ffb79acb7c))
+* **daemon:** fill the grep trigram index in the background ([dc3bc9d](https://github.com/trvon/yams/commit/dc3bc9ddcf64437db47620482cef1b132badcebf))
+* **daemon:** fill the grep trigram index in the background ([f0150c8](https://github.com/trvon/yams/commit/f0150c8861b446dd1a199a02a963207dc3ae1cd3))
 * **daemon:** resolve path-tree repair maintenance keys from config ([342981c](https://github.com/trvon/yams/commit/342981c2b19106eaca6aa6b53643802a373e73eb))
 * **daemon:** run path-tree repair as governed repair maintenance ([2817dcc](https://github.com/trvon/yams/commit/2817dccecfea5d9f713e71b9de64511396a642b7))
+* **grep:** skip documents the trigram index rules out ([4663702](https://github.com/trvon/yams/commit/46637021b26a42373a0a18a660c23cf3a89ac9aa))
+* **grep:** skip documents the trigram index rules out ([ee2387e](https://github.com/trvon/yams/commit/ee2387e66a77ad100e47aeaed49bfee8363f01d2))
 * **metadata:** let a path-tree repair window stop between documents ([12c190e](https://github.com/trvon/yams/commit/12c190e1124335e428e409bb1088eb9d394013d6))
+* **metadata:** store a trigram index of grep-scanned bytes ([37e3473](https://github.com/trvon/yams/commit/37e34738ec7a6c36a7a6179e3b16ccea42bc71aa))
 * **search:** record queries in a local, capped query log ([a2f0647](https://github.com/trvon/yams/commit/a2f064739b9ce60e84f180fc58eaa71e321da92c))
 * **topology:** adopt a route fit only when it clears a minimum held-out gain ([54f6a04](https://github.com/trvon/yams/commit/54f6a04592fbecce5431a143bd5edb4b8a38cd64))
 * **topology:** bound the route fit's work and train only on real questions ([3014835](https://github.com/trvon/yams/commit/3014835f8d341e46b4eeb7d4e31fb26681f8dcc0))
@@ -74,7 +79,9 @@
 * **downloader:** name the macOS CA bundle so TLS works on Intel Macs ([457d8fc](https://github.com/trvon/yams/commit/457d8fce100511d366341e9ad030c0860a2e5f4c))
 * **grep:** answer files-only and count requests; say when the time budget cut a scan ([b7cbc47](https://github.com/trvon/yams/commit/b7cbc475f6705cefc492faef883637645cbad78c))
 * **grep:** answer files-only and count requests; say when the time budget cut a scan ([6b66529](https://github.com/trvon/yams/commit/6b66529211d58ccae798974c580595c1d6673a55))
+* **grep:** consume multi-character escapes whole when extracting literals ([daf0fce](https://github.com/trvon/yams/commit/daf0fce4e8a747f1f5983dc63a80455e4d44d40b))
 * **grep:** count lines not occurrences, keep semantic records, and name the budget precisely ([d12cb8f](https://github.com/trvon/yams/commit/d12cb8fad5974c8d248dc7d7d8139313356b11f9))
+* **grep:** extract only literals every match must contain ([e6fe880](https://github.com/trvon/yams/commit/e6fe880f310f167b38bfa0969b87c26d75b71acd))
 * **init:** keep an existing config when setting up another data directory ([0b09c21](https://github.com/trvon/yams/commit/0b09c21d00d9e786f919cfd941fbf44b21048c98))
 * **init:** report where the additional store actually is ([983c6b2](https://github.com/trvon/yams/commit/983c6b2783bb82ea9004c66fc54b9c5247e80821))
 * **integrity:** let BlockRepairer replace a corrupt stored block ([8da88af](https://github.com/trvon/yams/commit/8da88af3b51f3da19dd06b0547be59787e7dbb2b))
@@ -87,6 +94,7 @@
 * **memory-sync:** log failed sync cycles and show the last error ([949e5f9](https://github.com/trvon/yams/commit/949e5f9d247fb6f8532e74e28aa0dcd393b3d507))
 * **metadata:** fill indexedTime in the default candidate projection and test it ([c923d48](https://github.com/trvon/yams/commit/c923d48d32a39c9efc9d2742dea59f430af46b9c))
 * **metadata:** include the PathTreeNode definition in path_tree_write ([6b9f623](https://github.com/trvon/yams/commit/6b9f623165d686a6a71ca89b20add9e76f46f4af))
+* **metadata:** index grep trigrams past NUL bytes ([730c335](https://github.com/trvon/yams/commit/730c3358f3839161ebb71a04bc6bc658d6565616))
 * **metadata:** keep literal % and _ exact in contains and wildcard-free globs ([ad5aded](https://github.com/trvon/yams/commit/ad5aded6ffcbc287d9537b3e3b40997e9408f56c))
 * **metadata:** match globs that contain a literal underscore ([47779c2](https://github.com/trvon/yams/commit/47779c2b48cfb921f9cd14e779ba9b409502e3c8))
 * **metadata:** match path-tree repair on the normalized, linked leaf ([2d7ae90](https://github.com/trvon/yams/commit/2d7ae90789614b074caff79d5fc9c02b8c216758))
@@ -107,6 +115,8 @@
 * **plugins:** stage plugin installs next to the install directory ([7a9e555](https://github.com/trvon/yams/commit/7a9e55555e76765d6e7dc10530ad533f5e4bc92f))
 * **plugins:** tighten installer target, layout and permission handling ([01ca5e4](https://github.com/trvon/yams/commit/01ca5e4d95443e936c4d6d25af4920432674d2cb))
 * **policy:** put each test's DLL directories on PATH on Windows ([df78cf9](https://github.com/trvon/yams/commit/df78cf98cee3e2af1a3268243e671b54f8610834))
+* **release:** unblock the Arch aarch64 package and stop it blocking releases ([8110c98](https://github.com/trvon/yams/commit/8110c98f34611185cfb474b8a650af92c68803b9))
+* **release:** unblock the Arch aarch64 package and stop it blocking releases ([851aa36](https://github.com/trvon/yams/commit/851aa3698ce5435ee71094a51c584c9569972a03))
 * **search:** keep concept text retention inside an exception boundary ([fa98285](https://github.com/trvon/yams/commit/fa98285b17647348443067dce71fa1d438c4b403))
 * **search:** keep root files and caller path patterns in scoped search ([d196c32](https://github.com/trvon/yams/commit/d196c32d83ffd404bc07725bdd9ad43dbc507130))
 * **search:** keep root files and caller path patterns in scoped search ([ef2a2b2](https://github.com/trvon/yams/commit/ef2a2b2787b90f2c4acab924db90d0b52b8f0e6f))
@@ -147,7 +157,17 @@
 * **search:** mine lexical concepts from the text BM25 indexed ([689fb11](https://github.com/trvon/yams/commit/689fb119a00d7006dcc8977e91515de1b3fab188))
 * **search:** mine lexical concepts from the text BM25 indexed ([2ccfe14](https://github.com/trvon/yams/commit/2ccfe14d3d2325653f3153bea43346baa37e8598))
 * **services:** check grep and search scope once per directory, not per document ([db2e8b0](https://github.com/trvon/yams/commit/db2e8b0e801e7adbc9e1b222a47bd744a3b948a7))
+* **topology:** stop copying the centroid matrix twice per route-index build ([cad14e5](https://github.com/trvon/yams/commit/cad14e58fc8e8eaf4c347220332c3cb31935289c))
+* **topology:** stop copying the centroid matrix twice per route-index build ([0ffa842](https://github.com/trvon/yams/commit/0ffa842fe25d5f0473468ef7287a61cf31d0a184))
+* **vector:** normalize each ANN vector once, not twice ([8a37633](https://github.com/trvon/yams/commit/8a37633bfbb95504a554463143e1badfe22e7943))
+* **vector:** normalize each ANN vector once, not twice ([7b56c69](https://github.com/trvon/yams/commit/7b56c6978e39754b0ac4f0c7d5f11d144f9cb837))
 * **vector:** stream vectors through the Simeon PQ rebuild ([c799d31](https://github.com/trvon/yams/commit/c799d310dbd9770818b5a1d791f0cfe237997dd2))
+
+
+### Maintenance
+
+* re-cut release 0.23.0 ([ccfe576](https://github.com/trvon/yams/commit/ccfe5766d1c72e82dc8e34ffa7d2c23fd6f1145b))
+* release 0.24.0 ([461fa5b](https://github.com/trvon/yams/commit/461fa5b0402e46c3aca9f67220b816ee1c1a3909))
 
 
 ### Changed
