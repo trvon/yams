@@ -1011,8 +1011,6 @@ TEST_CASE("GrepService - Unicode Support", "[grep][service][unicode]") {
     }
 }
 
-#endif // _WIN32
-
 TEST_CASE("GrepService include patterns match file names that contain an underscore",
           "[grep][service][include]") {
     SKIP_GREP_ON_WINDOWS();
@@ -1034,3 +1032,5 @@ TEST_CASE("GrepService include patterns match file names that contain an undersc
         CHECK(result.value().filesWith.front().ends_with("src/cli/init_command.cpp"));
     }
 }
+
+#endif // _WIN32
