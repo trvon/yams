@@ -722,10 +722,10 @@ public:
                 return false;
             };
 
+            const utils::PathScope scope{req.scopePathPrefix};
             for (auto& d : docs) {
                 if (!req.scopePathPrefix.empty() &&
-                    (!utils::isPathWithinScope(d.filePath, req.scopePathPrefix) ||
-                     utils::isGeneratedWorkspacePath(d.filePath))) {
+                    (!scope.contains(d.filePath) || utils::isGeneratedWorkspacePath(d.filePath))) {
                     ++filesSkippedGenerated;
                     continue;
                 }
@@ -1402,13 +1402,14 @@ public:
                                 }
                             }
                             int taken = 0;
+                            const utils::PathScope semanticScope{req.scopePathPrefix};
                             for (const auto& r : sem) {
                                 const std::string& path = r.document.filePath;
                                 if (path.empty()) {
                                     continue;
                                 }
                                 if (!req.scopePathPrefix.empty() &&
-                                    (!utils::isPathWithinScope(path, req.scopePathPrefix) ||
+                                    (!semanticScope.contains(path) ||
                                      utils::isGeneratedWorkspacePath(path))) {
                                     continue;
                                 }

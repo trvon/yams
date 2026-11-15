@@ -195,6 +195,12 @@ public:
 
     [[nodiscard]] Stats getStats() const;
 
+    /// Completed maintenance passes (health check and idle pruning); lets tests wait for the
+    /// maintenance thread to reach its wait instead of sleeping.
+    [[nodiscard]] std::uint64_t maintenancePassCount() const noexcept {
+        return maintenancePasses_.load(std::memory_order_acquire);
+    }
+
     [[nodiscard]] const std::string& dbPath() const { return dbPath_; }
 
 #if defined(YAMS_TESTING)
@@ -283,6 +289,7 @@ private:
     std::atomic<std::uint64_t> slowHolderCount_{0};
     std::atomic<std::uint64_t> maxHolderMicros_{0};
     std::atomic<std::uint64_t> slowHolderThresholdMicros_{5'000'000ULL};
+    std::atomic<std::uint64_t> maintenancePasses_{0};
 
 #if defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L
     std::jthread maintenanceThread_;

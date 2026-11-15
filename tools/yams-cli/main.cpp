@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
+#include <yams/daemon/client/asio_connection.h>
 #include <yams/cli/cli_perf_trace.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/platform/windows_init.h>
@@ -119,6 +120,9 @@ int main(int argc, char* argv[]) {
             if (t.joinable())
                 t.join();
         }
+        // Every thread running io_context is joined, so connections destroyed with it (queued
+        // coroutine frames) can close their sockets without waiting for its strands.
+        yams::daemon::AsioConnection::declareCallerExecutorsJoined();
         yams::cli::cli_perf_trace("main.cleanup",
                                   std::chrono::duration_cast<std::chrono::microseconds>(
                                       std::chrono::steady_clock::now() - cleanupStart));

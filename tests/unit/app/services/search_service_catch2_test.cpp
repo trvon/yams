@@ -1062,6 +1062,12 @@ TEST_CASE("GlobMatcher keeps the search service glob semantics", "[unit][service
     CHECK(GlobMatcher("*.md").matches("intro.md"));
     CHECK(GlobMatcher("src/**/main.cpp").matches("src/a/b/main.cpp"));
     CHECK_FALSE(GlobMatcher("src/*/main.cpp").matches("src/a/b/main.cpp"));
+    // "**/" also matches zero directories: a workspace scope becomes "<root>/**/*", and files
+    // directly in the root dropped out of scoped search.
+    CHECK(GlobMatcher("src/**/main.cpp").matches("src/main.cpp"));
+    CHECK(GlobMatcher("/work/repo/**/*").matches("/work/repo/inside.txt"));
+    CHECK(GlobMatcher("/work/repo/**/*").matches("/work/repo/nested/deeper.txt"));
+    CHECK_FALSE(GlobMatcher("/work/repo/**/*").matches("/work/repository/other.txt"));
     CHECK(GlobMatcher("file?.txt").matches("file1.txt"));
     CHECK_FALSE(GlobMatcher("a.b").matches("aXb"));
     // Regex metacharacters in a glob are literal, so brackets never open a class.

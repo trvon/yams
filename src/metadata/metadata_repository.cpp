@@ -2219,11 +2219,12 @@ MetadataRepository::queryDocumentsForGrepCandidates(const DocumentQueryOptions& 
             const bool joinFtsForContains = options.containsFragment && options.containsUsesFts &&
                                             !options.containsFragment->empty() && pathFtsAvailable_;
 
-            // Lightweight 6-column projection: only what grep needs for candidate
-            // discovery and hot/cold classification.
+            // Lightweight projection: what grep needs for candidate discovery and hot/cold
+            // classification, plus the index time the CLI freshness check compares against.
             std::string sql =
                 "SELECT documents.id, documents.file_path, documents.file_size, "
-                "documents.sha256_hash, documents.mime_type, documents.content_extracted "
+                "documents.sha256_hash, documents.mime_type, documents.content_extracted, "
+                "documents.indexed_time "
                 "FROM documents";
             if (joinFtsForContains)
                 sql += " JOIN documents_path_fts ON documents.id = documents_path_fts.rowid";
@@ -2266,6 +2267,7 @@ MetadataRepository::queryDocumentsForGrepCandidates(const DocumentQueryOptions& 
                     p.sha256Hash = stmt.getString(3);
                     p.mimeType = stmt.getString(4);
                     p.contentExtracted = stmt.getInt(5) != 0;
+                    p.indexedTime = stmt.getInt64(6);
                     return p;
                 });
             if (!execResult) {

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -245,6 +246,108 @@ TEST_CASE("CLI live grep keeps requested context at a global cap", "[cli][live]"
     REQUIRE(result.hits.size() == 1);
     CHECK(result.hits[0].contextBefore == std::vector<std::string>{"before"});
     CHECK(result.hits[0].contextAfter == std::vector<std::string>{"after"});
+}
+
+TEST_CASE("CLI freshness trusts size and mtime for files indexed after their last change",
+          "[cli][repo][freshness]") {
+    // Every repo-scoped `yams grep` hashed every tracked file in the repository (50-80 ms for
+    // 1,954 files) before searching. Like git, a file whose size matches and whose mtime is
+    // older than when it was indexed is unchanged; only the rest are read.
+    TempRepo repo;
+    repo.write("a.txt", "same");
+    REQUIRE(runCliProcess({"git", "-C", repo.root.string(), "add", "--", "a.txt"}).exitCode == 0);
+    const auto files = readRepoFiles(repo.root);
+    const auto path = files.root / "a.txt";
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    int hashed = 0;
+    const auto countingHash = [&](const RepoPath& file) {
+        ++hashed;
+        return contents(file);
+    };
+
+    // Indexed well after the last write, same size: trusted without hashing, even though the
+    // stored hash is deliberately wrong.
+    RepoIndex index{{path, {"stale-hash", now + 10, 1, 4}}};
+    CHECK_FALSE(compareRepoIndex(files, index, countingHash).stale());
+    CHECK(hashed == 0);
+
+    // A different size is read.
+    index[path].size = 5;
+    CHECK(compareRepoIndex(files, index, countingHash).changed.size() == 1);
+    CHECK(hashed == 1);
+
+    // Written after it was indexed: read, even at the same size.
+    index[path] = {"same", now - 60, 1, 4};
+    CHECK_FALSE(compareRepoIndex(files, index, countingHash).stale());
+    CHECK(hashed == 2);
+}
+
+TEST_CASE("CLI repo index carries each file's index time from the projection",
+          "[cli][repo][freshness][projection]") {
+    // readRepoIndex reads the lightweight candidate projection, and the freshness check trusts a
+    // file's size and mtime only when it was written before its index time. A missing or
+    // misordered indexed_time column would silently disable that skip, or trust stale files.
+    TempRepo repo;
+    repo.write("newer.txt", "a");
+    repo.write("older.txt", "b");
+    REQUIRE(runCliProcess({"git", "-C", repo.root.string(), "add", "--", "newer.txt", "older.txt"})
+                .exitCode == 0);
+    const auto data = repo.root / ".index";
+    std::filesystem::create_directories(data);
+    yams::metadata::ConnectionPoolConfig config;
+    config.enableWAL = false;
+    config.minConnections = 1;
+    config.maxConnections = 2;
+    yams::metadata::ConnectionPool pool((data / "yams.db").string(), config);
+    REQUIRE(pool.initialize().has_value());
+    yams::metadata::MetadataRepository repository(pool);
+
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    const auto insert = [&](const char* name, std::chrono::sys_seconds indexed) {
+        yams::metadata::DocumentInfo doc;
+        doc.filePath = (repo.root / name).string();
+        doc.fileName = name;
+        doc.sha256Hash = std::string(64, name[0]);
+        doc.fileSize = 1;
+        doc.indexedTime = indexed;
+        const auto id = repository.insertDocument(doc);
+        REQUIRE(id.has_value());
+        REQUIRE(repository.recordDocumentPath(doc, id.value(), {}).has_value());
+    };
+    const auto newer = now;
+    const auto older = now - std::chrono::hours(1);
+    insert("newer.txt", newer);
+    insert("older.txt", older);
+
+    yams::metadata::DocumentQueryOptions query;
+    query.usePathLocations = true;
+    query.currentPathsOnly = true;
+    query.pathPrefix = repo.root.generic_string();
+    query.prefixIsDirectory = true;
+    const auto full = repository.queryDocuments(query);
+    const auto projected = repository.queryDocumentsForGrepCandidates(query);
+    REQUIRE(full.has_value());
+    REQUIRE(projected.has_value());
+    REQUIRE(projected.value().size() == 2);
+    for (const auto& row : projected.value()) {
+        const auto match =
+            std::ranges::find_if(full.value(), [&](const auto& doc) { return doc.id == row.id; });
+        REQUIRE(match != full.value().end());
+        CHECK(row.indexedTime == match->indexedTime.time_since_epoch().count());
+    }
+
+    YamsCLI cli;
+    cli.setDataPath(data);
+    const auto index = cli.readRepoIndex(repo.root);
+    REQUIRE(index.has_value());
+    REQUIRE(index.value().size() == 2);
+    CHECK(index.value().at(RepoPath(repo.root / "newer.txt")).indexed ==
+          newer.time_since_epoch().count());
+    CHECK(index.value().at(RepoPath(repo.root / "older.txt")).indexed ==
+          older.time_since_epoch().count());
+    CHECK(index.value().at(RepoPath(repo.root / "older.txt")).size == 1);
 }
 
 #endif // !_WIN32

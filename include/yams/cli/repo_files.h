@@ -35,8 +35,9 @@ std::filesystem::path resolveWorktree(const std::filesystem::path& directory,
 
 struct RepoIndexFile {
     std::string hash;
-    std::int64_t indexed{0};
+    std::int64_t indexed{0}; // seconds since the epoch
     std::int64_t documentId{0};
+    std::int64_t size{-1}; // bytes when indexed; -1 when unknown, which forces a hash
 };
 using RepoIndex = std::map<std::filesystem::path, RepoIndexFile>;
 
