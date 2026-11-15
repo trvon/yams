@@ -1721,21 +1721,21 @@ private:
         // Propagate tag filters to the search engine (used for candidate gathering/ranking)
         params.tags = req.tags;
         params.matchAllTags = req.matchAllTags;
+        // One scope (and directory cache) serves both the engine's predicate and the final
+        // result filter below. The engine may call the predicate from several threads.
+        struct SharedScope {
+            explicit SharedScope(std::string_view root) : scope(root) {}
+            std::mutex mutex;
+            utils::PathScope scope;
+        };
+        const auto sharedScope = std::make_shared<SharedScope>(req.scopePathPrefix);
+        const auto withinScope = [sharedScope](std::string_view path) {
+            std::lock_guard lock(sharedScope->mutex);
+            return sharedScope->scope.contains(path);
+        };
         if (!req.scopePathPrefix.empty()) {
-            // The engine may call the predicate from several threads; PathScope caches.
-            struct SharedScope {
-                explicit SharedScope(std::string_view root) : scope(root) {}
-                std::mutex mutex;
-                utils::PathScope scope;
-            };
-            auto shared = std::make_shared<SharedScope>(req.scopePathPrefix);
-            params.pathPredicate = [shared](std::string_view path) {
-                bool inside = false;
-                {
-                    std::lock_guard lock(shared->mutex);
-                    inside = shared->scope.contains(path);
-                }
-                return inside && !utils::isGeneratedWorkspacePath(path);
+            params.pathPredicate = [withinScope](std::string_view path) {
+                return withinScope(path) && !utils::isGeneratedWorkspacePath(path);
             };
         }
 
@@ -1838,10 +1838,9 @@ private:
             effectivePathPatterns.push_back(pathPattern);
         }
 
-        const utils::PathScope filterScope{req.scopePathPrefix};
         auto matchesPathFilters = [&](const std::string& filePath) {
             if (!req.scopePathPrefix.empty() &&
-                (!filterScope.contains(filePath) || utils::isGeneratedWorkspacePath(filePath))) {
+                (!withinScope(filePath) || utils::isGeneratedWorkspacePath(filePath))) {
                 return false;
             }
             if (effectivePathPatterns.empty()) {

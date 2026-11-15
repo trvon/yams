@@ -18,10 +18,9 @@ bool isGeneratedWorkspacePath(std::string_view path);
 bool isPathWithinScope(std::string_view path, std::string_view scopeRoot);
 
 /// Scope containment for checking many paths against one root, as grep and search do per
-/// candidate document. The root is resolved once. A path that is lexically under the root is
-/// in scope without touching the filesystem; any other path resolves its parent directory once
-/// (cached), so symlinked directories match as they do with isPathWithinScope, at a cost per
-/// distinct directory rather than per document. Not thread-safe.
+/// candidate document. The root is resolved once, and each path's parent directory is resolved
+/// once and cached, so symlinked directories match as they do with isPathWithinScope at a cost
+/// per distinct directory rather than per document. Not thread-safe.
 class PathScope {
 public:
     explicit PathScope(std::string_view scopeRoot);
