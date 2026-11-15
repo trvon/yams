@@ -943,8 +943,14 @@ TEST_CASE("Connection pool destruction does not wait out the maintenance sleep",
     config.maxConnections = 2;
     auto pool = std::make_unique<ConnectionPool>(dbPath.string(), config);
     REQUIRE(pool->initialize().has_value());
-    // Let the maintenance thread finish its first pass and start sleeping.
-    std::this_thread::sleep_for(50ms);
+    // Wait for the first maintenance pass so the thread is in its wait; a pool destroyed before
+    // the thread got there would exit at once even with the old sleep loop.
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (pool->maintenancePassCount() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    REQUIRE(pool->maintenancePassCount() > 0);
+    std::this_thread::sleep_for(10ms);
 
     const auto start = std::chrono::steady_clock::now();
     pool.reset();

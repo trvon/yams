@@ -1006,6 +1006,7 @@ void ConnectionPool::startMaintenanceThread() {
         while (!st.stop_requested()) {
             (void)this->healthCheck();
             this->pruneIdleConnections();
+            maintenancePasses_.fetch_add(1, std::memory_order_acq_rel);
             std::unique_lock lock(waitMutex);
             (void)waitCv.wait_for(lock, st, 60s, [] { return false; });
         }
