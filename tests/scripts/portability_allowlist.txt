@@ -312,7 +312,7 @@ tests/unit/vector/vector_smoke_catch2_test.cpp:37:portability/env-read # reviewe
 tests/unit/vector/vector_sync_adapter_catch2_test.cpp:32:portability/env-read # reviewed raw environment read
 tests/unit/vector/vector_sync_adapter_catch2_test.cpp:38:portability/env-read # reviewed raw environment read
 tools/fuzzing/fuzz_plugin_abi_mount.cpp:18:portability/env-read # reviewed raw environment read
-tools/yams-cli/main.cpp:89:portability/env-read # reviewed raw environment read
+tools/yams-cli/main.cpp:90:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_colbert_session.cpp:61:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_colbert_session.cpp:62:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_colbert_session.cpp:79:portability/env-read # reviewed raw environment read

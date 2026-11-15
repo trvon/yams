@@ -169,7 +169,12 @@ TEST_CASE("AsioConnection closes at once when its executor is already stopped",
 #endif
     // The CLI stops its io_context, joins the threads, then destroys it; destroying the queued
     // coroutine frames destroys their connections. Each close dispatched to the stopped strand
-    // and waited 500 ms before closing directly, which is most of a `yams get`'s exit.
+    // and waited 500 ms before closing directly, which is most of a `yams get`'s exit. The CLI
+    // declares its threads joined, which is what makes closing off-strand safe.
+    AsioConnection::declareCallerExecutorsJoined(true);
+    struct ResetJoined {
+        ~ResetJoined() { AsioConnection::declareCallerExecutorsJoined(false); }
+    } resetJoined;
     boost::asio::io_context io;
     TransportOptions opts;
     opts.executor = io.get_executor();
