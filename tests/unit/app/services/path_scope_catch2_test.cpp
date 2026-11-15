@@ -75,3 +75,15 @@ TEST_CASE("PathScope resolves each directory once, not each document", "[service
     // Three outside directories plus the one inside the scope.
     CHECK(scope.resolvedDirectoryCount() == 4);
 }
+
+TEST_CASE("PathScope contains files directly inside an existing root", "[services][scope]") {
+    yams::test::TempDirGuard temp{"yams_path_scope_direct_"};
+    const auto root = fs::canonical(temp.path()) / "in-scope";
+    fs::create_directories(root / "nested");
+    std::ofstream(root / "inside.txt") << "x";
+    std::ofstream(root / "nested" / "deeper.txt") << "x";
+    const PathScope scope{root.string()};
+    CHECK(scope.contains((root / "inside.txt").string()));
+    CHECK(scope.contains((root / "nested" / "deeper.txt").string()));
+    CHECK(isPathWithinScope((root / "inside.txt").string(), root.string()));
+}
