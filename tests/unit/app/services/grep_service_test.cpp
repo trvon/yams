@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <ranges>
+#include <set>
 
 #include "common/test_helpers_catch2.h"
 
@@ -1055,6 +1056,65 @@ TEST_CASE("GrepService finds every alternative and optional form of a pattern",
     CHECK(count("(colour|color) is") == 2);
     // A hex escape is a character, not the text "41".
     CHECK(count("\\x41foo") == 1);
+}
+
+TEST_CASE("GrepService skips indexed documents the trigram index rules out",
+          "[grep][service][trigram]") {
+    SKIP_GREP_ON_WINDOWS();
+    GrepFixture fixture;
+    fixture.addDocument("has.cpp", "if (admitDeferrable(work)) run();\n");
+    fixture.addDocument("lacks.cpp", "nothing relevant in this file\n");
+    fixture.addDocument("unindexed.cpp", "admitDeferrable appears here too\n");
+    fixture.addDocument("stale.cpp", "admitDeferrable in the current content\n");
+    REQUIRE(fixture.repo_->grepTrigramIndexAvailable());
+
+    const auto docFor = [&](const char* name) {
+        auto doc = fixture.repo_->findDocumentByExactPath((fixture.tmpDir_ / name).string());
+        REQUIRE(doc.has_value());
+        REQUIRE(doc.value().has_value());
+        return *doc.value();
+    };
+    for (const char* name : {"has.cpp", "lacks.cpp"}) {
+        const auto doc = docFor(name);
+        auto bytes = fixture.store_->retrieveBytes(doc.sha256Hash);
+        REQUIRE(bytes.has_value());
+        const std::string text(reinterpret_cast<const char*>(bytes.value().data()),
+                               bytes.value().size());
+        REQUIRE(fixture.repo_->indexGrepTrigrams(doc.id, doc.sha256Hash, text).has_value());
+    }
+    // Indexed at an older content hash with text lacking the literal: it must still be scanned.
+    const auto stale = docFor("stale.cpp");
+    REQUIRE(fixture.repo_->indexGrepTrigrams(stale.id, "an-older-hash", "older text").has_value());
+
+    GrepRequest request;
+    request.pattern = "admitDeferrable";
+    request.regexOnly = true;
+    request.filesWithMatches = true;
+    auto result = fixture.grep(request);
+    REQUIRE(result.has_value());
+    std::set<std::string> files;
+    for (const auto& file : result.value().filesWith) {
+        files.insert(std::filesystem::path(file).filename().string());
+    }
+    CHECK(files == std::set<std::string>{"has.cpp", "unindexed.cpp", "stale.cpp"});
+    // Only lacks.cpp is indexed at its current content without the literal.
+    REQUIRE(result.value().searchStats.contains("trigram_skipped"));
+    CHECK(result.value().searchStats.at("trigram_skipped") == "1");
+
+    SECTION("an inverted match never uses the index") {
+        request.invert = true;
+        request.filesWithMatches = false;
+        auto inverted = fixture.grep(request);
+        REQUIRE(inverted.has_value());
+        CHECK_FALSE(inverted.value().searchStats.contains("trigram_skipped"));
+    }
+    SECTION("a pattern with no required literal never uses the index") {
+        request.pattern = "admit|nothing";
+        auto alternation = fixture.grep(request);
+        REQUIRE(alternation.has_value());
+        CHECK_FALSE(alternation.value().searchStats.contains("trigram_skipped"));
+        CHECK(alternation.value().filesWith.size() == 4);
+    }
 }
 
 #endif // _WIN32

@@ -759,7 +759,45 @@ public:
             return canceledError();
         }
 
+        // Trigram pre-filter: a document indexed at its current content that lacks a trigram of a
+        // literal every match must contain cannot match, so it is not read. Documents not indexed,
+        // or indexed at other content, are scanned as before. An inverted match needs the
+        // documents without a match, so it never uses the index.
+        std::optional<std::size_t> trigramSkipped;
+        const auto trigramStart = GrepClock::now();
+        if (ctx_.metadataRepo && !req.invert && !req.filesWithoutMatch && !docs.empty()) {
+            std::vector<std::string> required;
+            if (req.literalText) {
+                required.push_back(req.pattern);
+            } else {
+                required = literalExtraction.literals;
+            }
+            if (!required.empty() && ctx_.metadataRepo->grepTrigramIndexAvailable()) {
+                auto matches = ctx_.metadataRepo->grepTrigramMatches(required);
+                if (matches && matches.value()) {
+                    auto coverage = ctx_.metadataRepo->grepTrigramCoverage();
+                    if (coverage) {
+                        const std::unordered_set<std::int64_t> hits(matches.value()->begin(),
+                                                                    matches.value()->end());
+                        const auto& covered = coverage.value();
+                        const auto before = docs.size();
+                        std::erase_if(docs, [&](const metadata::GrepCandidateProjection& doc) {
+                            const auto it = covered.find(doc.id);
+                            return it != covered.end() && it->second == doc.sha256Hash &&
+                                   !hits.contains(doc.id);
+                        });
+                        trigramSkipped = before - docs.size();
+                    }
+                }
+            }
+        }
+        recordPhaseMetric(phaseTimings, "phase_trigram_filter_ms", "grep::phase::trigram_filter_ms",
+                          trigramStart);
+
         GrepResponse response;
+        if (trigramSkipped) {
+            response.searchStats["trigram_skipped"] = std::to_string(*trigramSkipped);
+        }
         response.searchStats["generated_candidates_rejected"] =
             std::to_string(phaseTimings["generated_candidates_rejected"]);
         if (literalFtsFallback) {
