@@ -1,3 +1,4 @@
+#include <chrono>
 #include <yams/cli/repo_files.h>
 
 #include <algorithm>
@@ -222,6 +223,28 @@ RepoPath resolveWorktree(const RepoPath& directory, std::string_view name) {
     return matches.front();
 }
 
+namespace {
+// Git's rule for skipping a content read: the size matches and the file was last written
+// before it was indexed. Index times have one-second precision and the file clock is converted
+// approximately, so a file written within about two seconds of indexing is still read.
+bool unchangedSinceIndexed(const RepoPath& path, const RepoIndexFile& entry) {
+    if (entry.size < 0)
+        return false;
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    if (error || static_cast<std::int64_t>(size) != entry.size)
+        return false;
+    const auto written = std::filesystem::last_write_time(path, error);
+    if (error)
+        return false;
+    const auto writtenSystem = std::chrono::system_clock::now() +
+                               (written - std::filesystem::file_time_type::clock::now());
+    const auto writtenSeconds =
+        std::chrono::duration_cast<std::chrono::seconds>(writtenSystem.time_since_epoch()).count();
+    return writtenSeconds + 1 < entry.indexed;
+}
+} // namespace
+
 RepoDiff compareRepoIndex(const RepoFiles& files, const RepoIndex& index,
                           const std::function<std::string(const RepoPath&)>& hashFile) {
     RepoDiff result;
@@ -240,7 +263,13 @@ RepoDiff compareRepoIndex(const RepoFiles& files, const RepoIndex& index,
             throw std::runtime_error("Repo freshness requires regular tracked files: " +
                                      path.string());
         const auto found = index.find(path);
-        if (found == index.end() || found->second.hash != hashFile(path))
+        if (found == index.end()) {
+            result.changed.push_back(path);
+            continue;
+        }
+        if (unchangedSinceIndexed(path, found->second))
+            continue;
+        if (found->second.hash != hashFile(path))
             result.changed.push_back(path);
     }
     for (const auto& [path, entry] : index) {

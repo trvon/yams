@@ -467,8 +467,12 @@ TEST_CASE("Memory sync retracts a cluster node and its edges when a rebuild dele
     const auto document = origin.addNode("doc:rebuild-member", "document");
     const auto stale = origin.addNode("topology:cluster:stale", "topology_cluster");
     origin.addEdge(document, stale);
-    origin.runCycle();
-    peer.runCycle();
+    // The peer may see the edge before its endpoint and defer it to a later cycle, so the
+    // setup converges over a few rounds like the cases above rather than assuming one.
+    for (int round = 0; round < 3 && !peer.hasEdge(document.nodeKey, stale.nodeKey); ++round) {
+        origin.runCycle();
+        peer.runCycle();
+    }
     REQUIRE(peer.hasEdge(document.nodeKey, stale.nodeKey));
 
     // The rebuild replaces the cluster: the old node goes (cascading its member edge) and the

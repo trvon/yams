@@ -337,14 +337,19 @@ void checkRegisteredWakeResumesBlockedPoller(BlockedPollerReason reason,
         REQUIRE(channel->try_push(42));
     }
 
-    if (stopInsteadOfResume) {
-        stopFlag.store(true, std::memory_order_release);
-    } else {
-        blocked.store(false, std::memory_order_release);
-        pauseFlag.store(false, std::memory_order_release);
-    }
+    // Unblock inside the posted handler, right before the cancel. The blocked wait is only a few
+    // milliseconds; if it expires first, the poller is still blocked and re-arms the registered
+    // timer, so the handler always finds exactly one wait to cancel. Unblocking earlier let a
+    // slow runner's timeout wake the poller first, leaving nothing to cancel.
     auto wakeExecutor = wakeTimer->get_executor();
-    boost::asio::post(wakeExecutor, [wakeTimer, watchdog, &cancelledWaits, stopInsteadOfResume]() {
+    boost::asio::post(wakeExecutor, [wakeTimer, watchdog, &cancelledWaits, &stopFlag, &blocked,
+                                     &pauseFlag, stopInsteadOfResume]() {
+        if (stopInsteadOfResume) {
+            stopFlag.store(true, std::memory_order_release);
+        } else {
+            blocked.store(false, std::memory_order_release);
+            pauseFlag.store(false, std::memory_order_release);
+        }
         cancelledWaits = wakeTimer->cancel();
         if (stopInsteadOfResume) {
             watchdog->cancel();
@@ -387,7 +392,9 @@ TEST_CASE("PressureLimitedPoller coalesces normal-priority trickle into a bounde
     BatchPollerHarness harness{10ms};
     REQUIRE(harness.pushNormal(1));
     harness.postNormalAfterAdmission(1, {2, 3, 4});
-    harness.run();
+    // The deadline only guards against a hang; this case checks the batch's contents, and the
+    // latency bound has its own case below. 100 ms timed out on a loaded ARM runner.
+    harness.run(2s);
 
     CHECK_FALSE(harness.timedOut);
     CHECK(harness.deferredPushSucceeded());

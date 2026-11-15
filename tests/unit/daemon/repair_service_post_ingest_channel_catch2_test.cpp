@@ -753,13 +753,18 @@ TEST_CASE_METHOD(
     REQUIRE(waitForCondition(std::chrono::seconds(2),
                              [&]() { return repairStarted.load(std::memory_order_acquire); }));
 
-    std::thread releaseSlot([embedChannel]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    // The slot is released once the list has returned, or after two seconds if it never does.
+    // A list that waited on the repair would only return after that fallback release.
+    std::promise<void> listReturned;
+    auto listReturnedFuture = listReturned.get_future();
+    std::atomic<bool> releasedByFallback{false};
+    std::thread releaseSlot([embedChannel, &listReturnedFuture, &releasedByFallback]() {
+        if (listReturnedFuture.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+            releasedByFallback.store(true, std::memory_order_release);
+        }
         InternalEventBus::EmbedJob drained;
         (void)embedChannel->try_pop(drained);
     });
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
     ListRequest listReq;
     listReq.limit = 1;
@@ -767,17 +772,14 @@ TEST_CASE_METHOD(
     listReq.recentCount = 0;
     listReq.namePattern = path;
 
-    const auto listStart = std::chrono::steady_clock::now();
     auto listResp = dispatchRequest(dispatcher, Request{listReq});
-    const auto listMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - listStart)
-                            .count();
+    CHECK_FALSE(releasedByFallback.load(std::memory_order_acquire));
+    listReturned.set_value();
 
     REQUIRE((std::holds_alternative<ListResponse>(listResp)));
     const auto& response = std::get<ListResponse>(listResp);
     REQUIRE((response.items.size() == 1));
     CHECK((response.items.front().path == path));
-    CHECK((listMs < 200));
 
     REQUIRE((repairFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready));
     const auto repairResp = repairFuture.get();
@@ -992,7 +994,10 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     const auto& response = std::get<ListResponse>(listResp);
     REQUIRE((response.items.size() == 1));
     CHECK((response.items.front().path == doc.filePath));
-    CHECK((listMs < 200));
+    // The queue is only drained below, after the list returns, so a list that waited on the
+    // repair would not return at all. This bound only stops a slow hang from passing; a tight
+    // one flaked on shared runners.
+    CHECK((listMs < 2000));
 
     InternalEventBus::PostIngestTask drained;
     REQUIRE((postIngestRpc->try_pop(drained)));

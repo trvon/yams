@@ -2412,6 +2412,15 @@ if catch2_dep.found()
     'timeout': 60,
   }]
 
+  catch2_test_table += [{
+    'name': 'path_scope',
+    'target': 'catch2_path_scope',
+    'sources': files('unit/app/services/path_scope_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'services', 'scope'],
+    'timeout': 60,
+  }]
+
 #Removed : catch2_metadata_search(search_metadata_interface_test.cpp) - HybridSearchEngine specific
 
   catch2_test_table += [{

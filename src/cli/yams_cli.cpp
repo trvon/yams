@@ -846,6 +846,15 @@ int YamsCLI::run(int argc, char* argv[]) {
 }
 
 Result<RepoIndex> YamsCLI::readRepoIndex(const std::filesystem::path& root) {
+    try {
+        return readRepoIndex(readRepoFiles(root));
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::IOError, error.what()};
+    }
+}
+
+Result<RepoIndex> YamsCLI::readRepoIndex(const RepoFiles& files) {
+    const auto& root = files.root;
     if (!std::filesystem::exists(dataPath_ / "yams.db"))
         return RepoIndex{};
     auto initialized = ensureMetadataInitialized();
@@ -861,30 +870,35 @@ Result<RepoIndex> YamsCLI::readRepoIndex(const std::filesystem::path& root) {
     // Legacy imports are adopted only for exact Git-tracked paths, never arbitrary notes
     // under the same prefix. Location metadata remains authoritative for aliases.
     query.metadataFilters.emplace_back("repo_root", root.generic_string());
-    auto snapshots = metadataRepo_->queryDocuments(query);
+    const auto snapshotStart = std::chrono::steady_clock::now();
+    // Only path, hash, size and index time are needed; the grep-candidate projection reads those
+    // columns instead of hydrating full DocumentInfo rows.
+    auto snapshots = metadataRepo_->queryDocumentsForGrepCandidates(query);
+    cli_perf_trace("freshness.snapshot_query",
+                   std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::steady_clock::now() - snapshotStart));
     if (!snapshots)
         return snapshots.error();
-    std::set<RepoPath> legacyPaths;
-    try {
-        const auto files = readRepoFiles(root);
-        legacyPaths.insert(files.tracked.begin(), files.tracked.end());
-    } catch (const std::exception& error) {
-        return Error{ErrorCode::IOError, error.what()};
-    }
+    // The caller already listed the tracked files; listing them again ran git three more times.
+    const std::set<RepoPath> legacyPaths(files.tracked.begin(), files.tracked.end());
     RepoIndex index;
     const auto include = [&](const auto& doc) {
         const auto path = std::filesystem::path(doc.filePath).lexically_normal();
-        const auto indexed = doc.indexedTime.time_since_epoch().count();
+        const auto indexed = doc.indexedTime;
         const auto found = index.find(path);
         if (found == index.end() || indexed > found->second.indexed ||
             (indexed == found->second.indexed && doc.id > found->second.documentId))
-            index[path] = RepoIndexFile{doc.sha256Hash, indexed, doc.id};
+            index[path] = RepoIndexFile{doc.sha256Hash, indexed, doc.id, doc.fileSize};
     };
     for (const auto& doc : snapshots.value())
         include(doc);
     if (!legacyPaths.empty()) {
         query.metadataFilters.clear();
-        auto documents = metadataRepo_->queryDocuments(query);
+        const auto legacyStart = std::chrono::steady_clock::now();
+        auto documents = metadataRepo_->queryDocumentsForGrepCandidates(query);
+        cli_perf_trace("freshness.legacy_query",
+                       std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now() - legacyStart));
         if (!documents)
             return documents.error();
         for (const auto& doc : documents.value())
@@ -895,13 +909,17 @@ Result<RepoIndex> YamsCLI::readRepoIndex(const std::filesystem::path& root) {
 }
 
 Result<RepoDiff> YamsCLI::repoFreshness(const RepoFiles& files) {
-    auto index = readRepoIndex(files.root);
+    auto index = readRepoIndex(files);
     if (!index)
         return index.error();
     try {
         auto hasher = crypto::createSHA256Hasher();
-        return compareRepoIndex(files, index.value(),
-                                [&](const auto& path) { return hasher->hashFile(path); });
+        const auto compareStart = std::chrono::steady_clock::now();
+        auto diff = compareRepoIndex(files, index.value(),
+                                     [&](const auto& path) { return hasher->hashFile(path); });
+        cli_perf_trace("freshness.compare", std::chrono::duration_cast<std::chrono::microseconds>(
+                                                std::chrono::steady_clock::now() - compareStart));
+        return diff;
     } catch (const std::exception& error) {
         return Error{ErrorCode::IOError, error.what()};
     }

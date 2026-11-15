@@ -1011,4 +1011,26 @@ TEST_CASE("GrepService - Unicode Support", "[grep][service][unicode]") {
     }
 }
 
+TEST_CASE("GrepService include patterns match file names that contain an underscore",
+          "[grep][service][include]") {
+    SKIP_GREP_ON_WINDOWS();
+    GrepFixture fixture;
+    fixture.addDocument("src/cli/init_command.cpp", "underscore_needle here\n");
+    fixture.addDocument("src/cli/initXcommand.cpp", "underscore_needle here\n");
+    fixture.addDocument("src/cli/status.cpp", "underscore_needle here\n");
+
+    for (const auto* include : {"*init_command.cpp", "**/init_command.cpp", "init_command.cpp"}) {
+        INFO("include=" << include);
+        auto result = fixture.grep({
+            .pattern = "underscore_needle",
+            .includePatterns = {include},
+            .filesWithMatches = true,
+            .regexOnly = true,
+        });
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().filesWith.size() == 1);
+        CHECK(result.value().filesWith.front().ends_with("src/cli/init_command.cpp"));
+    }
+}
+
 #endif // _WIN32

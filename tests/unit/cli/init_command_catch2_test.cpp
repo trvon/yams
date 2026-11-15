@@ -543,8 +543,18 @@ TEST_CASE("InitCommand: initializing another data directory keeps the existing c
         std::ifstream in(helper.configPath);
         return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     };
+    // The config stores paths as TOML strings, so Windows backslashes appear doubled.
+    const auto asToml = [](const fs::path& path) {
+        std::string escaped;
+        for (const char c : path.string()) {
+            if (c == '\\')
+                escaped += '\\';
+            escaped += c;
+        }
+        return escaped;
+    };
     const auto before = readConfig();
-    REQUIRE(before.find(helper.dataDir.string()) != std::string::npos);
+    REQUIRE(before.find(asToml(helper.dataDir)) != std::string::npos);
     const auto scratch = helper.tempDir / "scratch-store";
 
     SECTION("without --force the config is left exactly as it was") {
@@ -559,8 +569,22 @@ TEST_CASE("InitCommand: initializing another data directory keeps the existing c
     SECTION("--force replaces it") {
         REQUIRE(helper.runCommand({"yams", "--data-dir", scratch.string(), "init", "--force",
                                    "--non-interactive", "--no-keygen"}) == 0);
-        CHECK(readConfig().find(scratch.string()) != std::string::npos);
+        CHECK(readConfig().find(asToml(scratch)) != std::string::npos);
     }
+}
+
+TEST_CASE("InitCommand: the data directory written to the config reads back unchanged",
+          "[cli][init][catch2]") {
+    // On Windows every separator came back doubled (`C:\\Users\\...`): init escapes the path
+    // for TOML and the config reader returned the escapes raw. A backslash in a directory
+    // name reproduces that on every platform.
+    const auto vectorEnv = VectorStoreEnv::onDisk();
+    CliTestHelper helper;
+    const auto store = helper.tempDir / "back\\slash-store";
+    REQUIRE(helper.runCommand({"yams", "--data-dir", store.string(), "init", "--force",
+                               "--non-interactive", "--no-keygen"}) == 0);
+    CHECK(yams::config::parse_config_value(helper.configPath, "core", "data_dir") ==
+          store.string());
 }
 
 TEST_CASE("InitCommand: re-init does not overwrite an existing vector dimension sentinel",

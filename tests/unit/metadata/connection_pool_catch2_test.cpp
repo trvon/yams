@@ -932,3 +932,34 @@ TEST_CASE("Connection pool interrupts statements running on leased connections",
     CHECK((pool.interruptActiveConnections() == 0U));
     pool.shutdown();
 }
+TEST_CASE("Connection pool destruction does not wait out the maintenance sleep",
+          "[metadata][connection_pool][shutdown]") {
+#if !(defined(__cpp_lib_jthread) && __cpp_lib_jthread >= 201911L)
+    SKIP("The pool starts no maintenance thread without std::jthread");
+#endif
+    // The maintenance thread slept in one-second steps and checked its stop token only between
+    // them, and the jthread joins on destruction. Every CLI command that opened the database
+    // locally paid up to a second at exit (390 ms of a 2.1 s `yams grep`).
+    const auto dbPath = make_db_path("pool_maint_exit_");
+    ConnectionPoolConfig config;
+    config.minConnections = 1;
+    config.maxConnections = 2;
+    auto pool = std::make_unique<ConnectionPool>(dbPath.string(), config);
+    REQUIRE(pool->initialize().has_value());
+    // Wait for the first maintenance pass so the thread is in its wait; a pool destroyed before
+    // the thread got there would exit at once even with the old sleep loop.
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (pool->maintenancePassCount() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    REQUIRE(pool->maintenancePassCount() > 0);
+    std::this_thread::sleep_for(10ms);
+
+    const auto start = std::chrono::steady_clock::now();
+    pool.reset();
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    CHECK(elapsed < 250ms);
+
+    std::error_code ec;
+    fs::remove(dbPath, ec);
+}
