@@ -594,6 +594,75 @@ bool isGeneratedWorkspacePath(std::string_view path) {
            hasDirectory(".codex") || hasDirectory("audit_artifacts");
 }
 
+namespace {
+std::string comparablePath(std::string value) {
+#ifdef _WIN32
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    });
+#endif
+    return value;
+}
+
+std::string withTrailingSlash(std::string value) {
+    if (!value.ends_with('/')) {
+        value.push_back('/');
+    }
+    return value;
+}
+} // namespace
+
+PathScope::PathScope(std::string_view scopeRoot) {
+    if (scopeRoot.empty()) {
+        return;
+    }
+    auto resolved =
+        withTrailingSlash(comparablePath(yams::common::canonicalizePathForComparison(scopeRoot)));
+    auto lexical = withTrailingSlash(
+        comparablePath(std::filesystem::path(scopeRoot).lexically_normal().generic_string()));
+    roots_.push_back(resolved);
+    if (lexical != resolved) {
+        roots_.push_back(std::move(lexical));
+    }
+}
+
+bool PathScope::underRoot(std::string_view normalizedPath) const {
+    for (const auto& root : roots_) {
+        // `root` ends in '/', so the root directory itself matches without its trailing slash.
+        if (normalizedPath.starts_with(root) ||
+            normalizedPath == std::string_view(root).substr(0, root.size() - 1)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool PathScope::contains(std::string_view path) const {
+    if (path.empty() || roots_.empty()) {
+        return false;
+    }
+    const std::filesystem::path normalized = std::filesystem::path(path).lexically_normal();
+    if (underRoot(comparablePath(normalized.generic_string()))) {
+        return true;
+    }
+    // Not lexically inside: resolve the parent directory (symlinks such as /var ->
+    // /private/var), once per directory.
+    const auto parent = normalized.parent_path().generic_string();
+    auto found = resolvedParents_.find(parent);
+    if (found == resolvedParents_.end()) {
+        found = resolvedParents_
+                    .emplace(parent,
+                             comparablePath(yams::common::canonicalizePathForComparison(parent)))
+                    .first;
+    }
+    std::string resolved = found->second;
+    if (!resolved.ends_with('/')) {
+        resolved.push_back('/');
+    }
+    resolved += comparablePath(normalized.filename().generic_string());
+    return underRoot(resolved);
+}
+
 bool isPathWithinScope(std::string_view path, std::string_view scopeRoot) {
     if (path.empty() || scopeRoot.empty()) {
         return false;

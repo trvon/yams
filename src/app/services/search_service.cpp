@@ -665,9 +665,9 @@ public:
             if (normalizedReq.scopePathPrefix.empty()) {
                 return response;
             }
+            const utils::PathScope scope{normalizedReq.scopePathPrefix};
             const auto rejected = [&](std::string_view path) {
-                return !utils::isPathWithinScope(path, normalizedReq.scopePathPrefix) ||
-                       utils::isGeneratedWorkspacePath(path);
+                return !scope.contains(path) || utils::isGeneratedWorkspacePath(path);
             };
             std::erase_if(response.results, [&](const auto& item) { return rejected(item.path); });
             std::erase_if(response.paths, rejected);
@@ -800,10 +800,10 @@ public:
             if (normalizedReq.pathsOnly) {
                 std::vector<std::string> filteredPaths;
                 filteredPaths.reserve(resp.paths.size());
+                const utils::PathScope pathsScope{normalizedReq.scopePathPrefix};
                 for (const auto& path : resp.paths) {
                     if (!normalizedReq.scopePathPrefix.empty() &&
-                        (!utils::isPathWithinScope(path, normalizedReq.scopePathPrefix) ||
-                         utils::isGeneratedWorkspacePath(path))) {
+                        (!pathsScope.contains(path) || utils::isGeneratedWorkspacePath(path))) {
                         continue;
                     }
                     for (const auto& pattern : patterns) {
@@ -818,9 +818,10 @@ public:
             } else {
                 std::vector<SearchItem> filtered;
                 filtered.reserve(resp.results.size());
+                const utils::PathScope resultsScope{normalizedReq.scopePathPrefix};
                 for (const auto& item : resp.results) {
                     if (!normalizedReq.scopePathPrefix.empty() &&
-                        (!utils::isPathWithinScope(item.path, normalizedReq.scopePathPrefix) ||
+                        (!resultsScope.contains(item.path) ||
                          utils::isGeneratedWorkspacePath(item.path))) {
                         continue;
                     }
@@ -1721,9 +1722,20 @@ private:
         params.tags = req.tags;
         params.matchAllTags = req.matchAllTags;
         if (!req.scopePathPrefix.empty()) {
-            params.pathPredicate = [scope = req.scopePathPrefix](std::string_view path) {
-                return utils::isPathWithinScope(path, scope) &&
-                       !utils::isGeneratedWorkspacePath(path);
+            // The engine may call the predicate from several threads; PathScope caches.
+            struct SharedScope {
+                explicit SharedScope(std::string_view root) : scope(root) {}
+                std::mutex mutex;
+                utils::PathScope scope;
+            };
+            auto shared = std::make_shared<SharedScope>(req.scopePathPrefix);
+            params.pathPredicate = [shared](std::string_view path) {
+                bool inside = false;
+                {
+                    std::lock_guard lock(shared->mutex);
+                    inside = shared->scope.contains(path);
+                }
+                return inside && !utils::isGeneratedWorkspacePath(path);
             };
         }
 
@@ -1826,10 +1838,10 @@ private:
             effectivePathPatterns.push_back(pathPattern);
         }
 
+        const utils::PathScope filterScope{req.scopePathPrefix};
         auto matchesPathFilters = [&](const std::string& filePath) {
             if (!req.scopePathPrefix.empty() &&
-                (!utils::isPathWithinScope(filePath, req.scopePathPrefix) ||
-                 utils::isGeneratedWorkspacePath(filePath))) {
+                (!filterScope.contains(filePath) || utils::isGeneratedWorkspacePath(filePath))) {
                 return false;
             }
             if (effectivePathPatterns.empty()) {
