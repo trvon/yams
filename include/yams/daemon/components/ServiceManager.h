@@ -33,6 +33,7 @@
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/common/pattern_utils.h>
 #include <yams/core/types.h>
+#include <yams/daemon/components/GrepTrigramIndexer.h>
 #include <yams/daemon/components/SessionWatcher.h>
 #include <yams/daemon/components/AsyncInitOrchestrator.h>
 #include <yams/daemon/components/CheckpointManager.h>
@@ -661,6 +662,18 @@ public:
     std::mutex sessionWatcherTimerMutex_;
     std::shared_ptr<boost::asio::steady_timer> sessionWatcherTimer_;
     void configureSessionWatcher(bool forDaemonLoop);
+
+    // Grep trigram indexer: a background sweep that indexes documents' bytes (see
+    // GrepTrigramIndexer). Started after the session watcher and stopped beside it.
+    std::unique_ptr<GrepTrigramIndexer> grepTrigramIndexer_;
+    std::future<void> grepTrigramFuture_;
+    std::atomic<bool> grepTrigramStopRequested_{false};
+    std::mutex grepTrigramTimerMutex_;
+    std::shared_ptr<boost::asio::steady_timer> grepTrigramTimer_;
+    void startGrepTrigramIndexerOn(const boost::asio::any_io_executor& executor);
+    void stopGrepTrigramIndexerForShutdown();
+    boost::asio::awaitable<void> co_runGrepTrigramIndexer();
+    std::chrono::milliseconds runGrepTrigramIteration();
     yams::compat::stop_source sessionWatchStopSource_;
     std::future<void> sessionWatcherFuture_;
 

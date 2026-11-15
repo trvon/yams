@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
@@ -316,5 +317,62 @@ TEST_CASE("BMHSearcher: Exactly 16-byte pattern (boundary)", "[bmh][simd]") {
         BMHSearcher searcher(needle, true);
         std::string text = "PREFIX_0123456789ABCDEF_SUFFIX";
         REQUIRE(searcher.find(text) == 7);
+    }
+}
+
+// The extracted literals are *required*: grep skips any line that lacks the longest one, and
+// the trigram index skips any document lacking them. A literal that a match can avoid is a
+// missed match. `admitDeferrable|NoSuchSymbol` found nothing because the longest literal,
+// NoSuchSymbol, was required of every line.
+TEST_CASE("LiteralExtractor: only literals every match must contain",
+          "[literal_extractor][required]") {
+    const auto literals = [](std::string_view pattern, bool ignoreCase = false) {
+        auto result = LiteralExtractor::extract(pattern, ignoreCase);
+        std::vector<std::string> out = result.literals;
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    using V = std::vector<std::string>;
+
+    SECTION("top-level alternation requires nothing") {
+        CHECK(literals("foo|barbaz").empty());
+        CHECK(literals("admitDeferrable|NoSuchSymbol").empty());
+    }
+    SECTION("an optional or repeatable-zero atom is not required") {
+        CHECK(literals("colou?r") == V{"colo", "r"});
+        CHECK(literals("colou*r") == V{"colo", "r"});
+        CHECK(literals("ab{0,3}cd") == V{"a", "cd"});
+    }
+    SECTION("an atom repeated at least once is required once") {
+        CHECK(literals("ab+cd") == V{"ab", "cd"});
+        CHECK(literals("ab{2,}cd") == V{"ab", "cd"});
+    }
+    SECTION("a character class is not a literal") {
+        CHECK(literals("[abc]def") == V{"def"});
+        CHECK(literals("x[^)]*y") == V{"x", "y"});
+    }
+    SECTION("a group is opaque; text outside it is still required") {
+        CHECK(literals("(foo|bar)baz") == V{"baz"});
+        CHECK(literals("pre(fix)?post") == V{"post", "pre"});
+    }
+    SECTION("an escaped metacharacter is a literal character") {
+        CHECK(literals("a\\|b") == V{"a|b"});
+        CHECK(literals("x\\(y\\)") == V{"x(y)"});
+    }
+    SECTION("a multi-character escape is opaque in full") {
+        // Consuming only "\\x" left "41" behind as text: `\\x41foo` matches "Afoo" but
+        // required "41foo".
+        CHECK(literals("\\x41foo") == V{"foo"});
+        CHECK(literals("\\x{41}ab") == V{"ab"});
+        CHECK(literals("\\u0041bc") == V{"bc"});
+        CHECK(literals("\\p{L}abc") == V{"abc"});
+        CHECK(literals("\\pLabc") == V{"abc"});
+        CHECK(literals("(x)\\12yz") == V{"yz"});
+        CHECK(literals("ab\\cJde") == V{"ab", "de"});
+        CHECK(literals("\\k<name>xyz") == V{"xyz"});
+    }
+    SECTION("ordinary patterns keep their literals") {
+        CHECK(literals("class.*Name") == V{"Name", "class"});
+        CHECK(literals("^foo$") == V{"foo"});
     }
 }

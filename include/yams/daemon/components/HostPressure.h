@@ -117,9 +117,10 @@ enum class DeferrableWork : std::uint8_t {
     SemanticBackfill = 2, // semantic_neighbor graph backfill for older documents
     P2pRecovery = 3,      // direct P2P local op-store recovery scan before listening
     SessionWatch = 4,     // polling walk of the directories watch-enabled sessions pin
+    GrepTrigramIndex = 5, // indexing documents' bytes into the grep trigram index
 };
 
-inline constexpr std::size_t kDeferrableWorkKinds = 5;
+inline constexpr std::size_t kDeferrableWorkKinds = 6;
 
 constexpr std::string_view deferrableWorkName(DeferrableWork kind) noexcept {
     switch (kind) {
@@ -133,6 +134,8 @@ constexpr std::string_view deferrableWorkName(DeferrableWork kind) noexcept {
             return "p2p_recovery";
         case DeferrableWork::SessionWatch:
             return "session_watch";
+        case DeferrableWork::GrepTrigramIndex:
+            return "grep_trigram";
     }
     return "unknown";
 }

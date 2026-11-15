@@ -383,7 +383,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             bypassTopologyMetadataValueCountsTriggers(),
             createDocumentSnapshotMembership(),
             removeLegacyGrammarArtifacts(),
-            createDocumentPathHeads()};
+            createDocumentPathHeads(),
+            createGrepTrigramIndex()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -3379,6 +3380,59 @@ Migration YamsMetadataMigrations::createDocumentPathHeads() {
     )";
     migration.downSQL = "DROP TABLE IF EXISTS document_path_heads;";
     return migration;
+}
+
+Migration YamsMetadataMigrations::createGrepTrigramIndex() {
+    Migration m;
+    m.version = 45;
+    m.name = "Add a trigram index of grep-scanned bytes";
+    m.created = std::chrono::system_clock::now();
+    // Grep scans each document's stored bytes. This index holds, per document, the set of
+    // trigrams in those bytes (no positions: detail=none), so grep can skip documents that
+    // cannot contain a required literal. The coverage table records which content was indexed;
+    // a document without a current row is always scanned, so a partial index never hides a
+    // match. Additive and constant-time here: the index is filled in the background.
+    m.upFunc = [](Database& db) -> Result<void> {
+        if (auto created = db.execute(R"(
+                CREATE TABLE IF NOT EXISTS grep_trigram_coverage (
+                    document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+                    sha256_hash TEXT NOT NULL,
+                    indexed_time INTEGER NOT NULL
+                );
+            )");
+            !created) {
+            return created.error();
+        }
+        auto fts5 = db.hasFTS5();
+        if (!fts5) {
+            return fts5.error();
+        }
+        if (!fts5.value()) {
+            spdlog::info("[grep-trigram] FTS5 unavailable; grep keeps scanning every document");
+            return {};
+        }
+        // contentless_delete (SQLite 3.43+) lets a contentless table delete rows by rowid; it
+        // excludes columnsize=0. An older SQLite or one without the trigram tokenizer leaves the
+        // index absent, and grep scans as before.
+        if (auto created = db.execute(R"(
+                CREATE VIRTUAL TABLE IF NOT EXISTS grep_trigram_fts USING fts5(
+                    body, tokenize = 'trigram', detail = none, content = '',
+                    contentless_delete = 1
+                );
+            )");
+            !created) {
+            spdlog::info("[grep-trigram] trigram index unavailable ({}); grep keeps scanning",
+                         created.error().message);
+        }
+        return {};
+    };
+    m.downFunc = [](Database& db) -> Result<void> {
+        if (auto dropped = db.execute("DROP TABLE IF EXISTS grep_trigram_fts"); !dropped) {
+            return dropped.error();
+        }
+        return db.execute("DROP TABLE IF EXISTS grep_trigram_coverage");
+    };
+    return m;
 }
 
 Migration YamsMetadataMigrations::removeLegacyGrammarArtifacts() {

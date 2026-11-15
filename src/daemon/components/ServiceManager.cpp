@@ -1623,6 +1623,7 @@ void ServiceManager::shutdown() {
 
     stopBackgroundTaskManagerForShutdown();
     stopSessionWatcherForShutdown();
+    stopGrepTrigramIndexerForShutdown();
 
     // Direct P2P sessions use memory_sync and the peer registry database. Stop and join the
     // listener/reconnect worker before either dependency starts teardown.
@@ -2216,6 +2217,18 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             spdlog::debug("[ServiceManager] session watcher start failed: {}", e.what());
         } catch (...) {
             spdlog::debug("[ServiceManager] session watcher start failed");
+        }
+    }
+
+    // Grep trigram index: a background sweep over documents not yet indexed at their current
+    // content, admitted by the resource governor.
+    if (config_.enableGrepTrigramIndex) {
+        try {
+            startGrepTrigramIndexerOn(getWorkerExecutor());
+        } catch (const std::exception& e) {
+            spdlog::debug("[ServiceManager] grep trigram indexer start failed: {}", e.what());
+        } catch (...) {
+            spdlog::debug("[ServiceManager] grep trigram indexer start failed");
         }
     }
 
