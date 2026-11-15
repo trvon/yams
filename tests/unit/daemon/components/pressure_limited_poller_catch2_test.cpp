@@ -392,7 +392,9 @@ TEST_CASE("PressureLimitedPoller coalesces normal-priority trickle into a bounde
     BatchPollerHarness harness{10ms};
     REQUIRE(harness.pushNormal(1));
     harness.postNormalAfterAdmission(1, {2, 3, 4});
-    harness.run();
+    // The deadline only guards against a hang; this case checks the batch's contents, and the
+    // latency bound has its own case below. 100 ms timed out on a loaded ARM runner.
+    harness.run(2s);
 
     CHECK_FALSE(harness.timedOut);
     CHECK(harness.deferredPushSucceeded());
