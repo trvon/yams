@@ -41,7 +41,8 @@ private:
     std::size_t* previous_;
 };
 
-Result<std::vector<float>> normalized(std::span<const float> values) {
+// Squared norm of a vector that can be normalized, or the reason it cannot.
+Result<double> normalizableSquaredNorm(std::span<const float> values) {
     double squaredNorm = 0.0;
     for (const auto value : values) {
         if (!std::isfinite(value)) {
@@ -52,6 +53,15 @@ Result<std::vector<float>> normalized(std::span<const float> values) {
     if (squaredNorm <= 1e-16) {
         return Error{ErrorCode::InvalidArgument, "ANN vectors must have non-zero norm"};
     }
+    return squaredNorm;
+}
+
+Result<std::vector<float>> normalized(std::span<const float> values) {
+    auto norm = normalizableSquaredNorm(values);
+    if (!norm) {
+        return norm.error();
+    }
+    const double squaredNorm = norm.value();
 
     const auto inverseNorm = static_cast<float>(1.0 / std::sqrt(squaredNorm));
     std::vector<float> result(values.begin(), values.end());
@@ -119,7 +129,8 @@ StaticCosineAnnIndex::build(std::span<const std::size_t> ids,
         if (!uniqueIds.insert(ids[index]).second) {
             return Error{ErrorCode::InvalidArgument, "ANN IDs must be unique"};
         }
-        if (auto checked = normalized(vectors[index]); !checked) {
+        // Check without building the normalized vector; it is built once, at insertion.
+        if (auto checked = normalizableSquaredNorm(vectors[index]); !checked) {
             return checked.error();
         }
     }
