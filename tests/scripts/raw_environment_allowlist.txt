@@ -11,5 +11,5 @@ tests/support/catch2_main.cpp:173:raw-env/_putenv_s # Pre-thread per-process XDG
 tests/support/catch2_main.cpp:175:raw-env/setenv # Pre-thread per-process XDG_STATE_HOME isolation; main lib links no yams config
 tools/fuzzing/fuzz_plugin_abi_mount.cpp:55:raw-env/setenv # Single-process fuzz harness setup
 tools/fuzzing/fuzz_plugin_abi_negotiation.cpp:51:raw-env/setenv # Single-process fuzz harness setup
-tools/yams-cli/main.cpp:40:raw-env/setenv # Pre-thread one-shot executable marker
-tools/yams-cli/main.cpp:42:raw-env/_putenv_s # Pre-thread one-shot executable marker
+tools/yams-cli/main.cpp:41:raw-env/setenv # Pre-thread one-shot executable marker
+tools/yams-cli/main.cpp:43:raw-env/_putenv_s # Pre-thread one-shot executable marker
