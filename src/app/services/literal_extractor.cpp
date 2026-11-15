@@ -27,6 +27,8 @@ const std::string& LiteralExtractor::ExtractionResult::longest() const {
 
 namespace {
 
+std::size_t escapeLength(std::string_view p, std::size_t pos);
+
 // Index just past the character class starting at `pos` ('['). A ']' right after '[' or "[^" is
 // a member, and escapes are honoured. An unterminated class runs to the end.
 std::size_t skipCharacterClass(std::string_view p, std::size_t pos) {
@@ -37,7 +39,7 @@ std::size_t skipCharacterClass(std::string_view p, std::size_t pos) {
         ++i;
     while (i < p.size()) {
         if (p[i] == '\\') {
-            i += 2;
+            i += escapeLength(p, i);
             continue;
         }
         if (p[i] == ']')
@@ -69,6 +71,60 @@ std::size_t skipGroup(std::string_view p, std::size_t pos) {
         ++i;
     }
     return p.size();
+}
+
+// Length of the escape starting at `pos` ('\\'). Letter and digit escapes can span several
+// characters (\x41, \x{41}, \u0041, \p{L}, \pL, \cJ, \k<name>, \12, \0177); all of it must be
+// consumed, or the tail would be read as literal text a match does not contain.
+std::size_t escapeLength(std::string_view p, std::size_t pos) {
+    const auto remaining = p.size() - pos;
+    if (remaining < 2)
+        return remaining;
+    const char kind = p[pos + 1];
+    const auto braced = [&](std::size_t open) -> std::size_t {
+        const auto close = p.find('}', open);
+        return close == std::string_view::npos ? remaining : close + 1 - pos;
+    };
+    const auto countWhile = [&](std::size_t from, std::size_t limit, auto&& accept) {
+        std::size_t n = 0;
+        while (from + n < p.size() && n < limit && accept(static_cast<unsigned char>(p[from + n])))
+            ++n;
+        return n;
+    };
+    const auto isHex = [](unsigned char c) { return std::isxdigit(c) != 0; };
+    const auto isDigit = [](unsigned char c) { return std::isdigit(c) != 0; };
+    switch (kind) {
+        case 'x':
+            if (pos + 2 < p.size() && p[pos + 2] == '{')
+                return braced(pos + 2);
+            return 2 + countWhile(pos + 2, 2, isHex);
+        case 'u':
+            if (pos + 2 < p.size() && p[pos + 2] == '{')
+                return braced(pos + 2);
+            return 2 + countWhile(pos + 2, 4, isHex);
+        case 'U':
+            return 2 + countWhile(pos + 2, 8, isHex);
+        case 'p':
+        case 'P':
+            if (pos + 2 < p.size() && p[pos + 2] == '{')
+                return braced(pos + 2);
+            return std::min<std::size_t>(3, remaining);
+        case 'c':
+            return std::min<std::size_t>(3, remaining);
+        case 'k':
+        case 'g':
+            if (pos + 2 < p.size() &&
+                (p[pos + 2] == '<' || p[pos + 2] == '{' || p[pos + 2] == '\'')) {
+                const char closer = p[pos + 2] == '<' ? '>' : (p[pos + 2] == '{' ? '}' : '\'');
+                const auto close = p.find(closer, pos + 3);
+                return close == std::string_view::npos ? remaining : close + 1 - pos;
+            }
+            return 2 + countWhile(pos + 2, 8, isDigit);
+        default:
+            if (std::isdigit(static_cast<unsigned char>(kind)))
+                return 1 + countWhile(pos + 1, 4, isDigit);
+            return 2;
+    }
 }
 
 bool hasTopLevelAlternation(std::string_view p) {
@@ -159,13 +215,12 @@ LiteralExtractor::ExtractionResult LiteralExtractor::extract(std::string_view pa
         std::optional<char> atom; // the literal character this atom matches, if it is one
         std::size_t next = i + 1;
         if (c == '\\') {
-            if (i + 1 < pattern.size()) {
-                const char escaped = pattern[i + 1];
-                next = i + 2;
-                // \d \w \s \b, backreferences and other letter/digit escapes are not literal.
-                if (!std::isalnum(static_cast<unsigned char>(escaped)))
-                    atom = escaped;
-            }
+            next = i + escapeLength(pattern, i);
+            // Escaped punctuation is that character. Letter and digit escapes (\d, \b, \x41,
+            // \p{L}, backreferences, ...) are not literal text.
+            if (i + 1 < pattern.size() && next == i + 2 &&
+                !std::isalnum(static_cast<unsigned char>(pattern[i + 1])))
+                atom = pattern[i + 1];
         } else if (c == '[') {
             next = skipCharacterClass(pattern, i);
         } else if (c == '(') {

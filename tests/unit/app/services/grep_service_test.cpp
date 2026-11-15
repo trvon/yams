@@ -1041,6 +1041,7 @@ TEST_CASE("GrepService finds every alternative and optional form of a pattern",
     GrepFixture fixture;
     fixture.addDocument("alternation.cpp", "if (admitDeferrable(work)) run();\n");
     fixture.addDocument("spelling.txt", "the color is red\nthe colour is blue\n");
+    fixture.addDocument("escapes.txt", "Afoo starts here\n");
 
     const auto count = [&](const char* pattern) {
         auto result = fixture.grep({.pattern = pattern, .regexOnly = true});
@@ -1052,6 +1053,8 @@ TEST_CASE("GrepService finds every alternative and optional form of a pattern",
     CHECK(count("colou?r") == 2);
     CHECK(count("colou*r") == 2);
     CHECK(count("(colour|color) is") == 2);
+    // A hex escape is a character, not the text "41".
+    CHECK(count("\\x41foo") == 1);
 }
 
 #endif // _WIN32

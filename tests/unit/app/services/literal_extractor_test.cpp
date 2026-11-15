@@ -359,6 +359,18 @@ TEST_CASE("LiteralExtractor: only literals every match must contain",
         CHECK(literals("a\\|b") == V{"a|b"});
         CHECK(literals("x\\(y\\)") == V{"x(y)"});
     }
+    SECTION("a multi-character escape is opaque in full") {
+        // Consuming only "\\x" left "41" behind as text: `\\x41foo` matches "Afoo" but
+        // required "41foo".
+        CHECK(literals("\\x41foo") == V{"foo"});
+        CHECK(literals("\\x{41}ab") == V{"ab"});
+        CHECK(literals("\\u0041bc") == V{"bc"});
+        CHECK(literals("\\p{L}abc") == V{"abc"});
+        CHECK(literals("\\pLabc") == V{"abc"});
+        CHECK(literals("(x)\\12yz") == V{"yz"});
+        CHECK(literals("ab\\cJde") == V{"ab", "de"});
+        CHECK(literals("\\k<name>xyz") == V{"xyz"});
+    }
     SECTION("ordinary patterns keep their literals") {
         CHECK(literals("class.*Name") == V{"Name", "class"});
         CHECK(literals("^foo$") == V{"foo"});
