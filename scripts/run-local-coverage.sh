@@ -239,8 +239,14 @@ find "$BUILD_DIR" -name '*.gcda' -delete
 # Clang writes LLVM-format coverage notes that GCC's gcov cannot read ("version 'B11*', prefer
 # 'B62*'"), so a Clang build needs llvm-cov's gcov mode.
 GCOV_ARGS=()
-compiler_id="$("$MESON_BIN" introspect "$BUILD_DIR" --compilers 2>/dev/null |
-	python3 -c 'import json,sys; print(json.load(sys.stdin)["host"]["cpp"]["id"])' 2>/dev/null || true)"
+# Fail closed: an unreadable compiler id would otherwise fall through to GCC's gcov and
+# reproduce the format error on a Clang build.
+if ! compiler_id="$("$MESON_BIN" introspect "$BUILD_DIR" --compilers |
+	python3 -c 'import json,sys; print(json.load(sys.stdin)["host"]["cpp"]["id"])')" ||
+	[[ -z "$compiler_id" ]]; then
+	echo "[coverage] cannot read the C++ compiler of $BUILD_DIR from meson introspect" >&2
+	exit 1
+fi
 if [[ "$compiler_id" == "clang" ]]; then
 	llvm_cov="${YAMS_LLVM_COV:-$(command -v llvm-cov || true)}"
 	if [[ -z "$llvm_cov" ]]; then
