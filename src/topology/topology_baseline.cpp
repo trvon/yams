@@ -827,8 +827,10 @@ SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(
         }
     }
 
+    // Views into the artifacts' centroids: the indexes copy what they keep, so copying every
+    // centroid here only added a transient duplicate of the matrix to each rebuild.
     std::vector<std::size_t> centroidIds;
-    std::vector<std::vector<float>> centroids;
+    std::vector<std::span<const float>> centroids;
     centroidIds.reserve(artifacts.clusters.size());
     centroids.reserve(artifacts.clusters.size());
     for (std::size_t clusterIndex = 0; clusterIndex < artifacts.clusters.size(); ++clusterIndex) {

@@ -26,6 +26,9 @@ class StaticCosineAnnIndex final {
 public:
     static Result<std::shared_ptr<const StaticCosineAnnIndex>>
     build(std::span<const std::size_t> ids, std::span<const std::vector<float>> vectors);
+    /// Same as above over views, so a caller holding vectors elsewhere need not copy them.
+    static Result<std::shared_ptr<const StaticCosineAnnIndex>>
+    build(std::span<const std::size_t> ids, std::span<const std::span<const float>> vectors);
 
     ~StaticCosineAnnIndex();
     StaticCosineAnnIndex(const StaticCosineAnnIndex&) = delete;
