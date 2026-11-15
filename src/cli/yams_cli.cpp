@@ -871,7 +871,9 @@ Result<RepoIndex> YamsCLI::readRepoIndex(const RepoFiles& files) {
     // under the same prefix. Location metadata remains authoritative for aliases.
     query.metadataFilters.emplace_back("repo_root", root.generic_string());
     const auto snapshotStart = std::chrono::steady_clock::now();
-    auto snapshots = metadataRepo_->queryDocuments(query);
+    // Only path, hash, size and index time are needed; the grep-candidate projection reads those
+    // columns instead of hydrating full DocumentInfo rows.
+    auto snapshots = metadataRepo_->queryDocumentsForGrepCandidates(query);
     cli_perf_trace("freshness.snapshot_query",
                    std::chrono::duration_cast<std::chrono::microseconds>(
                        std::chrono::steady_clock::now() - snapshotStart));
@@ -882,7 +884,7 @@ Result<RepoIndex> YamsCLI::readRepoIndex(const RepoFiles& files) {
     RepoIndex index;
     const auto include = [&](const auto& doc) {
         const auto path = std::filesystem::path(doc.filePath).lexically_normal();
-        const auto indexed = doc.indexedTime.time_since_epoch().count();
+        const auto indexed = doc.indexedTime;
         const auto found = index.find(path);
         if (found == index.end() || indexed > found->second.indexed ||
             (indexed == found->second.indexed && doc.id > found->second.documentId))
@@ -893,7 +895,7 @@ Result<RepoIndex> YamsCLI::readRepoIndex(const RepoFiles& files) {
     if (!legacyPaths.empty()) {
         query.metadataFilters.clear();
         const auto legacyStart = std::chrono::steady_clock::now();
-        auto documents = metadataRepo_->queryDocuments(query);
+        auto documents = metadataRepo_->queryDocumentsForGrepCandidates(query);
         cli_perf_trace("freshness.legacy_query",
                        std::chrono::duration_cast<std::chrono::microseconds>(
                            std::chrono::steady_clock::now() - legacyStart));

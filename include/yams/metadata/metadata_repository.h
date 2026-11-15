@@ -281,6 +281,7 @@ struct GrepCandidateProjection {
     std::string sha256Hash;
     std::string mimeType;
     bool contentExtracted{false};
+    int64_t indexedTime{0}; ///< Seconds since the epoch, as stored in documents.indexed_time
 };
 
 struct MetadataValueCount {
