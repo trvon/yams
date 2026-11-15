@@ -269,11 +269,11 @@ struct ListDocumentProjection {
     ExtractionStatus extractionStatus{ExtractionStatus::Pending};
 };
 
-/// Lightweight projection for grep candidate discovery.
-/// Only the 6 fields grep actually uses — avoids fetching 15 unused columns
+/// Lightweight projection for grep candidate discovery and the CLI repo freshness check.
+/// Only the 7 fields those callers use — avoids fetching 14 unused columns
 /// (path_prefix, reverse_path, path_hash, parent_hash, path_depth, repair_status,
 /// repair_attempted_at, repair_attempts, extraction_error, file_name, file_extension,
-/// created_time, modified_time, indexed_time, extraction_status) per row.
+/// created_time, modified_time, extraction_status) per row.
 struct GrepCandidateProjection {
     int64_t id{0};
     std::string filePath;
@@ -427,8 +427,8 @@ public:
     findDocumentByExactPath(const std::string& path) = 0;
     virtual Result<std::vector<DocumentInfo>>
     queryDocuments(const DocumentQueryOptions& options) = 0;
-    /// Lightweight grep candidate query — returns only the 6 fields grep needs
-    /// (id, file_path, file_size, sha256_hash, mime_type, content_extracted).
+    /// Lightweight grep candidate query — returns only the 7 projected fields
+    /// (id, file_path, file_size, sha256_hash, mime_type, content_extracted, indexed_time).
     /// Falls back to queryDocuments() by default for implementations that don't override.
     virtual Result<std::vector<GrepCandidateProjection>>
     queryDocumentsForGrepCandidates(const DocumentQueryOptions& options) {
@@ -445,6 +445,7 @@ public:
             p.sha256Hash = std::move(doc.sha256Hash);
             p.mimeType = std::move(doc.mimeType);
             p.contentExtracted = doc.contentExtracted;
+            p.indexedTime = doc.indexedTime.time_since_epoch().count();
             out.push_back(std::move(p));
         }
         return out;
