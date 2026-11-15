@@ -234,7 +234,25 @@ fi
 find "$BUILD_DIR" -name '*.gcda' -delete
 "$MESON_BIN" test -C "$BUILD_DIR" "${TEST_ARGS[@]}"
 
+# A long-lived build dir keeps .gcno notes for sources that have since been deleted; gcov cannot
+# find their source, so gcovr is told to skip them (no_working_dir_found) instead of aborting.
+# Clang writes LLVM-format coverage notes that GCC's gcov cannot read ("version 'B11*', prefer
+# 'B62*'"), so a Clang build needs llvm-cov's gcov mode.
+GCOV_ARGS=()
+compiler_id="$("$MESON_BIN" introspect "$BUILD_DIR" --compilers 2>/dev/null |
+	python3 -c 'import json,sys; print(json.load(sys.stdin)["host"]["cpp"]["id"])' 2>/dev/null || true)"
+if [[ "$compiler_id" == "clang" ]]; then
+	llvm_cov="${YAMS_LLVM_COV:-$(command -v llvm-cov || true)}"
+	if [[ -z "$llvm_cov" ]]; then
+		echo "[coverage] the build uses clang but llvm-cov is not installed; install it or set YAMS_LLVM_COV" >&2
+		exit 1
+	fi
+	GCOV_ARGS=(--gcov-executable "$llvm_cov gcov")
+fi
+
 gcovr \
+	${GCOV_ARGS[@]+"${GCOV_ARGS[@]}"} \
+	--gcov-ignore-errors=no_working_dir_found \
 	--root "$REPO_ROOT" \
 	--object-directory "$BUILD_DIR" \
 	--exclude 'tests/.*' \
