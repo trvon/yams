@@ -248,3 +248,39 @@ TEST_CASE("CLI live grep keeps requested context at a global cap", "[cli][live]"
 }
 
 #endif // !_WIN32
+
+TEST_CASE("CLI freshness trusts size and mtime for files indexed after their last change",
+          "[cli][repo][freshness]") {
+    // Every repo-scoped `yams grep` hashed every tracked file in the repository (50-80 ms for
+    // 1,954 files) before searching. Like git, a file whose size matches and whose mtime is
+    // older than when it was indexed is unchanged; only the rest are read.
+    TempRepo repo;
+    repo.write("a.txt", "same");
+    REQUIRE(runCliProcess({"git", "-C", repo.root.string(), "add", "--", "a.txt"}).exitCode == 0);
+    const auto files = readRepoFiles(repo.root);
+    const auto path = files.root / "a.txt";
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    int hashed = 0;
+    const auto countingHash = [&](const RepoPath& file) {
+        ++hashed;
+        return contents(file);
+    };
+
+    // Indexed well after the last write, same size: trusted without hashing, even though the
+    // stored hash is deliberately wrong.
+    RepoIndex index{{path, {"stale-hash", now + 10, 1, 4}}};
+    CHECK_FALSE(compareRepoIndex(files, index, countingHash).stale());
+    CHECK(hashed == 0);
+
+    // A different size is read.
+    index[path].size = 5;
+    CHECK(compareRepoIndex(files, index, countingHash).changed.size() == 1);
+    CHECK(hashed == 1);
+
+    // Written after it was indexed: read, even at the same size.
+    index[path] = {"same", now - 60, 1, 4};
+    CHECK_FALSE(compareRepoIndex(files, index, countingHash).stale());
+    CHECK(hashed == 2);
+}

@@ -142,6 +142,7 @@ public:
     bool getQuiet() const { return quiet_; }
     const RetrievalOutputConfig& retrievalOutputConfig() const { return retrievalOutputConfig_; }
     Result<RepoIndex> readRepoIndex(const std::filesystem::path& root);
+    Result<RepoIndex> readRepoIndex(const RepoFiles& files);
     Result<RepoDiff> repoFreshness(const RepoFiles& files);
 
     /**
