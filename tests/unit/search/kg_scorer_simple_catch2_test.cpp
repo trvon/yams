@@ -112,7 +112,9 @@ TEST_CASE("SimpleKGScorer - ScoresEntityAndStructuralOverlap", "[search][kg_scor
     KGScoringConfig scfg;
     scfg.max_neighbors = 16;
     scfg.max_hops = 1;
-    scfg.budget = std::chrono::milliseconds(100);
+    // This case checks which candidates get scores, not the budget: 100 ms ran out before the
+    // second document on a loaded macOS runner.
+    scfg.budget = std::chrono::seconds(5);
     scorer->setConfig(scfg);
 
     // Score two candidates
