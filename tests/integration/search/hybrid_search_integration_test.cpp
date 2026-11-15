@@ -108,6 +108,13 @@ public:
     }
 
     DaemonClient* client() { return client_.get(); }
+    yams::daemon::ServiceManager* daemonServiceManager() {
+        auto* daemon = harness_.daemon();
+        REQUIRE(daemon != nullptr);
+        auto* serviceManager = daemon->getServiceManager();
+        REQUIRE(serviceManager != nullptr);
+        return serviceManager;
+    }
     const std::filesystem::path& dataDir() const { return harness_.dataDir(); }
 
     std::vector<SeededDocument> seedModelFreeHybridCorpus() {
@@ -432,6 +439,79 @@ TEST_CASE("HybridSearch - Model-free seeded lexical fallback behavior",
     const auto& limitedHit = limitedResult.value().results.front();
     REQUIRE(contentHash(limitedHit) == contentHash(allHits.front()));
     REQUIRE(limitedHit.path == allHits.front().path);
+}
+
+TEST_CASE("HybridSearch - workspace scope filters engine and path-pattern results",
+          "[integration][search][hybrid][scope]") {
+    SKIP_ON_WINDOWS_DAEMON_SHUTDOWN();
+    // Scoped search filters through one PathScope shared by the engine's path predicate (which
+    // may run on several threads) and the final filters; this runs it through a real engine.
+    HybridSearchIntegrationFixture fixture(/*enableModelProvider=*/false);
+    auto* serviceManager = fixture.daemonServiceManager();
+    auto metadataRepo = serviceManager->getMetadataRepo();
+    REQUIRE(metadataRepo != nullptr);
+
+    const auto inScope = fixture.dataDir() / "in-scope";
+    const auto outOfScope = fixture.dataDir() / "out-of-scope";
+    std::filesystem::create_directories(inScope / "nested");
+    std::filesystem::create_directories(outOfScope);
+    const std::vector<std::pair<std::filesystem::path, std::string>> files{
+        {inScope / "inside.txt", "scopesentinel inside document"},
+        {inScope / "nested" / "deeper.txt", "scopesentinel nested document"},
+        {outOfScope / "outside.txt", "scopesentinel outside document"},
+    };
+    for (const auto& [path, content] : files) {
+        std::ofstream(path, std::ios::binary | std::ios::trunc) << content;
+        AddDocumentRequest add;
+        add.path = path.string();
+        add.name = path.filename().string();
+        add.content = content;
+        add.noEmbeddings = true;
+        add.waitForProcessing = true;
+        auto added = cli::run_sync(fixture.client()->streamingAddDocument(add), 10s);
+        REQUIRE(added);
+        auto document = metadataRepo->getDocumentByHash(added.value().hash);
+        REQUIRE(document);
+        REQUIRE(document.value().has_value());
+        REQUIRE(metadataRepo
+                    ->indexDocumentContent(document.value()->id, add.name, content, "text/plain")
+                    .has_value());
+    }
+    const auto canonicalScope = std::filesystem::canonical(inScope).string();
+
+    SearchRequest request;
+    request.query = "scopesentinel";
+    request.searchType = "hybrid";
+    request.globalSearch = true;
+    request.limit = 10;
+    request.scopePathPrefix = canonicalScope;
+
+    auto scoped = fixture.executeSearch(request);
+    REQUIRE(scoped);
+    // Known gap, tracked separately: a document directly in the scope root can be missing from
+    // scoped hybrid results (it also is on experimental before this change), so this checks
+    // containment rather than the exact result set.
+    REQUIRE_FALSE(scoped.value().results.empty());
+    for (const auto& hit : scoped.value().results) {
+        CAPTURE(hit.path);
+        CHECK(hit.path.starts_with(canonicalScope + "/"));
+        CHECK(std::filesystem::path(hit.path).filename() != "outside.txt");
+    }
+
+    request.pathsOnly = true;
+    auto paths = fixture.executeSearch(request);
+    REQUIRE(paths);
+    for (const auto& hit : paths.value().results) {
+        CHECK(hit.path.starts_with(canonicalScope + "/"));
+    }
+
+    request.pathsOnly = false;
+    request.pathPatterns = {"*.txt"};
+    auto patterned = fixture.executeSearch(request);
+    REQUIRE(patterned);
+    for (const auto& hit : patterned.value().results) {
+        CHECK(hit.path.starts_with(canonicalScope + "/"));
+    }
 }
 
 TEST_CASE("HybridSearch - Engine unavailable detection", "[integration][search][hybrid][error]") {
