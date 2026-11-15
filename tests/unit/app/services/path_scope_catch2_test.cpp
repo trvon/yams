@@ -47,6 +47,20 @@ TEST_CASE("PathScope resolves symlinked directories like isPathWithinScope",
     }
     CHECK_FALSE(PathScope{(real / "sub").string()}.contains((temp.path() / "x.txt").string()));
 }
+
+TEST_CASE("PathScope rejects a symlinked directory that leads out of the root",
+          "[services][scope][symlink]") {
+    yams::test::TempDirGuard temp{"yams_path_scope_escape_"};
+    const auto base = fs::canonical(temp.path());
+    fs::create_directories(base / "root");
+    fs::create_directories(base / "outside");
+    std::ofstream(base / "outside" / "file.txt") << "x";
+    fs::create_directory_symlink(base / "outside", base / "root" / "link");
+
+    const auto doc = (base / "root" / "link" / "file.txt").string();
+    CHECK_FALSE(isPathWithinScope(doc, (base / "root").string()));
+    CHECK_FALSE(PathScope{(base / "root").string()}.contains(doc));
+}
 #endif
 
 TEST_CASE("PathScope resolves each directory once, not each document", "[services][scope]") {
@@ -58,5 +72,6 @@ TEST_CASE("PathScope resolves each directory once, not each document", "[service
                              std::to_string(i) + ".cpp");
         (void)scope.contains("/repo/src/daemon/f" + std::to_string(i) + ".cpp");
     }
-    CHECK(scope.resolvedDirectoryCount() == 3);
+    // Three outside directories plus the one inside the scope.
+    CHECK(scope.resolvedDirectoryCount() == 4);
 }
