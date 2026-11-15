@@ -401,6 +401,18 @@ public:
         return Error{ErrorCode::NotSupported, "grep trigram index unavailable"};
     }
     virtual Result<void> removeGrepTrigrams(int64_t /*documentId*/) { return {}; }
+    /// A document grep would scan whose bytes are not indexed at their current hash.
+    struct GrepTrigramPending {
+        int64_t documentId{0};
+        std::string sha256Hash;
+        int64_t fileSize{0};
+    };
+    /// Up to `limit` such documents of at most `maxBytes`, smallest first, skipping media and
+    /// binary types grep does not scan.
+    virtual Result<std::vector<GrepTrigramPending>> grepTrigramPending(std::size_t /*limit*/,
+                                                                       int64_t /*maxBytes*/) {
+        return std::vector<GrepTrigramPending>{};
+    }
     /// Indexed documents and the content hash each was indexed at. A document missing here, or
     /// covered at a different hash, must be scanned.
     virtual Result<std::unordered_map<int64_t, std::string>> grepTrigramCoverage() {
@@ -776,6 +788,8 @@ public:
     Result<void> indexGrepTrigrams(int64_t documentId, std::string_view sha256Hash,
                                    std::string_view bytes) override;
     Result<void> removeGrepTrigrams(int64_t documentId) override;
+    Result<std::vector<GrepTrigramPending>> grepTrigramPending(std::size_t limit,
+                                                               int64_t maxBytes) override;
     Result<std::unordered_map<int64_t, std::string>> grepTrigramCoverage() override;
     Result<std::optional<std::vector<int64_t>>>
     grepTrigramMatches(std::span<const std::string> literals) override;

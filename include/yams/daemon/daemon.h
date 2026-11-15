@@ -62,6 +62,9 @@ struct DaemonConfig {
     // plugins (e.g., ONNX embeddings) set this to true in their config.
     bool autoLoadPlugins = false;
     bool enableAutoRepair = true;
+    // Fill the grep trigram index in the background ([daemon] grep_trigram_index). Off leaves
+    // grep scanning every document, as before the index existed.
+    bool enableGrepTrigramIndex = true;
     bool useMockModelProvider = false;
     size_t autoRepairBatchSize = 32;
     bool autoRebuildOnDimMismatch = false;

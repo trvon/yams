@@ -1194,6 +1194,14 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'grep_trigram_indexer',
+    'sources': files('unit/daemon/grep_trigram_indexer_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'grep'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'session_watcher',
     'sources': files('unit/daemon/session_watcher_catch2_test.cpp'),
     'deps': test_deps,

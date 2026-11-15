@@ -142,6 +142,41 @@ Result<void> MetadataRepository::removeGrepTrigrams(int64_t documentId) {
     });
 }
 
+Result<std::vector<IMetadataRepository::GrepTrigramPending>>
+MetadataRepository::grepTrigramPending(std::size_t limit, int64_t maxBytes) {
+    if (!grepTrigramIndexAvailable() || limit == 0)
+        return std::vector<GrepTrigramPending>{};
+    // Media and binary types are skipped by grep; anything else it may scan is worth indexing.
+    // Indexing a document grep later skips costs only time; leaving out one it scans only
+    // means that document keeps being scanned.
+    return executeReadQuery<std::vector<GrepTrigramPending>>(
+        [&](Database& db) -> Result<std::vector<GrepTrigramPending>> {
+            YAMS_TRY_UNWRAP(stmt, db.prepare(R"(
+                SELECT d.id, d.sha256_hash, d.file_size FROM documents d
+                LEFT JOIN grep_trigram_coverage c ON c.document_id = d.id
+                WHERE (c.document_id IS NULL OR c.sha256_hash != d.sha256_hash)
+                  AND d.file_size <= ?
+                  AND d.mime_type NOT LIKE 'image/%' AND d.mime_type NOT LIKE 'video/%'
+                  AND d.mime_type NOT LIKE 'audio/%'
+                  AND d.mime_type NOT IN ('application/pdf', 'application/zip',
+                                          'application/x-tar', 'application/x-gzip',
+                                          'application/x-bzip2', 'application/octet-stream')
+                ORDER BY d.file_size ASC, d.id ASC
+                LIMIT ?
+            )"));
+            YAMS_TRY(stmt.bind(1, maxBytes));
+            YAMS_TRY(stmt.bind(2, static_cast<int64_t>(limit)));
+            std::vector<GrepTrigramPending> pending;
+            while (true) {
+                YAMS_TRY_UNWRAP(row, stmt.step());
+                if (!row)
+                    break;
+                pending.push_back({stmt.getInt64(0), stmt.getString(1), stmt.getInt64(2)});
+            }
+            return pending;
+        });
+}
+
 Result<std::unordered_map<int64_t, std::string>> MetadataRepository::grepTrigramCoverage() {
     if (!grepTrigramIndexAvailable())
         return std::unordered_map<int64_t, std::string>{};
