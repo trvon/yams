@@ -197,11 +197,17 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon starts repair service while provider-deg
     REQUIRE(startResult);
     startRunLoop();
 
-    REQUIRE(waitForCondition(5s, [&] {
-        return !daemon_->getState().readiness.modelProviderReady.load(std::memory_order_acquire);
+    // The run loop starts the repair service on its first tick in Ready or Degraded, so wait for
+    // that state before timing the start. The provider flag is false from the outset and cannot
+    // stand in for it: on a loaded runner init alone took 1.3 s of a 2 s budget.
+    REQUIRE(waitForCondition(10s, [&] {
+        const auto state = daemon_->getLifecycle().snapshot().state;
+        return state == LifecycleState::Ready || state == LifecycleState::Degraded;
     }));
+    REQUIRE_FALSE(daemon_->getState().readiness.modelProviderReady.load(std::memory_order_acquire));
+    // One idle tick (1 s) plus margin.
     REQUIRE(waitForCondition(
-        2s, [&] { return daemon_->getServiceManager()->getRepairServiceShared() != nullptr; }));
+        5s, [&] { return daemon_->getServiceManager()->getRepairServiceShared() != nullptr; }));
 }
 
 TEST_CASE_METHOD(DaemonFixture, "Daemon restores compatibility path environment",
