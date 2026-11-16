@@ -14,6 +14,11 @@ concurrency:
   # Keep main-branch history intact so slower matrix lanes still publish evidence.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # One Conan client for every workflow; also part of the Conan cache key so a
+  # cache written by one client version is never restored under another.
+  CONAN_VERSION: "2.30.0"
+
 jobs:
   warm:
     uses: ./.github/workflows/matrix-warm.yml
@@ -397,11 +402,12 @@ jobs:
             ~/.conan2/recipes
             ~/.conan2/metadata
             ~/.conan2/s
-          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
+          # Same Conan client and same os/arch suffix only: no cross-arch or
+          # cross-version fallback. Compiler upgrades need no key bump because
+          # host profiles carry the detected compiler.version (package_id).
+          key: conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
           restore-keys: |
-            conan2-${{ runner.os }}-${{ matrix.suffix }}-
-            conan2-${{ runner.os }}-linux-x86_64-
-            conan2-${{ runner.os }}-
+            conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-${{ matrix.suffix }}-
       - name: Conan cache diagnostics
         shell: bash
         run: |
@@ -421,7 +427,7 @@ jobs:
             ccache-${{ runner.os }}-${{ matrix.suffix }}-
             ccache-${{ runner.os }}-linux-x86_64-
             ccache-${{ runner.os }}-
-      - name: Install Conan (latest)
+      - name: Install Conan
         shell: bash
         run: |
           set -euo pipefail
@@ -441,7 +447,7 @@ jobs:
           fi
 
           "$VENV_PYTHON" -m pip install --upgrade pip
-          "$VENV_PYTHON" -m pip install --upgrade 'conan==2.21.*' 'meson==1.4.*' 'ninja==1.11.*'
+          "$VENV_PYTHON" -m pip install --upgrade "conan==${CONAN_VERSION}" 'meson==1.4.*' 'ninja==1.11.*'
           echo "$TOOL_BIN" >> "$GITHUB_PATH"
           export PATH="$TOOL_BIN:$PATH"
           conan --version
@@ -494,10 +500,11 @@ jobs:
       - name: Setup Conan Profile
         shell: bash
         run: |
+          # setup.sh/setup.ps1 use -pr:b ./conan/profiles/build, which includes
+          # this detected default and pins the build-context cppstd.
           conan profile detect --force
-          sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
-          echo "Conan profile configured:" >&2
-          conan profile show >&2
+          echo "Conan build profile:" >&2
+          conan profile show -pr ./conan/profiles/build >&2
 
       - name: Detect clang version (log only)
         shell: bash
