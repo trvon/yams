@@ -745,7 +745,12 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
 
 awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_connection() {
     const auto create_start = std::chrono::steady_clock::now();
-    auto io_guard = GlobalIOContext::instance().acquire_operation_guard();
+    // This coroutine runs on the IO threads, which a pending reset() needs to finish the
+    // creations it waits for: fail fast rather than block one of them on the lock.
+    auto io_guard = GlobalIOContext::instance().try_acquire_operation_guard();
+    if (!io_guard.owns_lock()) {
+        co_return Error{ErrorCode::SystemShutdown, "Client IO is being reset"};
+    }
 
     struct PendingCreateGuard {
         AsioConnectionPool& pool;
