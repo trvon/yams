@@ -17,7 +17,7 @@ concurrency:
 env:
   # One Conan client for every workflow; also part of the Conan cache key so a
   # cache written by one client version is never restored under another.
-  CONAN_VERSION: "2.30.0"
+  CONAN_VERSION: "2.34.0"
 
 jobs:
   warm:
