@@ -94,7 +94,7 @@ provision_main() {
 	# Conan via pip (not in Arch repos at a stable version)
 	if ! command -v conan >/dev/null 2>&1; then
 		python -m venv /opt/venv 2>/dev/null || true
-		/opt/venv/bin/pip install --no-cache-dir 'conan<3'
+		/opt/venv/bin/pip install --no-cache-dir "conan==${CONAN_VERSION:-2.34.0}"
 		/opt/venv/bin/pip install --no-cache-dir --upgrade meson ninja
 	fi
 

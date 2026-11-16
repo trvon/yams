@@ -523,6 +523,7 @@ jobs:
 
           docker build --platform "${docker_platform}" \
             --build-arg "ARCH_BASE_IMAGE=${{ matrix.arch_base_image }}" \
+            --build-arg "CONAN_VERSION=${CONAN_VERSION}" \
             -t yams/ci-arch:latest -f docker/local-ci/arch-package.Dockerfile .
 
           mkdir -p "${build_dir}"

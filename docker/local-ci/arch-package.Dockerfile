@@ -49,9 +49,11 @@ RUN set -euxo pipefail; \
     # Clean package cache to keep image size manageable
     yes | pacman -Scc 2>/dev/null || true
 
-# Install Conan via pip (not available as an Arch package at a stable version).
+# Install Conan via pip (not available as an Arch package at a stable version). Pinned like
+# CONAN_VERSION in .github/workflows/*.yml; release.yml passes its value as a build arg.
+ARG CONAN_VERSION=2.34.0
 RUN python -m venv /opt/venv && \
-    /opt/venv/bin/pip install --no-cache-dir 'conan<3' && \
+    /opt/venv/bin/pip install --no-cache-dir "conan==${CONAN_VERSION}" && \
     /opt/venv/bin/pip install --no-cache-dir --upgrade meson ninja
 
 # Ensure venv tools (conan, meson, ninja) are on PATH
