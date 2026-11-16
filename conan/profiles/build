@@ -1,0 +1,8 @@
+{# Build-context profile (-pr:b) for setup.sh, setup.ps1 and CI.            #}
+{# It layers on the cache's detected `default` profile (run                #}
+{# `conan profile detect` once) and pins the C++ standard for build-context #}
+{# tools, replacing the old `sed` edits of ~/.conan2/profiles/default.      #}
+include(default)
+
+[settings]
+compiler.cppstd=20

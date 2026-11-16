@@ -1,9 +1,14 @@
+{# compiler.version and arch come from the clang++ on PATH, so package_id #}
+{# follows the real toolchain (clang 18 on Ubuntu runners, newer on Arch) #}
+{# and a compiler upgrade never reuses stale binaries. setup.sh overrides #}
+{# arch (YAMS_CONAN_ARCH) and compiler.cppstd (YAMS_CPPSTD) per build;    #}
+{# cppstd=20 here is the default for direct `conan install -pr:h` users.  #}
+{% set compiler, version, compiler_exe = detect_api.detect_clang_compiler("clang++") %}
 [settings]
 os=Linux
-arch=x86_64
+arch={{ detect_api.detect_arch() }}
 compiler=clang
-compiler.version=18
-compiler.libcxx=libstdc++11
+compiler.version={{ detect_api.default_compiler_version(compiler, version) }}
 compiler.libcxx=libstdc++11
 compiler.cppstd=20
 build_type=Release
