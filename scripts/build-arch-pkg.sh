@@ -284,16 +284,11 @@ build_main() {
 
 	# Arch's toolchain (Clang 23, libstdc++ 16.1, CMake 4.5) breaks CMake's IPO check while Conan
 	# builds oneTBB from source: check_ipo_supported fails with "Cannot find source file:
-	# /include/c++/16.1.1/bits/std.cc". TBB_ENABLE_IPO=OFF skips that check; oneTBB is built
-	# without link-time optimization, and YAMS's own build is unchanged.
-	local conan_bin conan_home
-	conan_bin="$(command -v conan || echo /opt/venv/bin/conan)"
-	conan_home="$("${conan_bin}" config home 2>/dev/null || echo "${HOME}/.conan2")"
-	mkdir -p "${conan_home}"
-	if ! grep -q "TBB_ENABLE_IPO" "${conan_home}/global.conf" 2>/dev/null; then
-		echo "tools.cmake.cmaketoolchain:extra_variables={'TBB_ENABLE_IPO': 'OFF'}" \
-			>>"${conan_home}/global.conf"
-	fi
+	# /include/c++/16.1.1/bits/std.cc". The onetbb recipe writes TBB_ENABLE_IPO itself from its
+	# interprocedural_optimization option (default True), so a toolchain variable cannot override
+	# it; the recipe option has to. oneTBB is then built without link-time optimization, and
+	# YAMS's own build is unchanged.
+	export YAMS_CONAN_EXTRA_OPTIONS="${YAMS_CONAN_EXTRA_OPTIONS:-} -o onetbb/*:interprocedural_optimization=False"
 
 	# ONNX Runtime is opt-in in setup.sh; the Arch packages keep shipping the ONNX plugin
 	# (and ONNX-backed Glint) like the other release targets.

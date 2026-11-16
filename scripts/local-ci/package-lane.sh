@@ -50,6 +50,11 @@ build_arch_lane() {
 	local arch_platform="${ARCH_DOCKER_PLATFORM:-linux/amd64}"
 	log "building cached Arch builder image ${ARCH_IMAGE} (${arch_platform})"
 	arch_build_args=(-f "${ARCH_DOCKERFILE}" -t "${ARCH_IMAGE}")
+	# archlinux/archlinux is amd64-only. For linux/arm64 (natively or under QEMU binfmt), pass the
+	# Arch Linux ARM image the release workflow pins, e.g.
+	#   ARCH_DOCKER_PLATFORM=linux/arm64 ARCH_BASE_IMAGE=ghcr.io/menci/archlinuxarm@sha256:... \
+	#     bash scripts/local-ci/package-lane.sh --only arch
+	[ -n "${ARCH_BASE_IMAGE:-}" ] && arch_build_args+=(--build-arg "ARCH_BASE_IMAGE=${ARCH_BASE_IMAGE}")
 	[ "${NO_CACHE}" -eq 1 ] && arch_build_args+=(--no-cache)
 	arch_build_args+=("${REPO_ROOT}")
 	docker build --platform="${arch_platform}" "${arch_build_args[@]}"

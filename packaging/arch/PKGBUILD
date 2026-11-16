@@ -67,10 +67,10 @@ build() {
     cp .conan/global.conf "${HOME}/.conan2/global.conf" 2>/dev/null || true
     # Arch's toolchain (Clang 23, libstdc++ 16.1, CMake 4.5) breaks CMake's IPO check while
     # Conan builds oneTBB from source ("Cannot find source file: /include/c++/16.1.1/bits/std.cc"
-    # in check_ipo_supported). TBB_ENABLE_IPO=OFF skips that check; oneTBB is then built without
-    # link-time optimization, and YAMS's own build is unchanged.
-    echo "tools.cmake.cmaketoolchain:extra_variables={'TBB_ENABLE_IPO': 'OFF'}" \
-        >> "${HOME}/.conan2/global.conf"
+    # in check_ipo_supported). The onetbb recipe sets TBB_ENABLE_IPO from its own
+    # interprocedural_optimization option, so only that option turns the check off. oneTBB is
+    # then built without link-time optimization, and YAMS's own build is unchanged.
+    export YAMS_CONAN_EXTRA_OPTIONS="${YAMS_CONAN_EXTRA_OPTIONS:-} -o onetbb/*:interprocedural_optimization=False"
 
     # Build using setup.sh flow
     export YAMS_CONAN_HOST_PROFILE="./conan/profiles/host-linux-clang"
