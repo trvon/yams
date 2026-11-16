@@ -128,8 +128,32 @@ arch_label() {
 	esac
 }
 
+# Base stable version a nightly or weekly follows: BASE_VERSION from CI, else the newest v* tag.
+base_version() {
+	if [ -n "${BASE_VERSION:-}" ]; then
+		printf '%s\n' "${BASE_VERSION#v}"
+		return
+	fi
+	local tag
+	tag="$(git -c safe.directory='*' -C "${REPO_ROOT}" describe --tags --abbrev=0 --match='v[0-9]*' 2>/dev/null || true)"
+	printf '%s\n' "${tag:-v0.0.0}" | sed 's/^v//'
+}
+
+# pacman's vercmp ranks any version that starts with a letter below every numeric one, so a
+# bare "nightly_..." pkgver sorts under 0.0.1 and pacman prefers stable. Prefix the base version,
+# as the deb (0.22.1+nightly.D+gH) and rpm builds do: 0.22.1 < 0.22.1.nightly.D.gH < 0.23.0, and
+# later builds of either channel sort above earlier ones.
 normalized_pkgver() {
-	printf '%s\n' "${1//-/_}"
+	local v="$1"
+	if [[ "${v}" =~ ^nightly-([0-9]{8})-([0-9a-fA-F]{7,40})$ ]]; then
+		printf '%s.nightly.%s.g%s\n' "$(base_version)" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2],,}"
+		return
+	fi
+	if [[ "${v}" =~ ^weekly-([0-9]{4}w[0-9]{2})-([0-9a-fA-F]{7,40})$ ]]; then
+		printf '%s.weekly.%s.g%s\n' "$(base_version)" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2],,}"
+		return
+	fi
+	printf '%s\n' "${v//-/_}"
 }
 
 package_release() {

@@ -533,6 +533,7 @@ jobs:
             -w /workspace \
             -e RELEASE_CHANNEL="${channel}" \
             -e GIT_REF="${git_ref_value}" \
+            -e BASE_VERSION="${{ needs.resolve-release.outputs.base_version }}" \
             -e BUILD_DIR="${build_dir}" \
             -e YAMS_BUILD_DIR="${meson_build_dir}" \
             -e HOST_UID=0 \
