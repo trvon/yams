@@ -1,0 +1,30 @@
+# clice configuration (https://github.com/clice-io/clice); mirrors .clangd.
+# Commands come from the Debug build; run ./setup.sh Debug first.
+
+[[rules]]
+patterns = ["**"]
+compile_commands = ["build/debug"]
+# Sanitizer, coverage, debug-info and LTO flags do not change what the code means.
+remove = [
+    "-fsanitize=*",
+    "-fno-sanitize-recover=*",
+    "-fprofile-*",
+    "-fcoverage-*",
+    "-g*",
+    "-flto*",
+    "-Werror",
+    "-fplugin=*",
+]
+
+# Vendored code: compile it when opened, but keep it out of the background index and lint.
+[[rules]]
+patterns = ["third_party/**", "external/**", "build*/**"]
+background_index = false
+lint = false
+format = false
+
+# symspell is maintained here; index it like first-party code.
+[[rules]]
+patterns = ["third_party/symspell/**"]
+background_index = true
+lint = true
