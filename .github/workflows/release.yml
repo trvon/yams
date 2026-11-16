@@ -29,7 +29,7 @@ permissions:
 env:
   # One Conan client for every workflow; also part of the Conan cache key so a
   # cache written by one client version is never restored under another.
-  CONAN_VERSION: "2.30.0"
+  CONAN_VERSION: "2.34.0"
 
 jobs:
   resolve-release:
@@ -523,6 +523,7 @@ jobs:
 
           docker build --platform "${docker_platform}" \
             --build-arg "ARCH_BASE_IMAGE=${{ matrix.arch_base_image }}" \
+            --build-arg "CONAN_VERSION=${CONAN_VERSION}" \
             -t yams/ci-arch:latest -f docker/local-ci/arch-package.Dockerfile .
 
           mkdir -p "${build_dir}"
@@ -533,6 +534,7 @@ jobs:
             -w /workspace \
             -e RELEASE_CHANNEL="${channel}" \
             -e GIT_REF="${git_ref_value}" \
+            -e BASE_VERSION="${{ needs.resolve-release.outputs.base_version }}" \
             -e BUILD_DIR="${build_dir}" \
             -e YAMS_BUILD_DIR="${meson_build_dir}" \
             -e HOST_UID=0 \

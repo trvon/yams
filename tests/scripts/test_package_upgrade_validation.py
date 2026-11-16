@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 CHECKS = ROOT / "scripts/local-ci/package-validate-checks.sh"
 BUILDER = ROOT / "scripts/build-deb.sh"
+ARCH_BUILDER = ROOT / "scripts/build-arch-pkg.sh"
 
 
 def shell(source: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -63,6 +64,48 @@ class PackageVersions(unittest.TestCase):
             self.skipTest("Debian comparator unavailable")
         self.assertEqual(shell(f'dpkg --compare-versions "{a}" lt "{b}"').returncode, 0)
         self.assertEqual(shell(f'dpkg --compare-versions "{b}" lt 0.20.6').returncode, 0)
+
+
+class ArchPackageVersions(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        if int(shell("printf '%s' \"${BASH_VERSINFO[0]}\"").stdout) < 4:
+            raise unittest.SkipTest("builder requires Bash 4+; run this suite on Linux")
+        source = ARCH_BUILDER.read_text()
+        cls.functions = source[source.index("base_version() {"):source.index("package_release() {")]
+
+    def pkgver(self, value: str, base: str = "0.20.5") -> str:
+        result = shell(f'REPO_ROOT="{ROOT}"\n' + self.functions + f'\nnormalized_pkgver "{value}"',
+                       {"BASE_VERSION": base})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def assert_older(self, older: str, newer: str) -> None:
+        if not shutil.which("vercmp"):
+            self.skipTest("vercmp (pacman) not installed")
+        result = shell(f'vercmp "{older}-1" "{newer}-1"')
+        self.assertEqual(result.stdout.strip(), "-1", f"{older} should sort before {newer}")
+
+    def test_stable_and_prerelease_versions(self) -> None:
+        self.assertEqual(self.pkgver("0.20.5"), "0.20.5")
+        self.assertEqual(self.pkgver("0.20.5-rc1"), "0.20.5_rc1")
+
+    def test_nightly_follows_base_stable(self) -> None:
+        version = self.pkgver("nightly-20261005-5406C399")
+        self.assertEqual(version, "0.20.5.nightly.20261005.g5406c399")
+        self.assert_older("0.20.5", version)
+        self.assert_older(version, "0.20.6")
+
+    def test_weekly_follows_base_stable(self) -> None:
+        version = self.pkgver("weekly-2026w41-5406c399")
+        self.assertEqual(version, "0.20.5.weekly.2026w41.g5406c399")
+        self.assert_older("0.20.5", version)
+
+    def test_later_nightly_upgrades_earlier_and_legacy_names(self) -> None:
+        newer = self.pkgver("nightly-20261006-5406c399")
+        self.assert_older(self.pkgver("nightly-20261005-ffffffff"), newer)
+        # Nightlies published before this scheme used a bare "nightly_" pkgver.
+        self.assert_older("nightly_20261110_f6ec38e4", newer)
 
 
 class UpgradeOracle(unittest.TestCase):

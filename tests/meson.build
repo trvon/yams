@@ -1489,6 +1489,14 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'transport_disconnect',
+    'sources': files('unit/daemon/transport_disconnect_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'client'],
+    'timeout': 30,
+  }]
+
+  catch2_test_table += [{
     'name': 'asio_connection_pool',
     'sources': files('unit/daemon/asio_connection_pool_catch2_test.cpp'),
     'deps': test_deps,

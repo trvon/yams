@@ -17,6 +17,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include "transport_disconnect.h"
+
 namespace yams::daemon {
 
 using boost::asio::as_tuple;
@@ -25,19 +27,6 @@ namespace this_coro = boost::asio::this_coro;
 
 namespace {
 constexpr auto kSocketCloseDispatchWait = std::chrono::milliseconds{500};
-
-bool isExpectedDisconnectError(const boost::system::error_code& ec) {
-    if (ec == boost::asio::error::broken_pipe || ec == boost::asio::error::connection_reset ||
-        ec == boost::asio::error::eof) {
-        return true;
-    }
-
-    const auto msg = ec.message();
-    return msg.find("Broken pipe") != std::string::npos ||
-           msg.find("Connection reset") != std::string::npos ||
-           msg.find("End of file") != std::string::npos || msg.find("EPIPE") != std::string::npos ||
-           msg.find("ECONNRESET") != std::string::npos;
-}
 
 std::atomic<bool>& callerExecutorsJoined() {
     static std::atomic<bool> joined{false};
@@ -296,7 +285,7 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
 
         auto& [write_ec, result] = std::get<0>(write_result);
         if (write_ec) {
-            if (isExpectedDisconnectError(write_ec)) {
+            if (detail::isExpectedDisconnectError(write_ec)) {
                 spdlog::debug(
                     "AsioConnection::async_write_frame: peer disconnected during write: {}",
                     write_ec.message());
@@ -308,7 +297,7 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
             co_await boost::asio::dispatch(strand, use_awaitable);
             writing = false;
             alive = false;
-            co_return Error{ErrorCode::NetworkError, write_ec.message()};
+            co_return Error{ErrorCode::NetworkError, detail::describeWriteError(write_ec)};
         }
         if (result != batched) {
             spdlog::error("AsioConnection::async_write_frame: short write {} != {}", result,

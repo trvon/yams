@@ -94,7 +94,7 @@ provision_main() {
 	# Conan via pip (not in Arch repos at a stable version)
 	if ! command -v conan >/dev/null 2>&1; then
 		python -m venv /opt/venv 2>/dev/null || true
-		/opt/venv/bin/pip install --no-cache-dir 'conan<3'
+		/opt/venv/bin/pip install --no-cache-dir "conan==${CONAN_VERSION:-2.34.0}"
 		/opt/venv/bin/pip install --no-cache-dir --upgrade meson ninja
 	fi
 
@@ -128,8 +128,32 @@ arch_label() {
 	esac
 }
 
+# Base stable version a nightly or weekly follows: BASE_VERSION from CI, else the newest v* tag.
+base_version() {
+	if [ -n "${BASE_VERSION:-}" ]; then
+		printf '%s\n' "${BASE_VERSION#v}"
+		return
+	fi
+	local tag
+	tag="$(git -c safe.directory='*' -C "${REPO_ROOT}" describe --tags --abbrev=0 --match='v[0-9]*' 2>/dev/null || true)"
+	printf '%s\n' "${tag:-v0.0.0}" | sed 's/^v//'
+}
+
+# pacman's vercmp ranks any version that starts with a letter below every numeric one, so a
+# bare "nightly_..." pkgver sorts under 0.0.1 and pacman prefers stable. Prefix the base version,
+# as the deb (0.22.1+nightly.D+gH) and rpm builds do: 0.22.1 < 0.22.1.nightly.D.gH < 0.23.0, and
+# later builds of either channel sort above earlier ones.
 normalized_pkgver() {
-	printf '%s\n' "${1//-/_}"
+	local v="$1"
+	if [[ "${v}" =~ ^nightly-([0-9]{8})-([0-9a-fA-F]{7,40})$ ]]; then
+		printf '%s.nightly.%s.g%s\n' "$(base_version)" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2],,}"
+		return
+	fi
+	if [[ "${v}" =~ ^weekly-([0-9]{4}w[0-9]{2})-([0-9a-fA-F]{7,40})$ ]]; then
+		printf '%s.weekly.%s.g%s\n' "$(base_version)" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2],,}"
+		return
+	fi
+	printf '%s\n' "${v//-/_}"
 }
 
 package_release() {
@@ -260,16 +284,11 @@ build_main() {
 
 	# Arch's toolchain (Clang 23, libstdc++ 16.1, CMake 4.5) breaks CMake's IPO check while Conan
 	# builds oneTBB from source: check_ipo_supported fails with "Cannot find source file:
-	# /include/c++/16.1.1/bits/std.cc". TBB_ENABLE_IPO=OFF skips that check; oneTBB is built
-	# without link-time optimization, and YAMS's own build is unchanged.
-	local conan_bin conan_home
-	conan_bin="$(command -v conan || echo /opt/venv/bin/conan)"
-	conan_home="$("${conan_bin}" config home 2>/dev/null || echo "${HOME}/.conan2")"
-	mkdir -p "${conan_home}"
-	if ! grep -q "TBB_ENABLE_IPO" "${conan_home}/global.conf" 2>/dev/null; then
-		echo "tools.cmake.cmaketoolchain:extra_variables={'TBB_ENABLE_IPO': 'OFF'}" \
-			>>"${conan_home}/global.conf"
-	fi
+	# /include/c++/16.1.1/bits/std.cc". The onetbb recipe writes TBB_ENABLE_IPO itself from its
+	# interprocedural_optimization option (default True), so a toolchain variable cannot override
+	# it; the recipe option has to. oneTBB is then built without link-time optimization, and
+	# YAMS's own build is unchanged.
+	export YAMS_CONAN_EXTRA_OPTIONS="${YAMS_CONAN_EXTRA_OPTIONS:-} -o onetbb/*:interprocedural_optimization=False"
 
 	# ONNX Runtime is opt-in in setup.sh; the Arch packages keep shipping the ONNX plugin
 	# (and ONNX-backed Glint) like the other release targets.
