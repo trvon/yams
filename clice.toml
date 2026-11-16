@@ -16,15 +16,17 @@ remove = [
     "-fplugin=*",
 ]
 
+# clice takes each setting from the first rule that sets it, so the symspell exception comes
+# before the vendored-code rule. symspell is maintained here; treat it as first-party code.
+[[rules]]
+patterns = ["third_party/symspell/**"]
+background_index = true
+lint = true
+format = true
+
 # Vendored code: compile it when opened, but keep it out of the background index and lint.
 [[rules]]
 patterns = ["third_party/**", "external/**", "build*/**"]
 background_index = false
 lint = false
 format = false
-
-# symspell is maintained here; index it like first-party code.
-[[rules]]
-patterns = ["third_party/symspell/**"]
-background_index = true
-lint = true
