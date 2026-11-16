@@ -28,6 +28,11 @@ public:
 
     std::shared_lock<std::shared_mutex> acquire_operation_guard();
 
+    /// Like acquire_operation_guard(), but returns an unowned lock instead of waiting while a
+    /// reset() is in progress. Code running on the IO threads must use this: reset() waits for
+    /// in-flight operations that need those threads, so blocking one of them can deadlock.
+    std::shared_lock<std::shared_mutex> try_acquire_operation_guard();
+
     /// Fully restart the io_context threads.
     /// Use this after stopping a daemon to ensure the io_context is ready for new connections.
     /// Unlike reset() which only closes connections, restart() stops and recreates all threads.
@@ -42,6 +47,9 @@ public:
 
 #if YAMS_DAEMON_TEST_HOOKS_ENABLED
     YAMS_DAEMON_TEST_HOOK static void testing_set_destroyed(bool destroyed) noexcept;
+    /// Hold the operation lock as reset() does, until testing_end_reset().
+    YAMS_DAEMON_TEST_HOOK static void testing_begin_reset();
+    YAMS_DAEMON_TEST_HOOK static void testing_end_reset() noexcept;
 #endif
 
 private:
@@ -55,6 +63,7 @@ private:
     std::vector<std::thread> io_threads_;
     std::mutex restart_mutex_;
     std::shared_mutex operation_mutex_;
+    std::atomic<int> resets_in_progress_{0};
     std::once_flag init_flag_;
     std::atomic<bool> destroyed_{false};
 

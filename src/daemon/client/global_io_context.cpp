@@ -137,6 +137,13 @@ void GlobalIOContext::reset() {
 #endif
 
     auto& ctx = instance();
+    // Announce the reset before waiting for the lock, so operations starting on the IO threads
+    // fail fast instead of queueing behind it (see try_acquire_operation_guard).
+    ctx.resets_in_progress_.fetch_add(1, std::memory_order_acq_rel);
+    struct ResetMark {
+        std::atomic<int>& count;
+        ~ResetMark() { count.fetch_sub(1, std::memory_order_acq_rel); }
+    } resetMark{ctx.resets_in_progress_};
     std::unique_lock<std::shared_mutex> op_lock(ctx.operation_mutex_);
 
     // Close all connections and clear pools
@@ -147,6 +154,21 @@ void GlobalIOContext::reset() {
 
 std::shared_lock<std::shared_mutex> GlobalIOContext::acquire_operation_guard() {
     return std::shared_lock<std::shared_mutex>(operation_mutex_);
+}
+
+std::shared_lock<std::shared_mutex> GlobalIOContext::try_acquire_operation_guard() {
+    // Never block: a shared_mutex may make new readers wait behind a pending writer (libc++,
+    // Windows SRW locks), and the writer, reset(), waits for operations that need this thread.
+    std::shared_lock<std::shared_mutex> lock(operation_mutex_, std::try_to_lock);
+    while (!lock.owns_lock()) {
+        if (resets_in_progress_.load(std::memory_order_acquire) > 0) {
+            return {};
+        }
+        // try_lock_shared may fail spuriously; without a reset pending the lock is free.
+        std::this_thread::yield();
+        lock = std::shared_lock<std::shared_mutex>(operation_mutex_, std::try_to_lock);
+    }
+    return lock;
 }
 
 void GlobalIOContext::restart() {
@@ -342,6 +364,18 @@ bool GlobalIOContext::is_destroyed() noexcept {
 }
 
 #if YAMS_DAEMON_TEST_HOOKS_ENABLED
+void GlobalIOContext::testing_begin_reset() {
+    auto& ctx = instance();
+    ctx.resets_in_progress_.fetch_add(1, std::memory_order_acq_rel);
+    ctx.operation_mutex_.lock();
+}
+
+void GlobalIOContext::testing_end_reset() noexcept {
+    auto& ctx = instance();
+    ctx.operation_mutex_.unlock();
+    ctx.resets_in_progress_.fetch_sub(1, std::memory_order_acq_rel);
+}
+
 void GlobalIOContext::testing_set_destroyed(bool destroyed) noexcept {
     if (g_global_io_context_ptr) {
         g_global_io_context_ptr->destroyed_.store(destroyed, std::memory_order_release);

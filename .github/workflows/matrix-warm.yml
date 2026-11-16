@@ -42,6 +42,11 @@ on:
         type: string
         default: ""
 
+env:
+  # One Conan client for every workflow; also part of the Conan cache key so a
+  # cache written by one client version is never restored under another.
+  CONAN_VERSION: "2.30.0"
+
 jobs:
   warm:
     name: Warm Conan & ccache (${{ matrix.suffix }})
@@ -128,11 +133,12 @@ jobs:
             ~/.conan2/recipes
             ~/.conan2/metadata
             ~/.conan2/s
-          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
+          # Same Conan client and same os/arch suffix only: no cross-arch or
+          # cross-version fallback. Compiler upgrades need no key bump because
+          # host profiles carry the detected compiler.version (package_id).
+          key: conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
           restore-keys: |
-            conan2-${{ runner.os }}-${{ matrix.suffix }}-
-            conan2-${{ runner.os }}-linux-x86_64-
-            conan2-${{ runner.os }}-
+            conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-${{ matrix.suffix }}-
 
       - name: Restore ccache (warm)
         if: github.actor != 'nektos/act'
@@ -168,7 +174,7 @@ jobs:
             fi
           fi
           "$VENV_PYTHON" -m pip install --upgrade pip
-          "$VENV_PYTHON" -m pip install --upgrade 'conan==2.21.*' 'meson==1.4.*' 'ninja==1.11.*'
+          "$VENV_PYTHON" -m pip install --upgrade "conan==${CONAN_VERSION}" 'meson==1.4.*' 'ninja==1.11.*'
           echo "$TOOL_BIN" >> "$GITHUB_PATH"
           export PATH="$TOOL_BIN:$PATH"
           conan --version
@@ -181,14 +187,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # ./conan/profiles/build includes this detected default and pins
+          # the build-context cppstd (replaces the old sed edits).
           conan profile detect --force
-          # Use C++20 instead of C++23 to avoid pdfium compilation issues
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            sed -i '' 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
-          else
-            sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
-          fi
-          conan profile show
+          conan profile show -pr:h "${{ matrix.conan_host_profile }}" -pr:b ./conan/profiles/build
 
       - name: Pin conancenter to v2 index
         shell: bash
@@ -237,12 +239,11 @@ jobs:
           fi
           conan install . \
             -of build/warm-${{ inputs.build_type }} \
-            -pr:b=default \
+            -pr:b=./conan/profiles/build \
             -pr:h="${{ matrix.conan_host_profile }}" \
             -s build_type=${{ inputs.build_type }} \
             -s:h arch=${{ matrix.conan_arch }} \
-            -o "sqlite3/*:fts5=True" \
-            -o "yams/*:enable_onnx=${ONNX}" \
+            -o "&:enable_onnx=${ONNX}" \
             --build=missing
 
       - name: Populate ccache with source compilation

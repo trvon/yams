@@ -4,7 +4,10 @@ import subprocess
 
 from conan import ConanFile
 from conan.tools.build import check_min_cppstd, cross_building
+from conan.tools.cmake import CMakeDeps
+from conan.tools.gnu import PkgConfigDeps
 from conan.tools.layout import basic_layout
+from conan.tools.meson import MesonToolchain
 
 
 # type: ignore[assignment,attr-defined,import-error]
@@ -66,26 +69,61 @@ class YamsConan(ConanFile):
         "enable_profiling": False,
         "enable_onnx": False,  # deprecated; opt in with setup.sh --with-onnx
         "enable_re2": True,
+        # Dependency options that apply on every platform and option set.
+        # Conditional ones (mobile, ONNX, Tracy) stay in configure().
+        "sqlite3/*:enable_fts5": True,
+        "sqlite3/*:enable_json1": True,
+        "sqlite3/*:enable_rtree": True,
+        "sqlite3/*:omit_load_extension": False,
+        "libcurl/*:with_ssl": "openssl",
+        "libcurl/*:with_zlib": True,
+        "libcurl/*:shared": False,
+        "openssl/*:shared": False,
+        "libarchive/*:shared": False,
+        "libarchive/*:with_acl": False,  # Avoid libacl link issues on Linux CI
+        "taglib/*:shared": False,
+        "spdlog/*:header_only": False,
+        # YAMS uses Boost.Asio (header-only) plus the linked system/thread
+        # modules on every platform. Disable the unrelated compiled Boost
+        # libraries everywhere: desktop builds no longer compile ~20 unused
+        # components, and mobile cross-builds avoid platform-specific ones like
+        # boost.context assembly or locale/iconv stacks.
+        **{
+            f"boost/*:{boost_opt}": True
+            for boost_opt in (
+                "without_cobalt",
+                "without_context",
+                "without_contract",
+                "without_coroutine",
+                "without_fiber",
+                "without_graph",
+                "without_iostreams",
+                "without_json",
+                "without_locale",
+                "without_log",
+                "without_math",
+                "without_nowide",
+                "without_program_options",
+                "without_random",
+                "without_regex",
+                "without_serialization",
+                "without_stacktrace",
+                "without_test",
+                "without_type_erasure",
+                "without_url",
+                "without_wave",
+            )
+        },
     }
-
-    generators = ("MesonToolchain", "PkgConfigDeps", "CMakeDeps")
 
     def requirements(self):
         # Core dependencies
         self.requires("spdlog/1.13.0")
         self.requires("cli11/2.4.1")
         self.requires("nlohmann_json/3.11.3")
-        # Force sqlite3 build from source with FTS5 enabled
-        self.requires(
-            "sqlite3/3.44.2",
-            options={
-                "enable_fts5": True,
-                "enable_json1": True,
-                "enable_rtree": True,
-                "omit_load_extension": False,
-            },
-            force=True,  # Force rebuild with our options
-        )
+        # force=True pins this version over any transitive sqlite3 requirement.
+        # FTS5/JSON1/RTREE options live in default_options.
+        self.requires("sqlite3/3.44.2", force=True)
         self.requires("zlib/1.3.1")
         self.requires("zstd/1.5.5")
         if self.settings.os not in ["iOS", "Android"]:  # type: ignore
@@ -108,19 +146,11 @@ class YamsConan(ConanFile):
             # Keep in sync with conan/onnxruntime recipe.
             # DirectML NuGet releases can lag behind GitHub releases.
             self.requires("onnxruntime/1.23.0")
-            # Set compiler flags for clang 19
-            if self.settings.compiler != "msvc":
-                self.conf.append("tools.build:cxxflags", "-Wno-unused-but-set-variable")
-                self.conf.append("tools.build:cxxflags", "-Wno-unused-function")
-                self.conf.append("tools.build:cxxflags", "-Wno-deprecated-declarations")
             # Windows uses the packaged ONNX Runtime binaries directly and does
             # not need the extra oneTBB/hwloc graph that breaks local MSVC 195
             # builds in Conan Center's hwloc recipe.
             if self.settings.os != "Windows":  # type: ignore
-                try:
-                    self.requires("onetbb/2021.12.0")
-                except Exception:
-                    pass
+                self.requires("onetbb/2021.12.0")
 
         self.requires("xz_utils/5.8.3")
 
@@ -150,37 +180,13 @@ class YamsConan(ConanFile):
             self.requires("tracy/0.13.1")
 
     def configure(self):
-        # Force new C++11 ABI on Linux (Ubuntu 24.04+ compatibility)
-        if self.settings.os == "Linux":  # type: ignore
-            if self.settings.compiler in ["gcc", "clang"]:  # type: ignore
-                self.settings.compiler.libcxx = "libstdc++11"  # type: ignore
+        # compiler.libcxx comes from the profile / setup.sh (libstdc++11 on
+        # Linux); recipes must not assign settings.
 
         # meson compiles yams with -DTRACY_ON_DEMAND; the client library must match, or the
         # two disagree on Tracy's class layout and the client records from startup.
         if self.options.enable_profiling:  # type: ignore
             self.options["tracy"].on_demand = True  # type: ignore
-
-        # Force SQLite3 to build from source with FTS5 (don't use pre-built binaries)
-        self.options["sqlite3"].enable_fts5 = True  # type: ignore
-        self.options["sqlite3"].enable_json1 = True  # type: ignore
-        self.options["sqlite3"].enable_rtree = True  # type: ignore
-        self.options["sqlite3"].omit_load_extension = False  # type: ignore
-        self.options["libcurl"].with_ssl = "openssl"
-        self.options["libcurl"].with_zlib = True
-        self.options["libcurl"].shared = False
-        self.options["openssl"].shared = False
-        try:
-            self.options["libarchive"].shared = False
-            self.options[
-                "libarchive"
-            ].with_acl = False  # Avoid libacl link issues on Linux CI
-        except Exception:
-            pass
-        try:
-            self.options["taglib"].shared = False
-        except Exception:
-            pass
-        self.options["spdlog"].header_only = False
 
         if self.settings.os in ["iOS", "Android"]:  # type: ignore
             # Mobile cross-builds do not benefit from a compiled fmt library and
@@ -192,36 +198,6 @@ class YamsConan(ConanFile):
             # library. Keeping it header-only avoids Apple SDK-specific
             # failures in spdlog's bundled/external fmt compile path.
             self.options["spdlog"].header_only = True  # type: ignore
-
-        # YAMS uses Boost.Asio (header-only) plus the linked system/thread
-        # modules on every platform. Disable the unrelated compiled Boost
-        # libraries everywhere: desktop builds no longer compile ~20 unused
-        # components, and mobile cross-builds avoid platform-specific ones like
-        # boost.context assembly or locale/iconv stacks.
-        for boost_opt in (
-            "without_cobalt",
-            "without_context",
-            "without_contract",
-            "without_coroutine",
-            "without_fiber",
-            "without_graph",
-            "without_iostreams",
-            "without_json",
-            "without_locale",
-            "without_log",
-            "without_math",
-            "without_nowide",
-            "without_program_options",
-            "without_random",
-            "without_regex",
-            "without_serialization",
-            "without_stacktrace",
-            "without_test",
-            "without_type_erasure",
-            "without_url",
-            "without_wave",
-        ):
-            setattr(self.options["boost"], boost_opt, True)  # type: ignore
 
         if self.options.enable_onnx:  # type: ignore
             self.options["onnxruntime"].fPIC = True
@@ -237,22 +213,24 @@ class YamsConan(ConanFile):
         basic_layout(self)
 
     def generate(self):
-        try:
-            from conan.tools.meson import MesonToolchain
-            from conan.tools.gnu import PkgConfigDeps
-            from conan.tools.cmake import CMakeDeps
-            from conan.tools.env import VirtualBuildEnv
+        # Conan generates VirtualBuildEnv/VirtualRunEnv by default; only the
+        # generators that need customizing are instantiated here.
+        tc = MesonToolchain(self)
+        if (
+            self.settings.os == "Linux"  # type: ignore
+            and self.settings.get_safe("compiler.libcxx") == "libstdc++11"
+        ):
+            # extra_defines emits a bare -D...=1; preprocessor_definitions would
+            # quote the value ("1") and break libstdc++'s `#if` checks.
+            tc.extra_defines.append("_GLIBCXX_USE_CXX11_ABI=1")
+        if self.options.enable_onnx and self.settings.compiler != "msvc":  # type: ignore
+            # ONNX Runtime headers trip these warnings under recent Clang.
+            tc.extra_cxxflags += [
+                "-Wno-unused-but-set-variable",
+                "-Wno-unused-function",
+                "-Wno-deprecated-declarations",
+            ]
+        tc.generate()
 
-            VirtualBuildEnv(self).generate()
-            tc = MesonToolchain(self)
-            if (
-                self.settings.os == "Linux"
-                and self.settings.compiler.libcxx == "libstdc++11"
-            ):  # type: ignore
-                tc.preprocessor_definitions["_GLIBCXX_USE_CXX11_ABI"] = "1"
-            tc.generate()
-
-            PkgConfigDeps(self).generate()
-            CMakeDeps(self).generate()
-        except Exception:
-            pass
+        PkgConfigDeps(self).generate()
+        CMakeDeps(self).generate()

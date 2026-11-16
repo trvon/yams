@@ -17,7 +17,25 @@ Dogfood YAMS as the distributed memory across sessions, agents, and handoffs —
 `yams grep`/`search`/`graph` before local discovery, always (see the retrieval
 contract in the prompt). The graph holds document, path, version, entity, and
 semantic-neighbor relations; code-symbol nodes and `calls`/`defined_in` edges
-were removed in v0.20, so answer "who uses X" with `yams grep`.
+were removed in v0.20, so answer "who uses X" with `yams grep`, or for a C++
+symbol with `clice query` (below).
+
+## C++ Symbol Navigation (clice)
+
+`clice.toml` points [clice](https://github.com/clice-io/clice) at the Debug
+build's `compile_commands.json` (run `./setup.sh Debug` first). `clice index`
+builds a persisted index in `.clice/` (about 9 minutes from scratch at `-j 8`;
+later runs and `--fresh` redo only changed files). Then
+`clice query <question> <name|file:line[:col]>` answers from it in tens of
+milliseconds, as JSON:
+
+- `references`, `definition`, `call-graph`, `implementation`, `type-hierarchy`
+  for a symbol; `impact-analysis` and `file-deps` for a file.
+- It resolves the symbol, so it skips same-named text in strings and comments
+  and finds calls `yams grep` can't tell apart (overloads, members).
+- Use `yams grep` for strings, config keys, scripts and non-C++ files.
+
+`clice serve` is the LSP server for editors and agent LSP integrations.
 
 ## Development Memory
 
