@@ -13,9 +13,10 @@ Product updates and occasional deep-dives.
 - Benchmark updates
 - Design notes (search, storage, plugins)
 
-## 2026-11-15: 0.23.0, faster grep and a smaller memory peak
+## 2026-11-16: 0.23.0, faster grep and a smaller memory peak
 
-0.23.0 ships the watching and grep fixes above, plus a pass on speed and memory.
+0.23.0 ships the fixes in the "Watching, honest grep and measured routing" entry
+below, plus a pass on speed and memory.
 Numbers are from a 33,000-document store on one Linux workstation.
 
 - **Unscoped grep skips files that cannot match.** The daemon keeps a trigram
