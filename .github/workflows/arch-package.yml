@@ -10,7 +10,7 @@ name: Arch packages
     - cron: "0 4 * * 1" # Mondays 04:00 UTC
   workflow_dispatch: {}
   pull_request:
-    branches: [experimental]
+    # Any base branch, so stacked PRs run it too; the path filter keeps it to relevant changes.
     paths:
       - packaging/arch/**
       - scripts/build-arch-pkg.sh
