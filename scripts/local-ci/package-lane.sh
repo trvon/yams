@@ -55,6 +55,7 @@ build_arch_lane() {
 	#   ARCH_DOCKER_PLATFORM=linux/arm64 ARCH_BASE_IMAGE=ghcr.io/menci/archlinuxarm@sha256:... \
 	#     bash scripts/local-ci/package-lane.sh --only arch
 	[ -n "${ARCH_BASE_IMAGE:-}" ] && arch_build_args+=(--build-arg "ARCH_BASE_IMAGE=${ARCH_BASE_IMAGE}")
+	[ -n "${CONAN_VERSION:-}" ] && arch_build_args+=(--build-arg "CONAN_VERSION=${CONAN_VERSION}")
 	[ "${NO_CACHE}" -eq 1 ] && arch_build_args+=(--no-cache)
 	arch_build_args+=("${REPO_ROOT}")
 	docker build --platform="${arch_platform}" "${arch_build_args[@]}"
