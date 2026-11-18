@@ -1,0 +1,96 @@
+# yamllint disable rule:line-length
+name: Arch packages
+
+# The Arch lanes otherwise run only in release.yml. Arch is rolling (the builder runs
+# `pacman -Syu`), so a toolchain update can break the package between releases, and the
+# aarch64 lane does not block a release. Build and validate both architectures when the
+# Arch packaging or the Conan setup changes, and weekly against whatever Arch ships.
+'on':
+  schedule:
+    - cron: "0 4 * * 1" # Mondays 04:00 UTC
+  workflow_dispatch: {}
+  pull_request:
+    # Any base branch, so stacked PRs run it too; the path filter keeps it to relevant changes.
+    paths:
+      - packaging/arch/**
+      - scripts/build-arch-pkg.sh
+      - scripts/local-ci/package-lane.sh
+      - scripts/local-ci/package-validate.sh
+      - scripts/local-ci/package-validate-checks.sh
+      - docker/local-ci/arch-*.Dockerfile
+      - packaging/systemd/arch-lane.Dockerfile
+      - conanfile.py
+      - conan/**
+      - setup.sh
+      - .github/workflows/arch-package.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arch-package-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep in step with CONAN_VERSION in the other workflows.
+  CONAN_VERSION: "2.34.0"
+
+jobs:
+  arch:
+    name: Arch package (${{ matrix.arch }})
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs_on: ubuntu-24.04
+            docker_platform: linux/amd64
+            arch_base_image: archlinux/archlinux:latest
+          - arch: aarch64
+            runs_on: ubuntu-24.04-arm
+            docker_platform: linux/arm64
+            # Same pinned Arch Linux ARM image as the release workflow.
+            arch_base_image: ghcr.io/menci/archlinuxarm@sha256:95491e07ec919efcbb134e3b228b7e5869938448985becaeaa4dc0e728a6499a
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          submodules: false # Manual submodule init below (some use SSH URLs)
+
+      - name: Initialize required submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          for sub in third_party/sqlite-vec-cpp third_party/simeon third_party/symspell; do
+            for attempt in 1 2 3 4; do
+              git submodule update --init --depth 1 "$sub" && break
+              [ "$attempt" -lt 4 ] || exit 1
+              sleep $((attempt * 5))
+            done
+          done
+
+      - name: Build and validate the Arch package
+        shell: bash
+        env:
+          ARCH_DOCKER_PLATFORM: ${{ matrix.docker_platform }}
+          ARCH_BASE_IMAGE: ${{ matrix.arch_base_image }}
+          ARCH_PKG_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          host="$(uname -m)"
+          if [ "$host" != "${{ matrix.arch }}" ]; then
+            echo "::error::expected a native ${{ matrix.arch }} runner, got ${host}"
+            exit 1
+          fi
+          bash scripts/local-ci/package-lane.sh --only arch
+
+      - name: Report toolchain
+        if: always()
+        shell: bash
+        run: |
+          docker run --rm --platform "${{ matrix.docker_platform }}" yams/ci-arch-package:latest \
+            bash -lc 'clang --version | head -1; cmake --version | head -1; gcc -dumpfullversion; conan --version' || true
