@@ -108,6 +108,21 @@ class ArchPackageVersions(unittest.TestCase):
         self.assert_older("nightly_20261110_f6ec38e4", newer)
 
 
+    def test_untagged_checkout_versions_after_the_release_tag(self) -> None:
+        source = ARCH_BUILDER.read_text()
+        resolve = source[source.index("resolve_version() {"):source.index("arch_label() {")]
+        with tempfile.TemporaryDirectory() as repo:
+            git = (f'git -C "{repo}" -c user.name=t -c user.email=t@example.invalid'
+                   ' -c commit.gpgSign=false -c tag.gpgSign=false')
+            setup = shell(f'git init -q "{repo}" && {git} commit -q --allow-empty -m a'
+                          f' && {git} tag -m t v0.20.5 && {git} commit -q --allow-empty -m b'
+                          f' && {git} tag -m t experimental-nightly-20261005-abc')
+            self.assertEqual(setup.returncode, 0, setup.stderr)
+            result = shell(f'REPO_ROOT="{repo}"; VERSION=""; GIT_REF=""\n' + resolve + "\nresolve_version")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout.strip(), r"^0\.20\.5-1-g[0-9a-f]{7}$")
+        self.assertRegex(self.pkgver(result.stdout.strip()), r"^0\.20\.5_1_g[0-9a-f]{7}$")
+
 class UpgradeOracle(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
