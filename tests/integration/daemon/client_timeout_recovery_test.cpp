@@ -537,6 +537,7 @@ TEST_CASE("Client timeout recovery: Shutdown cancels in-flight request",
             msg.find("closed") != std::string::npos || msg.find("timeout") != std::string::npos ||
             msg.find("daemon") != std::string::npos || msg.find("pipe") != std::string::npos ||
             msg.find("shutdown") != std::string::npos;
+        INFO("request error: " << msg);
         REQUIRE(hasContext);
     }
 }
