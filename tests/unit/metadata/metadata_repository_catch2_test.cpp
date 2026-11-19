@@ -2041,6 +2041,8 @@ TEST_CASE("MetadataRepository: update document", "[unit][metadata][repository]")
     docInfo.id = docId;
     docInfo.fileName = "updated.txt";
     docInfo.fileSize = 4096;
+    docInfo.contentExtracted = true;
+    docInfo.extractionStatus = ExtractionStatus::Success;
     docInfo.modifiedTime =
         std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
 
@@ -2054,6 +2056,8 @@ TEST_CASE("MetadataRepository: update document", "[unit][metadata][repository]")
     auto updatedDoc = getResult.value().value();
     CHECK((updatedDoc.fileName == "updated.txt"));
     CHECK((updatedDoc.fileSize == 4096));
+    CHECK(updatedDoc.contentExtracted);
+    CHECK((updatedDoc.extractionStatus == ExtractionStatus::Success));
 }
 
 TEST_CASE("MetadataRepository: corpus stats path depth max shrinks after update",
@@ -3549,91 +3553,6 @@ TEST_CASE("MetadataRepository: path tree upsert rolls back partial changes on fa
     });
     REQUIRE((assocCount.has_value()));
     CHECK((assocCount.value() == 0));
-}
-
-TEST_CASE("MetadataRepository: remove path tree decrements counts and deletes empty nodes",
-          "[unit][metadata][repository]") {
-    MetadataRepositoryFixture fix;
-
-    auto docInfo =
-        makeDocumentWithPath("/project/src/lib/util.cpp",
-                             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-    auto docInsert = fix.repository_->insertDocument(docInfo);
-    REQUIRE((docInsert.has_value()));
-    auto docId = docInsert.value();
-    docInfo.id = docId;
-
-    std::vector<float> embedding{1.0F, 2.0F, 3.0F};
-    auto upsert = fix.repository_->upsertPathTreeForDocument(
-        docInfo, docId, true, std::span<const float>(embedding.data(), embedding.size()));
-    REQUIRE((upsert.has_value()));
-
-    auto leafNode = fix.repository_->findPathTreeNodeByFullPath("/project/src/lib/util.cpp");
-    REQUIRE((leafNode.has_value()));
-    REQUIRE((leafNode.value().has_value()));
-    CHECK((leafNode.value()->docCount == 1));
-    CHECK((leafNode.value()->centroidWeight == 1));
-
-    auto libNode = fix.repository_->findPathTreeNodeByFullPath("/project/src/lib");
-    REQUIRE((libNode.has_value()));
-    REQUIRE((libNode.value().has_value()));
-    CHECK((libNode.value()->docCount == 1));
-
-    auto remove = fix.repository_->removePathTreeForDocument(
-        docInfo, docId, std::span<const float>(embedding.data(), embedding.size()));
-    REQUIRE((remove.has_value()));
-
-    auto afterRemoveLeaf = fix.repository_->findPathTreeNodeByFullPath("/project/src/lib/util.cpp");
-    REQUIRE((afterRemoveLeaf.has_value()));
-    CHECK_FALSE(afterRemoveLeaf.value().has_value());
-
-    auto afterRemoveLib = fix.repository_->findPathTreeNodeByFullPath("/project/src/lib");
-    REQUIRE((afterRemoveLib.has_value()));
-    CHECK_FALSE(afterRemoveLib.value().has_value());
-}
-
-TEST_CASE("MetadataRepository: remove path tree recalculates centroid",
-          "[unit][metadata][repository]") {
-    MetadataRepositoryFixture fix;
-
-    auto doc1 = makeDocumentWithPath(
-        "/shared/file1.txt", "1111111111111111111111111111111111111111111111111111111111111111");
-    auto doc1Insert = fix.repository_->insertDocument(doc1);
-    REQUIRE((doc1Insert.has_value()));
-    doc1.id = doc1Insert.value();
-
-    auto doc2 = makeDocumentWithPath(
-        "/shared/file2.txt", "2222222222222222222222222222222222222222222222222222222222222222");
-    auto doc2Insert = fix.repository_->insertDocument(doc2);
-    REQUIRE((doc2Insert.has_value()));
-    doc2.id = doc2Insert.value();
-
-    std::vector<float> emb1{1.0F, 0.0F, 0.0F};
-    std::vector<float> emb2{0.0F, 1.0F, 0.0F};
-
-    auto upsert1 = fix.repository_->upsertPathTreeForDocument(
-        doc1, doc1.id, true, std::span<const float>(emb1.data(), emb1.size()));
-    REQUIRE((upsert1.has_value()));
-
-    auto upsert2 = fix.repository_->upsertPathTreeForDocument(
-        doc2, doc2.id, true, std::span<const float>(emb2.data(), emb2.size()));
-    REQUIRE((upsert2.has_value()));
-
-    auto sharedNode = fix.repository_->findPathTreeNodeByFullPath("/shared");
-    REQUIRE((sharedNode.has_value()));
-    REQUIRE((sharedNode.value().has_value()));
-    CHECK((sharedNode.value()->docCount == 2));
-    CHECK((sharedNode.value()->centroidWeight == 2));
-
-    auto remove1 = fix.repository_->removePathTreeForDocument(
-        doc1, doc1.id, std::span<const float>(emb1.data(), emb1.size()));
-    REQUIRE((remove1.has_value()));
-
-    auto afterRemove = fix.repository_->findPathTreeNodeByFullPath("/shared");
-    REQUIRE((afterRemove.has_value()));
-    REQUIRE((afterRemove.value().has_value()));
-    CHECK((afterRemove.value()->docCount == 1));
-    CHECK((afterRemove.value()->centroidWeight == 1));
 }
 
 TEST_CASE("MetadataRepository: path tree child listing and repair helpers",

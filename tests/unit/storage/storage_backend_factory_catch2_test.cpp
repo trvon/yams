@@ -76,6 +76,12 @@ TEST_CASE("StorageBackendFactory::parseURL: query parameters populate cache/time
     CHECK(cfg.cacheSize == 1024u);
     CHECK(cfg.cacheTTL == 60u);
     CHECK(cfg.requestTimeout == 5u);
+
+    // Parameters that are not given keep their defaults.
+    auto partial = StorageBackendFactory::parseURL("s3://b/p?cache_size=2048");
+    CHECK(partial.cacheSize == 2048u);
+    CHECK(partial.cacheTTL == BackendConfig{}.cacheTTL);
+    CHECK(partial.requestTimeout == BackendConfig{}.requestTimeout);
 }
 
 TEST_CASE("StorageBackendFactory::parseURL: invalid numeric params are ignored",
@@ -99,6 +105,8 @@ TEST_CASE("StorageBackendFactory::create: filesystem backend initializes in temp
 
     auto backend = StorageBackendFactory::create(cfg);
     REQUIRE(backend != nullptr);
+    CHECK(backend->getType() == "filesystem");
+    CHECK_FALSE(backend->isRemote());
     CHECK(std::filesystem::exists(dir / "objects"));
     CHECK(std::filesystem::exists(dir / "temp"));
 

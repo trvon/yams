@@ -231,6 +231,7 @@ TEST_CASE("PathTreeDelete: remove document recalculates centroid", "[unit][metad
     auto srcAfter = fix.repository_->findPathTreeNode(PathTreeNode::kNullParent, "src");
     REQUIRE((srcAfter.has_value()));
     REQUIRE((srcAfter.value().has_value()));
+    CHECK((srcAfter.value()->docCount == 1));
     CHECK((srcAfter.value()->centroidWeight == 1));
     REQUIRE((srcAfter.value()->centroid.size() == 3));
     CHECK((srcAfter.value()->centroid[0] == Catch::Approx(5.0F).epsilon(0.01)));
