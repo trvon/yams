@@ -112,7 +112,9 @@ resolve_version() {
 	elif [ -n "${VERSION}" ]; then
 		v="${VERSION}"
 	else
-		v="$(cd "${REPO_ROOT}" && git describe --tags --abbrev=7 2>/dev/null || echo "0.0.0")"
+		# The checkout is bind-mounted into the builder, so git sees another owner and needs
+		# safe.directory. Match only release tags: experimental-nightly-* tags are newer.
+		v="$(git -c safe.directory='*' -C "${REPO_ROOT}" describe --tags --abbrev=7 --match='v[0-9]*' 2>/dev/null || echo "0.0.0")"
 		v="${v#yams-v}"
 		v="${v#v}"
 	fi
