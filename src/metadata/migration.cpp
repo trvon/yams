@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <iomanip>
@@ -385,7 +386,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             removeLegacyGrammarArtifacts(),
             createDocumentPathHeads(),
             createGrepTrigramIndex(),
-            resetGrepTrigramIndex()};
+            resetGrepTrigramIndex(),
+            rebuildUnguardedGraphCleanupIndexes()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -3460,6 +3462,77 @@ Migration YamsMetadataMigrations::resetGrepTrigramIndex() {
         return db.execute("DELETE FROM grep_trigram_coverage");
     };
     // Nothing to restore: an empty index is valid for v45.
+    m.downFunc = [](Database&) -> Result<void> { return {}; };
+    return m;
+}
+
+Migration YamsMetadataMigrations::rebuildUnguardedGraphCleanupIndexes() {
+    Migration m;
+    m.version = 47;
+    m.name = "Rebuild graph cleanup indexes on the guarded expression";
+    m.created = std::chrono::system_clock::now();
+    // v37 used CREATE INDEX IF NOT EXISTS, so databases that already held these index names on
+    // the bare json_extract() expression kept them. Cleanup queries filter on the guarded
+    // CASE WHEN json_valid() expression; SQLite matches expression indexes only on the exact
+    // expression, so every document delete scanned kg_nodes and kg_edges in full. The bare
+    // indexes also reject inserts of non-JSON properties. Rebuild only indexes that lack the
+    // guard; a database created at v37 or later is left untouched.
+    struct GuardedIndex {
+        const char* name;
+        const char* table;
+        const char* jsonPath;
+    };
+    static constexpr std::array<GuardedIndex, 4> kIndexes{{
+        {"idx_kg_nodes_document_hash", "kg_nodes", "$.document_hash"},
+        {"idx_kg_nodes_file_path", "kg_nodes", "$.file_path"},
+        {"idx_kg_nodes_source_file", "kg_nodes", "$.source_file"},
+        {"idx_kg_edges_source_file", "kg_edges", "$.source_file"},
+    }};
+    m.upFunc = [](Database& db) -> Result<void> {
+        for (const auto& index : kIndexes) {
+            std::string definition;
+            {
+                // Finalize before DROP INDEX: SQLite refuses schema changes while a statement
+                // that reads the schema is still active.
+                auto stmt =
+                    db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?");
+                if (!stmt) {
+                    return stmt.error();
+                }
+                if (auto bound = stmt.value().bind(1, index.name); !bound) {
+                    return bound.error();
+                }
+                auto row = stmt.value().step();
+                if (!row) {
+                    return row.error();
+                }
+                if (row.value() && !stmt.value().isNull(0)) {
+                    definition = stmt.value().getString(0);
+                }
+            }
+            if (definition.find("json_valid") != std::string::npos) {
+                continue;
+            }
+            const auto started = std::chrono::steady_clock::now();
+            spdlog::info("Rebuilding {} on the guarded expression; this reads all of {} once",
+                         index.name, index.table);
+            const std::string expr = std::string("CASE WHEN json_valid(properties) THEN "
+                                                 "json_extract(properties, '") +
+                                     index.jsonPath + "') END";
+            const std::string sql = std::string("DROP INDEX IF EXISTS ") + index.name +
+                                    "; CREATE INDEX " + index.name + " ON " + index.table + "(" +
+                                    expr + ") WHERE " + expr + " IS NOT NULL;";
+            if (auto rebuilt = db.execute(sql); !rebuilt) {
+                return rebuilt.error();
+            }
+            spdlog::info("Rebuilt {} in {} ms", index.name,
+                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - started)
+                             .count());
+        }
+        return {};
+    };
+    // The guarded indexes are valid for v46.
     m.downFunc = [](Database&) -> Result<void> { return {}; };
     return m;
 }

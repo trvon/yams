@@ -1646,6 +1646,77 @@ TEST_CASE("Migration version 37 indexes document graph cleanup predicates",
     }
 }
 
+TEST_CASE("Migration version 47 rebuilds graph cleanup indexes left unguarded",
+          "[unit][metadata][schema][migration][kg]") {
+    StandaloneMigrationDb db{"migration_v47_kg_cleanup_rebuild"};
+    REQUIRE(db.mm.migrateTo(36).has_value());
+    // Databases from before the json_valid guard already held these names on the bare
+    // expression, so v37's IF NOT EXISTS kept them.
+    REQUIRE(db.db
+                .execute(R"(
+        CREATE INDEX idx_kg_nodes_document_hash ON kg_nodes(json_extract(properties, '$.document_hash'))
+            WHERE json_extract(properties, '$.document_hash') IS NOT NULL;
+        CREATE INDEX idx_kg_nodes_file_path ON kg_nodes(json_extract(properties, '$.file_path'))
+            WHERE json_extract(properties, '$.file_path') IS NOT NULL;
+        CREATE INDEX idx_kg_nodes_source_file ON kg_nodes(json_extract(properties, '$.source_file'))
+            WHERE json_extract(properties, '$.source_file') IS NOT NULL;
+        CREATE INDEX idx_kg_edges_source_file ON kg_edges(json_extract(properties, '$.source_file'))
+            WHERE json_extract(properties, '$.source_file') IS NOT NULL;
+    )")
+                .has_value());
+    REQUIRE(db.mm.migrateTo(46).has_value());
+
+    const char* kEdgeDelete = "DELETE FROM kg_edges WHERE CASE WHEN json_valid(properties) "
+                              "THEN json_extract(properties, '$.source_file') END = '/tmp/a.cpp'";
+    auto before = queryPlanContains(db.db, kEdgeDelete, "idx_kg_edges_source_file");
+    REQUIRE(before.has_value());
+    CHECK_FALSE(before.value());
+
+    REQUIRE(db.mm.migrateTo(47).has_value());
+
+    auto edgePlan = queryPlanContains(db.db, kEdgeDelete, "idx_kg_edges_source_file");
+    REQUIRE(edgePlan.has_value());
+    CHECK(edgePlan.value());
+    auto hashPlan =
+        queryPlanContains(db.db,
+                          "DELETE FROM kg_nodes WHERE CASE WHEN json_valid(properties) "
+                          "THEN json_extract(properties, '$.document_hash') END = 'hash'",
+                          "idx_kg_nodes_document_hash");
+    REQUIRE(hashPlan.has_value());
+    CHECK(hashPlan.value());
+    auto pathPlan =
+        queryPlanContains(db.db,
+                          "DELETE FROM kg_nodes WHERE CASE WHEN json_valid(properties) "
+                          "THEN json_extract(properties, '$.file_path') END = '/tmp/a.cpp' "
+                          "OR CASE WHEN json_valid(properties) "
+                          "THEN json_extract(properties, '$.source_file') END = '/tmp/a.cpp'",
+                          "MULTI-INDEX OR");
+    REQUIRE(pathPlan.has_value());
+    CHECK(pathPlan.value());
+
+    // The bare indexes rejected opaque properties; the guarded ones accept them.
+    CHECK(db.db
+              .execute("INSERT INTO kg_nodes (node_key, label, type, properties) "
+                       "VALUES ('opaque:v47', 'o', 'test', 'not-json')")
+              .has_value());
+}
+
+TEST_CASE("Migration version 47 leaves guarded graph cleanup indexes in place",
+          "[unit][metadata][schema][migration][kg]") {
+    StandaloneMigrationDb db{"migration_v47_kg_cleanup_noop"};
+    REQUIRE(db.mm.migrateTo(46).has_value());
+    auto before = querySingleInt64(
+        db.db, "SELECT rootpage FROM sqlite_master WHERE type = 'index' AND name = ?",
+        "idx_kg_edges_source_file");
+    REQUIRE(before.has_value());
+    REQUIRE(db.mm.migrateTo(47).has_value());
+    auto after = querySingleInt64(
+        db.db, "SELECT rootpage FROM sqlite_master WHERE type = 'index' AND name = ?",
+        "idx_kg_edges_source_file");
+    REQUIRE(after.has_value());
+    CHECK((before.value() == after.value()));
+}
+
 TEST_CASE("Migration version 46 empties a grep trigram index built before NUL handling",
           "[unit][metadata][schema][migration]") {
     StandaloneMigrationDb db{"migration_v46_grep_trigram_reset"};
