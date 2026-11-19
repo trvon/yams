@@ -3,6 +3,8 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <string>
 #include <thread>
 
 #include <catch2/catch_test_macros.hpp>
@@ -727,4 +729,59 @@ TEST_CASE("Database: FTS5 integrity errors are not transient lock errors",
 
     const std::string busyMsg = "database is busy";
     REQUIRE(yams::metadata::testing_isTransientIntegrityCheckMessage(busyMsg));
+}
+
+TEST_CASE("Database: transaction calls out of order are refused",
+          "[unit][metadata][database][transaction]") {
+    DatabaseFixture fix;
+    Database db;
+    REQUIRE(db.open(fix.dbPath_.string(), ConnectionMode::Create).has_value());
+
+    auto commitFirst = db.commit();
+    REQUIRE_FALSE(commitFirst.has_value());
+    CHECK((commitFirst.error().code == ErrorCode::InvalidState));
+    auto rollbackFirst = db.rollback();
+    REQUIRE_FALSE(rollbackFirst.has_value());
+    CHECK((rollbackFirst.error().code == ErrorCode::InvalidState));
+
+    REQUIRE(db.beginTransaction().has_value());
+    auto nested = db.beginTransaction();
+    REQUIRE_FALSE(nested.has_value());
+    CHECK((nested.error().code == ErrorCode::InvalidState));
+    // The refused begin leaves the open transaction usable.
+    CHECK(db.commit().has_value());
+}
+
+TEST_CASE("Database: checkIntegrity reports a damaged table page as corrupted data",
+          "[unit][metadata][database][integrity]") {
+    DatabaseFixture fix;
+    {
+        Database db;
+        REQUIRE(db.open(fix.dbPath_.string(), ConnectionMode::Create).has_value());
+        REQUIRE(db.execute("PRAGMA journal_mode=DELETE").has_value());
+        REQUIRE(db.execute(R"(
+            CREATE TABLE a(id INTEGER PRIMARY KEY, v TEXT);
+            WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 2000)
+            INSERT INTO a SELECT x, printf('%050d', x) FROM c;
+        )")
+                    .has_value());
+        REQUIRE(db.checkIntegrity().has_value());
+        db.close();
+    }
+
+    // Overwrite the middle of a leaf page of table `a` (4 KiB pages; page 1 is the schema).
+    {
+        std::fstream file(fix.dbPath_, std::ios::binary | std::ios::in | std::ios::out);
+        REQUIRE(file.good());
+        file.seekp(4096 * 2 + 2048);
+        const std::string garbage(64, '\xff');
+        file.write(garbage.data(), static_cast<std::streamsize>(garbage.size()));
+        REQUIRE(file.good());
+    }
+
+    Database db;
+    REQUIRE(db.open(fix.dbPath_.string(), ConnectionMode::ReadWrite).has_value());
+    auto result = db.checkIntegrity();
+    REQUIRE_FALSE(result.has_value());
+    CHECK((result.error().code == ErrorCode::CorruptedData));
 }
