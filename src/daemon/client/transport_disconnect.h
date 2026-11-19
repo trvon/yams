@@ -32,4 +32,12 @@ inline std::string describeWriteError(const boost::system::error_code& ec) {
            ec.message();
 }
 
+// Detail for a failed read. The read loop hands this to every request waiting on the
+// connection, so a daemon that stopped must say so; the OS text stays because callers match it
+// ("End of file").
+inline std::string describeReadError(const boost::system::error_code& ec) {
+    return isExpectedDisconnectError(ec) ? "Connection closed by the daemon: " + ec.message()
+                                         : ec.message();
+}
+
 } // namespace yams::daemon::detail
