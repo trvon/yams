@@ -112,7 +112,11 @@ wait_user_active() {
 	local sock
 	sock="$(user_runtime "$1")/yams-daemon.sock"
 	for _ in $(seq 1 120); do
-		[ "$(uctl "$1" is-active "${UNIT}")" = active ] && [ -S "${sock}" ] && return 0
+		# The socket exists before the daemon serves requests; a cat in that window gets
+		# "Document content not found". Wait until status reports the daemon ready.
+		[ "$(uctl "$1" is-active "${UNIT}")" = active ] && [ -S "${sock}" ] &&
+			as_user "$1" 'timeout 10 yams status --json 2>/dev/null' | grep -Eq '"ready": *true' &&
+			return 0
 		sleep 0.5
 	done
 	return 1
