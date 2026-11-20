@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <span>
 #include <string_view>
@@ -51,7 +52,9 @@ void appendFixtureString(std::vector<std::byte>& output, std::string_view value)
 }
 
 std::vector<std::byte> makeBinaryManifestFixture(bool legacy64BitFlags,
-                                                 std::uint64_t firstChunkFlags = 1) {
+                                                 std::uint64_t firstChunkFlags = 1,
+                                                 std::uint64_t fileSize = 18,
+                                                 std::uint32_t declaredChunks = 3) {
     const std::string kFileHash(64, 'f');
     const std::string kFirstChunkHash(64, 'a');
     const std::string kSecondChunkHash(64, 'b');
@@ -62,10 +65,10 @@ std::vector<std::byte> makeBinaryManifestFixture(bool legacy64BitFlags,
     output.insert(output.end(), magic.begin(), magic.end());
     appendFixturePod(output, Manifest::CURRENT_VERSION);
     appendFixtureString(output, kFileHash);
-    appendFixturePod(output, std::uint64_t{18});
+    appendFixturePod(output, fileSize);
     appendFixtureString(output, "legacy.bin");
     appendFixtureString(output, "application/octet-stream");
-    appendFixturePod(output, std::uint32_t{3});
+    appendFixturePod(output, declaredChunks);
 
     const auto appendChunk = [&](std::string_view hash, std::uint64_t offset, std::uint32_t size,
                                  std::uint64_t flags) {
@@ -294,6 +297,55 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager rejects trailing binary m
 
     REQUIRE_FALSE(result.has_value());
     CHECK((result.error() == ErrorCode::CorruptedData));
+}
+
+TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager rejects a manifest truncated in its header",
+                 "[manifest][catch2][compatibility]") {
+    auto bytes = makeBinaryManifestFixture(false);
+    bytes.resize(20); // magic, version and part of the file hash
+
+    auto result = manager->deserialize(bytes);
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK((result.error() == ErrorCode::CorruptedData));
+}
+
+TEST_CASE_METHOD(ManifestTestFixture,
+                 "ManifestManager rejects a chunk count above the limit before reading chunks",
+                 "[manifest][catch2][compatibility]") {
+    // Claims 4 billion chunks: must fail on the count, not by reserving for it.
+    const auto bytes =
+        makeBinaryManifestFixture(false, 1, 18, std::numeric_limits<std::uint32_t>::max());
+
+    auto result = manager->deserialize(bytes);
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK((result.error() == ErrorCode::CorruptedData));
+}
+
+TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager rejects a manifest truncated in chunk flags",
+                 "[manifest][catch2][compatibility]") {
+    auto bytes = makeBinaryManifestFixture(false);
+    bytes.resize(bytes.size() - 2); // last chunk's 32-bit flags cut short
+
+    auto result = manager->deserialize(bytes);
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK((result.error() == ErrorCode::CorruptedData));
+}
+
+TEST_CASE_METHOD(ManifestTestFixture,
+                 "ManifestManager rejects chunks that do not add up to the file size",
+                 "[manifest][catch2][compatibility]") {
+    // Chunks cover 18 bytes; a 19-byte file would reconstruct the wrong content.
+    for (const bool legacy : {false, true}) {
+        const auto bytes = makeBinaryManifestFixture(legacy, 1, 19);
+
+        auto result = manager->deserialize(bytes);
+
+        REQUIRE_FALSE(result.has_value());
+        CHECK((result.error() == ErrorCode::ManifestInvalid));
+    }
 }
 
 TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager deserialize corrupted data fails",

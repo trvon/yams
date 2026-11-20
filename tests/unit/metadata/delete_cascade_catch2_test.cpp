@@ -156,7 +156,7 @@ TEST_CASE("delete-cascade: content FTS row is removed on document delete",
         (f.scalar("SELECT COUNT(*) FROM documents_fts WHERE rowid = " + std::to_string(id)) == 0));
 }
 
-TEST_CASE("delete-cascade: document_content and metadata rows cascade via FK",
+TEST_CASE("delete-cascade: document_content, metadata and relationship rows cascade via FK",
           "[metadata][delete][cascade]") {
     DeleteCascadeFixture f;
     const std::string hash(64, 'b');
@@ -169,11 +169,21 @@ TEST_CASE("delete-cascade: document_content and metadata rows cascade via FK",
     dc.language = "en";
     REQUIRE((f.metadataRepo->insertContent(dc).has_value()));
     REQUIRE((f.metadataRepo->setMetadata(id, "k", MetadataValue(std::string("v"))).has_value()));
+    DocumentRelationship rel;
+    rel.parentId = id;
+    rel.childId = id;
+    rel.relationshipType = RelationshipType::Custom;
+    rel.customType = "self";
+    rel.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    REQUIRE((f.metadataRepo->insertRelationship(rel).has_value()));
 
     REQUIRE((f.scalar("SELECT COUNT(*) FROM document_content WHERE document_id = " +
                       std::to_string(id)) == 1));
     REQUIRE(
         (f.scalar("SELECT COUNT(*) FROM metadata WHERE document_id = " + std::to_string(id)) == 1));
+
+    REQUIRE((f.scalar("SELECT COUNT(*) FROM document_relationships WHERE parent_id = " +
+                      std::to_string(id)) == 1));
 
     REQUIRE((f.metadataRepo->deleteDocument(id).has_value()));
 
@@ -181,6 +191,8 @@ TEST_CASE("delete-cascade: document_content and metadata rows cascade via FK",
                     std::to_string(id)) == 0));
     CHECK(
         (f.scalar("SELECT COUNT(*) FROM metadata WHERE document_id = " + std::to_string(id)) == 0));
+    CHECK((f.scalar("SELECT COUNT(*) FROM document_relationships WHERE parent_id = " +
+                    std::to_string(id)) == 0));
 }
 
 // Finding D (fixed): canonical + reference nodes (and edges between them) are cleaned by the

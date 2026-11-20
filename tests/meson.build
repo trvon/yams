@@ -1849,6 +1849,7 @@ if catch2_dep.found()
       'unit/storage/storage_backend_factory_catch2_test.cpp',
       'unit/storage/storage_runtime_resolver_catch2_test.cpp',
       'unit/storage/storage_engine_catch2_test.cpp',
+      'unit/storage/storage_engine_integrity_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,

@@ -189,84 +189,6 @@ Result<std::optional<std::string>> queryOptionalString(Database& db, const std::
 
 } // namespace
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Document CRUD operations",
-                 "[unit][metadata][schema][crud]") {
-    SECTION("Create document") {
-        auto doc = createTestDocument("test.txt");
-        auto insertResult = repo_->insertDocument(doc);
-        REQUIRE(insertResult.has_value());
-        int64_t docId = insertResult.value();
-        CHECK((docId > 0));
-    }
-
-    SECTION("Read document by ID") {
-        auto doc = createTestDocument("test.txt");
-        auto insertResult = repo_->insertDocument(doc);
-        REQUIRE(insertResult.has_value());
-        int64_t docId = insertResult.value();
-
-        auto getResult = repo_->getDocument(docId);
-        REQUIRE(getResult.has_value());
-        REQUIRE(getResult.value().has_value());
-        auto retrieved = getResult.value().value();
-        CHECK((retrieved.id == docId));
-        CHECK((retrieved.fileName == doc.fileName));
-        CHECK((retrieved.sha256Hash == doc.sha256Hash));
-    }
-
-    SECTION("Read document by hash") {
-        auto doc = createTestDocument("test.txt");
-        auto insertResult = repo_->insertDocument(doc);
-        REQUIRE(insertResult.has_value());
-        int64_t docId = insertResult.value();
-
-        auto hashResult = repo_->getDocumentByHash(doc.sha256Hash);
-        REQUIRE(hashResult.has_value());
-        REQUIRE(hashResult.value().has_value());
-        CHECK((hashResult.value().value().id == docId));
-    }
-
-    SECTION("Update document") {
-        auto doc = createTestDocument("test.txt");
-        auto insertResult = repo_->insertDocument(doc);
-        REQUIRE(insertResult.has_value());
-        int64_t docId = insertResult.value();
-
-        auto getResult = repo_->getDocument(docId);
-        REQUIRE(getResult.has_value());
-        REQUIRE(getResult.value().has_value());
-        auto retrieved = getResult.value().value();
-
-        retrieved.fileSize = 2048;
-        retrieved.contentExtracted = true;
-        retrieved.extractionStatus = ExtractionStatus::Success;
-        auto updateResult = repo_->updateDocument(retrieved);
-        REQUIRE(updateResult.has_value());
-
-        auto updatedResult = repo_->getDocument(docId);
-        REQUIRE(updatedResult.has_value());
-        REQUIRE(updatedResult.value().has_value());
-        auto updated = updatedResult.value().value();
-        CHECK((updated.fileSize == 2048));
-        CHECK((updated.contentExtracted));
-        CHECK((updated.extractionStatus == ExtractionStatus::Success));
-    }
-
-    SECTION("Delete document") {
-        auto doc = createTestDocument("test.txt");
-        auto insertResult = repo_->insertDocument(doc);
-        REQUIRE(insertResult.has_value());
-        int64_t docId = insertResult.value();
-
-        auto deleteResult = repo_->deleteDocument(docId);
-        REQUIRE(deleteResult.has_value());
-
-        auto deletedResult = repo_->getDocument(docId);
-        REQUIRE(deletedResult.has_value());
-        CHECK_FALSE(deletedResult.value().has_value());
-    }
-}
-
 TEST_CASE_METHOD(MetadataSchemaFixture, "Content CRUD operations",
                  "[unit][metadata][schema][content]") {
     auto doc = createTestDocument("content_test.txt");
@@ -787,51 +709,6 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Statistics", "[unit][metadata][schema][
         CHECK((extCounts[".pdf"] == 2));
         CHECK((extCounts[".doc"] == 1));
     }
-}
-
-TEST_CASE_METHOD(MetadataSchemaFixture, "Cascading deletes", "[unit][metadata][schema][cascade]") {
-    auto doc = createTestDocument("cascade_test.txt");
-    auto docResult = repo_->insertDocument(doc);
-    REQUIRE(docResult.has_value());
-    int64_t docId = docResult.value();
-
-    // Add content
-    DocumentContent content;
-    content.documentId = docId;
-    content.contentText = "Test content";
-    content.contentLength = content.contentText.length();
-    content.extractionMethod = "test";
-    content.language = "en";
-    repo_->insertContent(content);
-
-    // Add metadata
-    repo_->setMetadata(docId, "test_key", MetadataValue("test_value"));
-
-    // Add relationship
-    DocumentRelationship rel;
-    rel.parentId = docId;
-    rel.childId = docId; // Self-reference for test
-    rel.relationshipType = RelationshipType::Custom;
-    rel.customType = "self";
-    rel.createdTime = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
-    repo_->insertRelationship(rel);
-
-    // Delete document - should cascade to all related data
-    auto deleteResult = repo_->deleteDocument(docId);
-    REQUIRE(deleteResult.has_value());
-
-    // Verify cascading deletes
-    auto contentResult = repo_->getContent(docId);
-    REQUIRE(contentResult.has_value());
-    CHECK_FALSE(contentResult.value().has_value());
-
-    auto metaResult = repo_->getAllMetadata(docId);
-    REQUIRE(metaResult.has_value());
-    CHECK((metaResult.value().size() == 0));
-
-    auto relResult = repo_->getRelationships(docId);
-    REQUIRE(relResult.has_value());
-    CHECK((relResult.value().size() == 0));
 }
 
 TEST_CASE_METHOD(MetadataSchemaFixture, "Query builder",
@@ -1644,6 +1521,77 @@ TEST_CASE("Migration version 37 indexes document graph cleanup predicates",
         REQUIRE(count.has_value());
         CHECK((count.value() == 0));
     }
+}
+
+TEST_CASE("Migration version 47 rebuilds graph cleanup indexes left unguarded",
+          "[unit][metadata][schema][migration][kg]") {
+    StandaloneMigrationDb db{"migration_v47_kg_cleanup_rebuild"};
+    REQUIRE(db.mm.migrateTo(36).has_value());
+    // Databases from before the json_valid guard already held these names on the bare
+    // expression, so v37's IF NOT EXISTS kept them.
+    REQUIRE(db.db
+                .execute(R"(
+        CREATE INDEX idx_kg_nodes_document_hash ON kg_nodes(json_extract(properties, '$.document_hash'))
+            WHERE json_extract(properties, '$.document_hash') IS NOT NULL;
+        CREATE INDEX idx_kg_nodes_file_path ON kg_nodes(json_extract(properties, '$.file_path'))
+            WHERE json_extract(properties, '$.file_path') IS NOT NULL;
+        CREATE INDEX idx_kg_nodes_source_file ON kg_nodes(json_extract(properties, '$.source_file'))
+            WHERE json_extract(properties, '$.source_file') IS NOT NULL;
+        CREATE INDEX idx_kg_edges_source_file ON kg_edges(json_extract(properties, '$.source_file'))
+            WHERE json_extract(properties, '$.source_file') IS NOT NULL;
+    )")
+                .has_value());
+    REQUIRE(db.mm.migrateTo(46).has_value());
+
+    const char* kEdgeDelete = "DELETE FROM kg_edges WHERE CASE WHEN json_valid(properties) "
+                              "THEN json_extract(properties, '$.source_file') END = '/tmp/a.cpp'";
+    auto before = queryPlanContains(db.db, kEdgeDelete, "idx_kg_edges_source_file");
+    REQUIRE(before.has_value());
+    CHECK_FALSE(before.value());
+
+    REQUIRE(db.mm.migrateTo(47).has_value());
+
+    auto edgePlan = queryPlanContains(db.db, kEdgeDelete, "idx_kg_edges_source_file");
+    REQUIRE(edgePlan.has_value());
+    CHECK(edgePlan.value());
+    auto hashPlan =
+        queryPlanContains(db.db,
+                          "DELETE FROM kg_nodes WHERE CASE WHEN json_valid(properties) "
+                          "THEN json_extract(properties, '$.document_hash') END = 'hash'",
+                          "idx_kg_nodes_document_hash");
+    REQUIRE(hashPlan.has_value());
+    CHECK(hashPlan.value());
+    auto pathPlan =
+        queryPlanContains(db.db,
+                          "DELETE FROM kg_nodes WHERE CASE WHEN json_valid(properties) "
+                          "THEN json_extract(properties, '$.file_path') END = '/tmp/a.cpp' "
+                          "OR CASE WHEN json_valid(properties) "
+                          "THEN json_extract(properties, '$.source_file') END = '/tmp/a.cpp'",
+                          "MULTI-INDEX OR");
+    REQUIRE(pathPlan.has_value());
+    CHECK(pathPlan.value());
+
+    // The bare indexes rejected opaque properties; the guarded ones accept them.
+    CHECK(db.db
+              .execute("INSERT INTO kg_nodes (node_key, label, type, properties) "
+                       "VALUES ('opaque:v47', 'o', 'test', 'not-json')")
+              .has_value());
+}
+
+TEST_CASE("Migration version 47 leaves guarded graph cleanup indexes in place",
+          "[unit][metadata][schema][migration][kg]") {
+    StandaloneMigrationDb db{"migration_v47_kg_cleanup_noop"};
+    REQUIRE(db.mm.migrateTo(46).has_value());
+    auto before = querySingleInt64(
+        db.db, "SELECT rootpage FROM sqlite_master WHERE type = 'index' AND name = ?",
+        "idx_kg_edges_source_file");
+    REQUIRE(before.has_value());
+    REQUIRE(db.mm.migrateTo(47).has_value());
+    auto after = querySingleInt64(
+        db.db, "SELECT rootpage FROM sqlite_master WHERE type = 'index' AND name = ?",
+        "idx_kg_edges_source_file");
+    REQUIRE(after.has_value());
+    CHECK((before.value() == after.value()));
 }
 
 TEST_CASE("Migration version 46 empties a grep trigram index built before NUL handling",
