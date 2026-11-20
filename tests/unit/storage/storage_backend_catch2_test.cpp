@@ -2,7 +2,7 @@
  * Storage Backend Tests (Catch2)
  *
  * Comprehensive tests for the storage backend abstraction layer.
- * Tests FilesystemBackend and StorageBackendFactory functionality.
+ * Tests FilesystemBackend functionality.
  */
 
 #include <algorithm>
@@ -1634,86 +1634,9 @@ TEST_CASE("URLBackend - HEAD exists with 2xx returns true", "[storage][backend][
 // StorageBackendFactory - URL Parsing
 // =============================================================================
 
-TEST_CASE("StorageBackendFactory - URL Parsing", "[storage][backend][factory][url]") {
-    SECTION("Local path without scheme") {
-        auto config = StorageBackendFactory::parseURL("/path/to/storage");
-        CHECK(config.type == "filesystem");
-        CHECK(config.localPath == "/path/to/storage");
-    }
-
-    SECTION("File scheme URL") {
-        auto config = StorageBackendFactory::parseURL("file:///path/to/storage");
-        CHECK(config.type == "filesystem");
-        CHECK(config.localPath == "/path/to/storage");
-    }
-
-    SECTION("S3 scheme URL") {
-        auto config = StorageBackendFactory::parseURL("s3://my-bucket/prefix/path");
-        CHECK(config.type == "s3");
-        CHECK(config.url == "s3://my-bucket/prefix/path");
-    }
-
-    SECTION("HTTP scheme URL") {
-        auto config = StorageBackendFactory::parseURL("http://example.com/storage");
-        CHECK(config.type == "http");
-        CHECK(config.url == "http://example.com/storage");
-    }
-
-    SECTION("HTTPS scheme URL") {
-        auto config = StorageBackendFactory::parseURL("https://secure.example.com/storage");
-        CHECK(config.type == "https");
-        CHECK(config.url == "https://secure.example.com/storage");
-    }
-
-    SECTION("URL with query parameters") {
-        auto config = StorageBackendFactory::parseURL(
-            "s3://bucket/path?cache_size=1048576&cache_ttl=7200&timeout=60");
-        CHECK(config.type == "s3");
-        CHECK(config.cacheSize == 1048576u);
-        CHECK(config.cacheTTL == 7200u);
-        CHECK(config.requestTimeout == 60u);
-    }
-
-    SECTION("URL with partial query parameters") {
-        auto config = StorageBackendFactory::parseURL("s3://bucket/path?cache_size=2097152");
-        CHECK(config.type == "s3");
-        CHECK(config.cacheSize == 2097152u);
-        // Default values for unspecified params
-        CHECK(config.cacheTTL == 3600u);
-        CHECK(config.requestTimeout == 30u);
-    }
-}
-
 // =============================================================================
 // StorageBackendFactory - Backend Creation
 // =============================================================================
-
-TEST_CASE("StorageBackendFactory - Backend Creation", "[storage][backend][factory][create]") {
-    TestDirectory testDir;
-
-    SECTION("Create filesystem backend from config") {
-        BackendConfig config;
-        config.type = "filesystem";
-        config.localPath = testDir.subdir("fs_backend");
-
-        auto backend = StorageBackendFactory::create(config);
-        REQUIRE(backend != nullptr);
-        CHECK(backend->getType() == "filesystem");
-        CHECK_FALSE(backend->isRemote());
-    }
-
-    SECTION("Factory respects configuration options") {
-        BackendConfig config;
-        config.type = "filesystem";
-        config.localPath = testDir.subdir("config_test");
-        config.maxConcurrentOps = 5;
-        config.requestTimeout = 60;
-
-        auto backend = StorageBackendFactory::create(config);
-        REQUIRE(backend != nullptr);
-        // Backend created successfully with custom config
-    }
-}
 
 // =============================================================================
 // BackendConfig - Default Values

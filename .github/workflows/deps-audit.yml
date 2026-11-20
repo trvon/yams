@@ -18,6 +18,11 @@ permissions:
   contents: read
   issues: write
 
+env:
+  # One Conan client for every workflow; also part of the Conan cache key so a
+  # cache written by one client version is never restored under another.
+  CONAN_VERSION: "2.34.0"
+
 jobs:
   deps-audit:
     runs-on: ubuntu-latest
@@ -34,7 +39,7 @@ jobs:
       - name: Install conan + osv-scanner
         run: |
           python -m pip install --upgrade pip
-          python -m pip install 'conan==2.21.*'
+          python -m pip install "conan==${CONAN_VERSION}"
           curl -fsSL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64 -o /usr/local/bin/osv-scanner
           chmod +x /usr/local/bin/osv-scanner
 

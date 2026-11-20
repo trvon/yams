@@ -7,6 +7,8 @@
 
 #include <yams/daemon/client/ipc_failure.h>
 
+#include "transport_disconnect.h"
+
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
@@ -265,7 +267,7 @@ AsioTransportAdapter::async_read_exact(boost::asio::local::stream_protocol::sock
 
     auto& [ec, bytes_read] = std::get<0>(read_result);
     if (ec) {
-        co_return Error{ErrorCode::NetworkError, yams::format("Read failed: {}", ec.message())};
+        co_return Error{ErrorCode::NetworkError, "Read failed: " + detail::describeReadError(ec)};
     }
 
     co_return std::move(*buffer);

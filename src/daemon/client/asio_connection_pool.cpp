@@ -12,6 +12,8 @@
 
 #include <yams/daemon/client/ipc_failure.h>
 
+#include "transport_disconnect.h"
+
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
@@ -346,23 +348,18 @@ async_read_exact(AsioConnection::socket_t& socket, size_t size, std::chrono::mil
         }
         if (ec == boost::asio::error::eof) {
             co_return Error{ErrorCode::NetworkError,
-                            formatIpcFailure(IpcFailureKind::Eof, ec.message())};
+                            formatIpcFailure(IpcFailureKind::Eof, detail::describeReadError(ec))};
         }
         if (ec == boost::asio::error::operation_aborted) {
             co_return Error{ErrorCode::OperationCancelled,
                             formatIpcFailure(IpcFailureKind::Cancelled, ec.message())};
         }
 
-        // Heuristic mapping for common AF_UNIX socket drops.
-        const auto msg = ec.message();
-        if (msg.find("Broken pipe") != std::string::npos ||
-            msg.find("EPIPE") != std::string::npos ||
-            msg.find("Connection reset") != std::string::npos ||
-            msg.find("ECONNRESET") != std::string::npos) {
-            co_return Error{ErrorCode::NetworkError,
-                            formatIpcFailure(IpcFailureKind::ResetOrBrokenPipe, msg)};
-        }
-        co_return Error{ErrorCode::NetworkError, formatIpcFailure(IpcFailureKind::Other, msg)};
+        // A dropped AF_UNIX socket: EPIPE/ECONNRESET on Linux, ENOTCONN/ECONNABORTED on macOS.
+        const auto kind = detail::isExpectedDisconnectError(ec) ? IpcFailureKind::ResetOrBrokenPipe
+                                                                : IpcFailureKind::Other;
+        co_return Error{ErrorCode::NetworkError,
+                        formatIpcFailure(kind, detail::describeReadError(ec))};
     }
 
     if (ipc_wait_trace_enabled()) {
@@ -745,7 +742,12 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
 
 awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_connection() {
     const auto create_start = std::chrono::steady_clock::now();
-    auto io_guard = GlobalIOContext::instance().acquire_operation_guard();
+    // This coroutine runs on the IO threads, which a pending reset() needs to finish the
+    // creations it waits for: fail fast rather than block one of them on the lock.
+    auto io_guard = GlobalIOContext::instance().try_acquire_operation_guard();
+    if (!io_guard.owns_lock()) {
+        co_return Error{ErrorCode::SystemShutdown, "Client IO is being reset"};
+    }
 
     struct PendingCreateGuard {
         AsioConnectionPool& pool;

@@ -581,7 +581,7 @@ if (-not (Test-Path $conanHostProfile)) {
 }
 
 Write-Host "Using Conan host profile: $conanHostProfile"
-$conanArgs += @('-pr:h', $conanHostProfile, '-pr:b', 'default')
+$conanArgs += @('-pr:h', $conanHostProfile, '-pr:b', '.\conan\profiles\build')
 
 # Enable tests/benchmarks for Debug/Profiling/Fuzzing builds (parity with setup.sh)
 if ($BuildType -in @('Debug','Profiling','Fuzzing')) {

@@ -24,6 +24,11 @@ name: Windows test diagnose
 permissions:
   contents: read
 
+env:
+  # One Conan client for every workflow; also part of the Conan cache key so a
+  # cache written by one client version is never restored under another.
+  CONAN_VERSION: "2.34.0"
+
 jobs:
   diagnose:
     name: Diagnose ${{ inputs.test_binary || 'catch2_search_service' }} (windows-x86_64)
@@ -54,7 +59,7 @@ jobs:
           python -m venv "$PYTOOLS_DIR"
           "$PYTOOLS_DIR/Scripts/python.exe" -m pip install --upgrade pip
           "$PYTOOLS_DIR/Scripts/python.exe" -m pip install --upgrade \
-            'conan==2.21.*' 'meson==1.4.*' 'ninja==1.11.*'
+            "conan==${CONAN_VERSION}" 'meson==1.4.*' 'ninja==1.11.*'
           echo "$PYTOOLS_DIR/Scripts" >> "$GITHUB_PATH"
 
       - name: Install Zig
@@ -78,18 +83,17 @@ jobs:
             ~/.conan2/recipes
             ~/.conan2/metadata
             ~/.conan2/s
-          key: conan2-${{ runner.os }}-windows-x86_64-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
+          key: conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-windows-x86_64-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
           restore-keys: |
-            conan2-${{ runner.os }}-windows-x86_64-
-            conan2-${{ runner.os }}-
+            conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-windows-x86_64-
 
       - name: Setup Conan profile
         shell: bash
         run: |
           mkdir -p ~/.conan2
           cp .conan/global.conf ~/.conan2/global.conf 2>/dev/null || true
+          # setup.ps1 uses -pr:b .\conan\profiles\build (detected default + cppstd=20).
           conan profile detect --force
-          sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
 
       - name: Configure and build (Debug)
         shell: pwsh

@@ -84,7 +84,7 @@ src/metadata/connection_pool.cpp:1000:portability/jthread # feature-test guarded
 src/metadata/database.cpp:29:portability/env-read # reviewed raw environment read
 src/metadata/database.cpp:476:portability/path-cstr # std::string filename, not filesystem::path
 src/metadata/metadata_repository.cpp:1502:portability/env-read # reviewed raw environment read
-src/metadata/migration.cpp:1563:portability/env-read # reviewed raw environment read
+src/metadata/migration.cpp:1565:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:89:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:103:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:120:portability/env-read # reviewed raw environment read
@@ -252,7 +252,7 @@ tests/unit/cli/version_generated_header_catch2_test.cpp:60:portability/env-read 
 tests/unit/cli/version_generated_header_catch2_test.cpp:83:portability/env-read # reviewed raw environment read
 tests/unit/daemon/components/vector_system_manager_test.cpp:129:portability/env-read # reviewed raw environment read
 tests/unit/daemon/components/vector_system_manager_test.cpp:130:portability/env-read # reviewed raw environment read
-tests/unit/daemon/daemon_catch2_test.cpp:1427:portability/env-read # reviewed raw environment read
+tests/unit/daemon/daemon_catch2_test.cpp:1433:portability/env-read # reviewed raw environment read
 tests/unit/daemon/daemon_metrics_status_test.cpp:962:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:36:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:44:portability/env-read # reviewed raw environment read
@@ -270,7 +270,7 @@ tests/unit/extraction/plugin_process_launcher_test.cpp:59:portability/env-read #
 tests/unit/extraction/plugin_process_test.cpp:82:portability/env-read # reviewed raw environment read
 tests/unit/metadata/connection_pool_catch2_test.cpp:33:portability/env-read # reviewed raw environment read
 tests/unit/metadata/corpus_stats_catch2_test.cpp:43:portability/env-read # reviewed raw environment read
-tests/unit/metadata/database_catch2_test.cpp:21:portability/env-read # reviewed raw environment read
+tests/unit/metadata/database_catch2_test.cpp:23:portability/env-read # reviewed raw environment read
 tests/unit/metadata/fts5_performance_stress_catch2_test.cpp:31:portability/env-read # reviewed raw environment read
 tests/unit/metadata/fts5_performance_stress_catch2_test.cpp:36:portability/env-read # reviewed raw environment read
 tests/unit/metadata/kg_relation_summary_catch2_test.cpp:19:portability/env-read # reviewed raw environment read

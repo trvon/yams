@@ -183,6 +183,12 @@ def listing_env(reg: Registration, base: dict[str, str], windows: bool) -> dict[
     """The environment `meson test` would give this registration."""
     env = dict(base)
     env.update(reg.env)
+    # The prebuilt Catch2 is not ASan-instrumented, so its XML listing writes into containers
+    # that instrumented test code allocated and ASan reports a false container-overflow. Only
+    # the listing is affected; the test runs themselves keep the check.
+    asan = env.get("ASAN_OPTIONS", "")
+    if "detect_container_overflow" not in asan:
+        env["ASAN_OPTIONS"] = f"{asan}:detect_container_overflow=0" if asan else "detect_container_overflow=0"
     if windows and reg.extra_paths:
         env["PATH"] = os.pathsep.join([*reg.extra_paths, env.get("PATH", "")])
     return env

@@ -26,6 +26,11 @@ name: Release
 permissions:
   contents: write
 
+env:
+  # One Conan client for every workflow; also part of the Conan cache key so a
+  # cache written by one client version is never restored under another.
+  CONAN_VERSION: "2.34.0"
+
 jobs:
   resolve-release:
     name: Resolve immutable release source
@@ -518,6 +523,7 @@ jobs:
 
           docker build --platform "${docker_platform}" \
             --build-arg "ARCH_BASE_IMAGE=${{ matrix.arch_base_image }}" \
+            --build-arg "CONAN_VERSION=${CONAN_VERSION}" \
             -t yams/ci-arch:latest -f docker/local-ci/arch-package.Dockerfile .
 
           mkdir -p "${build_dir}"
@@ -528,6 +534,7 @@ jobs:
             -w /workspace \
             -e RELEASE_CHANNEL="${channel}" \
             -e GIT_REF="${git_ref_value}" \
+            -e BASE_VERSION="${{ needs.resolve-release.outputs.base_version }}" \
             -e BUILD_DIR="${build_dir}" \
             -e YAMS_BUILD_DIR="${meson_build_dir}" \
             -e HOST_UID=0 \
@@ -633,11 +640,12 @@ jobs:
             ~/.conan2/recipes
             ~/.conan2/metadata
             ~/.conan2/s
-          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
+          # Same Conan client and same os/arch suffix only: no cross-arch or
+          # cross-version fallback. Compiler upgrades need no key bump because
+          # host profiles carry the detected compiler.version (package_id).
+          key: conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
           restore-keys: |
-            conan2-${{ runner.os }}-${{ matrix.suffix }}-
-            conan2-${{ runner.os }}-linux-x86_64-
-            conan2-${{ runner.os }}-
+            conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-${{ matrix.suffix }}-
       - name: Conan cache diagnostics
         if: always() && matrix.arch_container != true
         shell: bash
@@ -786,7 +794,7 @@ jobs:
             fi
           fi
           "$VENV_PYTHON" -m pip install --upgrade pip
-          "$VENV_PYTHON" -m pip install --upgrade conan meson 'ninja>=1.10'
+          "$VENV_PYTHON" -m pip install --upgrade "conan==${CONAN_VERSION}" meson 'ninja>=1.10'
           echo "$TOOL_BIN" >> "$GITHUB_PATH"
           export PATH="$TOOL_BIN:$PATH"
           conan --version
@@ -878,31 +886,6 @@ jobs:
           else
             echo "Detected clang major: $RAW_VER"
           fi
-      - name: Compare profile vs detected clang (advice)
-        if: matrix.arch_container != true
-        shell: bash
-        run: |
-          set -euo pipefail
-          PROFILE_FILE="./conan/profiles/host-linux-clang"
-          if [ -f "$PROFILE_FILE" ]; then
-            PROFILE_VER=$(grep -E '^compiler.version=' "$PROFILE_FILE" | sed -E 's/.*=//')
-          else
-            PROFILE_VER="(missing profile)"
-          fi
-          if command -v clang++ >/dev/null 2>&1; then
-            SYS_VER=$(clang++ --version | sed -E -n 's/.*version ([0-9]+).*/\1/p' | head -1 || true)
-          elif command -v clang >/dev/null 2>&1; then
-            SYS_VER=$(clang --version | sed -E -n 's/.*version ([0-9]+).*/\1/p' | head -1 || true)
-          else
-            SYS_VER="unknown"
-          fi
-          echo "Profile declares clang version: $PROFILE_VER"
-          echo "System detected clang version: $SYS_VER"
-          if [ -n "$SYS_VER" ] && [ "$SYS_VER" != "unknown" ] && [ "$PROFILE_VER" != "$SYS_VER" ]; then
-            echo "NOTE: Mismatch between profile (clang $PROFILE_VER) and system (clang $SYS_VER)." >&2
-            echo "      Consider either installing clang-$PROFILE_VER or adjusting profile to $SYS_VER for local/act runs to avoid subtle ABI or flag differences." >&2
-          fi
-
       - name: Check Conan (self-hosted sanity)
         if: ${{ !matrix.hosted && matrix.arch_container != true }}
         shell: bash

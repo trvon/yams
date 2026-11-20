@@ -324,6 +324,87 @@ class OnnxRuntimeConan(ConanFile):
         """Get DirectML package URL from NuGet"""
         return f"https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/{self.version}"
 
+    # SHA-256 of Microsoft.ML.OnnxRuntime.<version>.nupkg from nuget.org. The NuGet fallback only
+    # runs for versions listed here, so a package it unpacks is always the one that was checked.
+    _NUGET_CPU_SHA256 = {
+        "1.23.0": "cadbf21358de4b6002eddce08329465071271d52bb1483779f6f09670af281fc",
+    }
+
+    def _nuget_runtime_id(self):
+        os_name = str(self.settings.os)
+        arch = str(self.settings.arch)
+        if os_name == "Linux":
+            return {"x86_64": "linux-x64", "armv8": "linux-arm64", "aarch64": "linux-arm64"}.get(arch)
+        if os_name == "Macos":
+            return {"x86_64": "osx-x64", "armv8": "osx-arm64"}.get(arch)
+        if os_name == "Windows":
+            return {"x86_64": "win-x64"}.get(arch)
+        return None
+
+    def _fetch_cpu_from_nuget(self):
+        """Fetch the CPU runtime from Microsoft's NuGet package.
+
+        The GitHub release archives can be unavailable (microsoft/onnxruntime returned 404 from
+        2026-11-17). Microsoft.ML.OnnxRuntime carries the same libraries (byte-identical
+        libonnxruntime.so for linux-x64 1.23.0) and headers. Lay them out like a release
+        archive, onnxruntime-*/{include,lib}, so _package_prebuilt handles both sources.
+        """
+        import zipfile
+
+        sha256 = self._NUGET_CPU_SHA256.get(str(self.version))
+        rid = self._nuget_runtime_id()
+        if not sha256 or not rid:
+            return False
+        nupkg = os.path.join(self.build_folder, f"microsoft.ml.onnxruntime.{self.version}.nupkg")
+        url = (
+            "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/"
+            f"{self.version}/microsoft.ml.onnxruntime.{self.version}.nupkg"
+        )
+        self.output.info(f"Downloading ONNX Runtime from NuGet: {url}")
+        download(self, url, nupkg, sha256=sha256)
+
+        root = os.path.join(self.build_folder, f"onnxruntime-nuget-{rid}-{self.version}")
+        include_dir = os.path.join(root, "include")
+        lib_dir = os.path.join(root, "lib")
+        mkdir(self, include_dir)
+        mkdir(self, lib_dir)
+        native_prefix = f"runtimes/{rid}/native/"
+        with zipfile.ZipFile(nupkg) as archive:
+            for name in archive.namelist():
+                base = name.rsplit("/", 1)[-1]
+                if not base:
+                    continue
+                if name.startswith("build/native/include/") and base.endswith((".h", ".hpp")):
+                    # NuGet ships the headers with CRLF; the release archives use LF.
+                    text = archive.read(name).replace(b"\r\n", b"\n")
+                    with open(os.path.join(include_dir, base), "wb") as out:
+                        out.write(text)
+                elif name.startswith(native_prefix):
+                    with open(os.path.join(lib_dir, base), "wb") as out:
+                        out.write(archive.read(name))
+                elif name == "LICENSE" or base in ("LICENSE", "LICENSE.txt"):
+                    with open(os.path.join(root, "LICENSE"), "wb") as out:
+                        out.write(archive.read(name))
+
+        # Match the release archives' names. Linux: the library's SONAME is libonnxruntime.so.<major>,
+        # so ship libonnxruntime.so.<version> with .so.<major> and .so links. macOS: its install
+        # name is @rpath/libonnxruntime.<version>.dylib.
+        major = str(self.version).split(".")[0]
+        so = os.path.join(lib_dir, "libonnxruntime.so")
+        dylib = os.path.join(lib_dir, "libonnxruntime.dylib")
+        if os.path.isfile(so) and not os.path.islink(so):
+            os.replace(so, os.path.join(lib_dir, f"libonnxruntime.so.{self.version}"))
+            os.symlink(f"libonnxruntime.so.{self.version}", os.path.join(lib_dir, f"libonnxruntime.so.{major}"))
+            os.symlink(f"libonnxruntime.so.{major}", so)
+        elif os.path.isfile(dylib) and not os.path.islink(dylib):
+            os.replace(dylib, os.path.join(lib_dir, f"libonnxruntime.{self.version}.dylib"))
+            os.symlink(f"libonnxruntime.{self.version}.dylib", dylib)
+
+        if not os.listdir(lib_dir) or not os.path.isfile(os.path.join(include_dir, "onnxruntime_c_api.h")):
+            raise ConanInvalidConfiguration(f"NuGet package has no {rid} runtime or headers")
+        self.output.info(f"Using ONNX Runtime {self.version} from NuGet ({rid})")
+        return True
+
     def source(self):
         # Source download happens in build() where options are available
         pass
@@ -480,7 +561,15 @@ class OnnxRuntimeConan(ConanFile):
             # Download prebuilt binaries
             url = self._get_download_url()
             self.output.info(f"Downloading ONNX Runtime from: {url}")
-            get(self, url, destination=self.build_folder, strip_root=False)
+            try:
+                get(self, url, destination=self.build_folder, strip_root=False)
+            except Exception as error:
+                # The NuGet package is the CPU runtime only; GPU and DirectML have no fallback.
+                if self.options.with_gpu:
+                    raise
+                self.output.warning(f"ONNX Runtime release download failed: {error}")
+                if not self._fetch_cpu_from_nuget():
+                    raise
 
     def _package_source_build(self):
         """Package libraries from source build"""

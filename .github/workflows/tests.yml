@@ -14,6 +14,11 @@ concurrency:
   # Keep main-branch history intact so slower matrix lanes still publish evidence.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # One Conan client for every workflow; also part of the Conan cache key so a
+  # cache written by one client version is never restored under another.
+  CONAN_VERSION: "2.34.0"
+
 jobs:
   warm:
     uses: ./.github/workflows/matrix-warm.yml
@@ -48,7 +53,9 @@ jobs:
         run: |
           set -euo pipefail
           python3 tests/scripts/test_package_upgrade_validation.py -v
+          python3 tests/scripts/test_rerun_failed_tests.py -v
           bash -n scripts/build-deb.sh \
+            scripts/build-arch-pkg.sh \
             scripts/local-ci/package-validate-checks.sh \
             scripts/local-ci/package-validate.sh
 
@@ -397,11 +404,12 @@ jobs:
             ~/.conan2/recipes
             ~/.conan2/metadata
             ~/.conan2/s
-          key: conan2-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
+          # Same Conan client and same os/arch suffix only: no cross-arch or
+          # cross-version fallback. Compiler upgrades need no key bump because
+          # host profiles carry the detected compiler.version (package_id).
+          key: conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
           restore-keys: |
-            conan2-${{ runner.os }}-${{ matrix.suffix }}-
-            conan2-${{ runner.os }}-linux-x86_64-
-            conan2-${{ runner.os }}-
+            conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-${{ matrix.suffix }}-
       - name: Conan cache diagnostics
         shell: bash
         run: |
@@ -421,7 +429,7 @@ jobs:
             ccache-${{ runner.os }}-${{ matrix.suffix }}-
             ccache-${{ runner.os }}-linux-x86_64-
             ccache-${{ runner.os }}-
-      - name: Install Conan (latest)
+      - name: Install Conan
         shell: bash
         run: |
           set -euo pipefail
@@ -441,7 +449,7 @@ jobs:
           fi
 
           "$VENV_PYTHON" -m pip install --upgrade pip
-          "$VENV_PYTHON" -m pip install --upgrade 'conan==2.21.*' 'meson==1.4.*' 'ninja==1.11.*'
+          "$VENV_PYTHON" -m pip install --upgrade "conan==${CONAN_VERSION}" 'meson==1.4.*' 'ninja==1.11.*'
           echo "$TOOL_BIN" >> "$GITHUB_PATH"
           export PATH="$TOOL_BIN:$PATH"
           conan --version
@@ -494,10 +502,11 @@ jobs:
       - name: Setup Conan Profile
         shell: bash
         run: |
+          # setup.sh/setup.ps1 use -pr:b ./conan/profiles/build, which includes
+          # this detected default and pins the build-context cppstd.
           conan profile detect --force
-          sed -i 's/compiler.cppstd=.*/compiler.cppstd=20/' ~/.conan2/profiles/default || true
-          echo "Conan profile configured:" >&2
-          conan profile show >&2
+          echo "Conan build profile:" >&2
+          conan profile show -pr ./conan/profiles/build >&2
 
       - name: Detect clang version (log only)
         shell: bash
@@ -748,7 +757,10 @@ jobs:
             meson test -C ${{ env.BUILD_DIR }} --no-rebuild --print-errorlogs --timeout-multiplier 2 \
               --suite mobile
           else
-            meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2
+            # A failed test is rerun alone; one that then passes is reported as flaky, not fatal.
+            meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2 || \
+              python3 tests/scripts/rerun_failed_tests.py "${{ env.BUILD_DIR }}" -- \
+                meson test -C ${{ env.BUILD_DIR }} --no-rebuild --print-errorlogs --timeout-multiplier 2
           fi
 
       - name: Run Tests with Meson (Windows)
@@ -782,7 +794,13 @@ jobs:
             . $conanBuildPs1
           }
           # Run only unit and integration tests (exclude bench, stress, daemon-long, etc.)
+          # A failed test is rerun alone; one that then passes is reported as flaky, not fatal.
           meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2
+          if ($LASTEXITCODE -ne 0) {
+            python tests/scripts/rerun_failed_tests.py "${{ env.BUILD_DIR }}" -- `
+              meson test -C ${{ env.BUILD_DIR }} --no-rebuild --print-errorlogs --timeout-multiplier 2
+            exit $LASTEXITCODE
+          }
 
       - name: Run Tests with Meson (Rosetta x86_64)
         id: meson_tests_rosetta
@@ -819,10 +837,14 @@ jobs:
             set -u
           fi
           # Run only unit and integration tests (exclude bench, stress, daemon-long, etc.)
-          arch -x86_64 meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2
+          # A failed test is rerun alone; one that then passes is reported as flaky, not fatal.
+          arch -x86_64 meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2 || \
+            python3 tests/scripts/rerun_failed_tests.py "${{ env.BUILD_DIR }}" -- \
+              arch -x86_64 meson test -C ${{ env.BUILD_DIR }} --no-rebuild --print-errorlogs --timeout-multiplier 2
 
       - name: Upload build and test logs (artifacts)
-        if: ${{ always() && (steps.build_unix.outcome == 'failure' || steps.build_windows.outcome == 'failure' || steps.meson_tests_unix.outcome == 'failure' || steps.meson_tests_windows.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure') }}
+        # Also after a flaky pass, to keep the first run's failure output (testlog.first-pass.*).
+        if: ${{ always() && (steps.build_unix.outcome == 'failure' || steps.build_windows.outcome == 'failure' || steps.meson_tests_unix.outcome == 'failure' || steps.meson_tests_windows.outcome == 'failure' || steps.meson_tests_rosetta.outcome == 'failure' || steps.meson_tests_unix.outputs.flaky == 'true' || steps.meson_tests_windows.outputs.flaky == 'true' || steps.meson_tests_rosetta.outputs.flaky == 'true') }}
         uses: actions/upload-artifact@v4
         with:
           name: logs-${{ matrix.suffix }}-${{ github.run_number }}

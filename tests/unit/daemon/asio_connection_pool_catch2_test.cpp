@@ -259,6 +259,36 @@ TEST_CASE("AsioConnectionPool shutdown waits for in-progress connection creation
     CHECK(result.error().code == yams::ErrorCode::SystemShutdown);
 }
 
+TEST_CASE("AsioConnectionPool fails fast instead of blocking an IO thread during a reset",
+          "[daemon][connection-pool][shutdown][unit]") {
+    // GlobalIOContext::reset() takes the operation lock exclusively and waits for in-flight
+    // connection creations, which run on the IO threads. A creation that blocked an IO thread
+    // on that lock could stop those in-flight creations from finishing: reset() then never
+    // returned (macOS, whose shared_mutex makes new readers wait behind a pending writer).
+    auto runtimeDir = makeTempRuntimeDir("reset-create-" + randomSuffix());
+    auto socketPath = runtimeDir / "missing.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    TransportOptions opts;
+    opts.socketPath = socketPath;
+    opts.requestTimeout = 2s;
+    opts.poolEnabled = false;
+    auto pool = std::make_shared<AsioConnectionPool>(opts, false);
+
+    GlobalIOContext::testing_begin_reset();
+    auto fut = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
+                                     boost::asio::use_future);
+    const auto status = fut.wait_for(2s);
+    GlobalIOContext::testing_end_reset();
+
+    REQUIRE(status == std::future_status::ready);
+    auto result = fut.get();
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == yams::ErrorCode::SystemShutdown);
+    pool->shutdown(100ms);
+}
+
 TEST_CASE("AsioConnectionPool drops closed socket on reuse", "[daemon][connection-pool][unit]") {
 #ifdef _WIN32
     SKIP("Unix domain socket tests skipped on Windows");

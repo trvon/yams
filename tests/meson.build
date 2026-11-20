@@ -1489,6 +1489,14 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'transport_disconnect',
+    'sources': files('unit/daemon/transport_disconnect_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'client'],
+    'timeout': 30,
+  }]
+
+  catch2_test_table += [{
     'name': 'asio_connection_pool',
     'sources': files('unit/daemon/asio_connection_pool_catch2_test.cpp'),
     'deps': test_deps,
@@ -1841,6 +1849,7 @@ if catch2_dep.found()
       'unit/storage/storage_backend_factory_catch2_test.cpp',
       'unit/storage/storage_runtime_resolver_catch2_test.cpp',
       'unit/storage/storage_engine_catch2_test.cpp',
+      'unit/storage/storage_engine_integrity_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,

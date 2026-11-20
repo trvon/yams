@@ -530,13 +530,17 @@ TEST_CASE("Client timeout recovery: Shutdown cancels in-flight request",
 
     REQUIRE(done.load());
     if (requestError.has_value()) {
+        // A reconnect that races the shutdown fails fast with SystemShutdown ("Client IO
+        // is being reset") rather than blocking an IO thread on the reset lock.
         const auto& msg = requestError->message;
         bool hasContext =
+            requestError->code == yams::ErrorCode::SystemShutdown ||
             msg.find("cancel") != std::string::npos ||
             msg.find("Connection") != std::string::npos ||
             msg.find("closed") != std::string::npos || msg.find("timeout") != std::string::npos ||
             msg.find("daemon") != std::string::npos || msg.find("pipe") != std::string::npos ||
             msg.find("shutdown") != std::string::npos;
+        INFO("request error: " << msg);
         REQUIRE(hasContext);
     }
 }

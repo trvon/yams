@@ -75,6 +75,22 @@ class RegistrationTest(unittest.TestCase):
         # meson test leaves PATH alone elsewhere (shared libraries load through rpath).
         self.assertEqual(checker.listing_env(reg, base, windows=False)["PATH"], "/usr/bin")
 
+    def test_listing_disables_asan_container_overflow(self) -> None:
+        reg = checker.registration_from_entry(entry("t", ["/b/catch2_t"]))
+        self.assertIsInstance(reg, checker.Registration)
+        env = checker.listing_env(reg, {"ASAN_OPTIONS": "halt_on_error=1"}, windows=False)
+        self.assertEqual(env["ASAN_OPTIONS"], "halt_on_error=1:detect_container_overflow=0")
+        self.assertEqual(
+            checker.listing_env(reg, {}, windows=False)["ASAN_OPTIONS"],
+            "detect_container_overflow=0",
+        )
+        # An explicit setting wins.
+        explicit = {"ASAN_OPTIONS": "detect_container_overflow=1"}
+        self.assertEqual(
+            checker.listing_env(reg, explicit, windows=False)["ASAN_OPTIONS"],
+            "detect_container_overflow=1",
+        )
+
     def test_listing_args_drop_reporter_and_keep_specs(self) -> None:
         self.assertEqual(
             checker.listing_args(["[a]~[slow]", "-r", "junit", "--out=x", "--allow-running-no-tests"]),

@@ -312,9 +312,6 @@ else
 	CONAN_ARGS+=(--update --build=missing)
 fi
 
-# Add common Conan options (sqlite3 with FTS5, etc.)
-CONAN_ARGS+=(-o "sqlite3/*:fts5=True")
-
 # Fuzzing builds: disable programs in zstd to avoid symlink issues in Docker
 if [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
 	CONAN_ARGS+=(-o "zstd/*:build_programs=False")
@@ -359,8 +356,8 @@ if [[ "${USE_PROFILE}" == "true" ]]; then
 		export CXX="g++"
 	fi
 	# Add profile to Conan args
-	CONAN_ARGS+=(-pr:h "${CONAN_HOST_PROFILE}" -pr:b default)
-	CONAN_ARGS+=(-s:h "build_type=${BUILD_TYPE}")
+	# build_type is already set for the host context at the top of CONAN_ARGS.
+	CONAN_ARGS+=(-pr:h "${CONAN_HOST_PROFILE}" -pr:b ./conan/profiles/build)
 	CONAN_ARGS+=(-s:h "compiler.cppstd=${CPPSTD}")
 	# Add architecture if specified
 	if [[ -n "${CONAN_ARCH}" ]]; then
@@ -548,7 +545,7 @@ fi
 # Enable Tracy profiling for profiling builds
 if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
 	echo "Tracy profiling enabled"
-	CONAN_ARGS+=(-o "yams/*:enable_profiling=True")
+	CONAN_ARGS+=(-o "&:enable_profiling=True")
 	CONAN_ARGS+=(-o "tracy/*:enable=True")
 	# Tracy's CMake links ROCm hooks whenever /opt/rocm exists. Those hooks make every
 	# binary need librocprofiler-sdk at run time. Keep them out unless asked for.
@@ -559,9 +556,9 @@ fi
 
 if [[ "${ENABLE_ONNX}" != "true" ]]; then
 	echo "ONNX support disabled (deprecated; pass --with-onnx to build it)"
-	CONAN_ARGS+=(-o "yams/*:enable_onnx=False")
+	CONAN_ARGS+=(-o "&:enable_onnx=False")
 else
-	CONAN_ARGS+=(-o "yams/*:enable_onnx=True")
+	CONAN_ARGS+=(-o "&:enable_onnx=True")
 	# --- Detect system-installed onnxruntime ---
 	# Override with YAMS_USE_SYSTEM_ONNX=true|false|auto (default: auto)
 	# When auto, we detect system onnxruntime and use it if found.
@@ -734,7 +731,7 @@ fi
 
 if [[ "${YAMS_DISABLE_RE2:-}" == "true" ]]; then
 	echo "RE2 disabled (YAMS_DISABLE_RE2=true)"
-	CONAN_ARGS+=(-o "yams/*:enable_re2=False")
+	CONAN_ARGS+=(-o "&:enable_re2=False")
 fi
 
 MESON_TOOLCHAIN_ARG=""

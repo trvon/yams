@@ -153,6 +153,50 @@ TEST_CASE("WALManager transaction lifecycle updates stats and enforces state",
     REQUIRE(manager.shutdown());
 }
 
+TEST_CASE("WALManager refuses to roll back a closed transaction",
+          "[unit][wal][manager][transaction]") {
+    TempDir temp;
+    WALManager::Config cfg;
+    cfg.walDirectory = temp.path / "wal";
+    cfg.compressOldLogs = false;
+    cfg.enableGroupCommit = false;
+    cfg.syncInterval = 1;
+
+    WALManager manager(cfg);
+    REQUIRE(manager.initialize());
+
+    // A committed transaction must stay committed: a later rollback would log a Rollback entry
+    // after its Commit.
+    auto committed = manager.beginTransaction();
+    REQUIRE(committed);
+    REQUIRE(committed->storeBlock(makeHash('d'), 64, 1));
+    REQUIRE(committed->commit());
+    const auto entriesAfterCommit = manager.getStats().totalEntries;
+
+    auto rollbackAfterCommit = committed->rollback();
+    REQUIRE_FALSE(rollbackAfterCommit);
+    CHECK(rollbackAfterCommit.error().code == ErrorCode::InvalidOperation);
+    CHECK(committed->getState() == Transaction::State::Committed);
+    CHECK(manager.getStats().totalEntries == entriesAfterCommit);
+
+    auto rolledBack = manager.beginTransaction();
+    REQUIRE(rolledBack);
+    REQUIRE(rolledBack->rollback());
+    CHECK(rolledBack->getState() == Transaction::State::RolledBack);
+    CHECK(manager.getStats().activeTransactions == 0);
+
+    auto secondRollback = rolledBack->rollback();
+    REQUIRE_FALSE(secondRollback);
+    CHECK(secondRollback.error().code == ErrorCode::InvalidOperation);
+    auto commitAfterRollback = rolledBack->commit();
+    REQUIRE_FALSE(commitAfterRollback);
+    CHECK(commitAfterRollback.error().code == ErrorCode::InvalidOperation);
+    // Refused calls must not close the transaction a second time.
+    CHECK(manager.getStats().activeTransactions == 0);
+
+    REQUIRE(manager.shutdown());
+}
+
 TEST_CASE("WALManager initialize preserves nonempty segments with a zero prefix",
           "[unit][wal][manager]") {
     TempDir temp;
