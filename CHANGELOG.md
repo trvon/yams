@@ -13,23 +13,14 @@
 
 ## [0.23.1](https://github.com/trvon/yams/compare/v0.23.0...v0.23.1) (2026-11-20)
 
+Fixes on top of 0.23.0.
 
 ### Fixed
 
-* **clice:** put the symspell rule before the vendored-code rule ([7f88e30](https://github.com/trvon/yams/commit/7f88e30fbd088e37da53c6fa138dbef5aa0d8f1e))
-* **client:** never block an IO thread on the reset lock ([6d5c951](https://github.com/trvon/yams/commit/6d5c9510a50c9864e070fe60c0e5384f8b21370b))
-* **client:** report a daemon that closes mid-read as a closed connection ([63fb1cf](https://github.com/trvon/yams/commit/63fb1cf68c765ca5d2b3039bea4900c2f297a660))
-* **client:** report a daemon that closes mid-write as a closed connection ([566708e](https://github.com/trvon/yams/commit/566708efff9fb75d4bf23e396114db239dc9a22f))
-* **conan:** detect clang in host-linux-clang and commit a build profile ([3f730eb](https://github.com/trvon/yams/commit/3f730eb543fcb8c1e78c05984841ba7151d7926c))
-* **conan:** fetch ONNX Runtime from NuGet when the GitHub release is gone ([0ff5238](https://github.com/trvon/yams/commit/0ff5238334feddfa74cc303761b63bd34e86b690))
-* **conan:** make recipe generate() effective and stop mutating settings/conf ([c95d097](https://github.com/trvon/yams/commit/c95d097bb3b817793bb84241ff35d57ba4708f96))
-* **metadata:** rebuild graph cleanup indexes left unguarded ([d1cb494](https://github.com/trvon/yams/commit/d1cb4941a75640e706fe806e479a07da986a4fde))
-* **packaging:** build the Arch aarch64 package and version Arch nightlies correctly ([5f89682](https://github.com/trvon/yams/commit/5f89682d6594f301b9bd6d1efa60fd0ae0cced11))
-* **packaging:** turn off oneTBB IPO through its recipe option ([488cf09](https://github.com/trvon/yams/commit/488cf09a79d755ad6b53cee1d325d934179f289f))
-* **packaging:** version Arch nightlies after their base release ([73cc57f](https://github.com/trvon/yams/commit/73cc57fae1f4d7f08ce6920abb186a3361628c2f))
-* **packaging:** version untagged Arch lane builds after the release tag ([fb46a10](https://github.com/trvon/yams/commit/fb46a10d5f0e923ac272d3998ffcad48faa12453))
-* **packaging:** version untagged Arch lane builds after the release tag ([f34231a](https://github.com/trvon/yams/commit/f34231ad7d7de4bf11b8790ec8dd95e13fa897d1))
-* **policy:** list Catch2 cases without ASan container-overflow checks ([a94e974](https://github.com/trvon/yams/commit/a94e974592e750599681424fb73b710fd85d3c97))
+* **metadata:** deleting a document no longer scans the whole knowledge graph (about 25 s to under 1 ms per document on a 45M-edge graph). Databases created before schema v37 rebuild four graph indexes once, at the first daemon start (about 30 s for 45M edges); each rebuild is logged. ([d1cb494](https://github.com/trvon/yams/commit/d1cb4941a75640e706fe806e479a07da986a4fde))
+* **client:** a daemon that closes mid-read or mid-write is reported as a closed connection, and a reconnect during a client reset fails fast instead of blocking an IO thread. ([63fb1cf](https://github.com/trvon/yams/commit/63fb1cf68c765ca5d2b3039bea4900c2f297a660), [566708e](https://github.com/trvon/yams/commit/566708efff9fb75d4bf23e396114db239dc9a22f), [6d5c951](https://github.com/trvon/yams/commit/6d5c9510a50c9864e070fe60c0e5384f8b21370b))
+* **build:** ONNX Runtime, including the macOS CoreML build, is fetched from NuGet when the GitHub release asset is gone; the Conan recipe's `generate()` takes effect; the Linux clang host profile is detected. ([0ff5238](https://github.com/trvon/yams/commit/0ff5238334feddfa74cc303761b63bd34e86b690), [c95d097](https://github.com/trvon/yams/commit/c95d097bb3b817793bb84241ff35d57ba4708f96), [3f730eb](https://github.com/trvon/yams/commit/3f730eb543fcb8c1e78c05984841ba7151d7926c))
+* **packaging:** the Arch aarch64 package builds; Arch nightly and lane builds are versioned after the last release tag; oneTBB IPO is off through its recipe option. ([5f89682](https://github.com/trvon/yams/commit/5f89682d6594f301b9bd6d1efa60fd0ae0cced11), [fb46a10](https://github.com/trvon/yams/commit/fb46a10d5f0e923ac272d3998ffcad48faa12453), [488cf09](https://github.com/trvon/yams/commit/488cf09a79d755ad6b53cee1d325d934179f289f))
 
 ## [0.23.0](https://github.com/trvon/yams/compare/v0.22.1...v0.23.0) (2026-11-15)
 
