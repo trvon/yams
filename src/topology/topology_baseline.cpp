@@ -536,6 +536,40 @@ Result<TopologyDirtyRegion> ConnectedComponentTopologyEngine::defineDirtyRegion(
         }
     }
 
+    // updateArtifacts replaces every prior cluster that holds a region document, so a cluster
+    // the region touches must be in it whole: a member left out would vanish from the snapshot.
+    // Close the region over prior clusters whatever the mode. NeighborsOnly leaves prior clusters
+    // out above and relies on this; the other modes, with depth >= 2 and no overlap, already
+    // hold every touched cluster and gain nothing here.
+    for (std::size_t i = 0;
+         !region.requiresWiderRebuild && i < region.expandedDocumentHashes.size(); ++i) {
+        const auto clustersIt = clusterIdsByDocument.find(region.expandedDocumentHashes[i]);
+        if (clustersIt == clusterIdsByDocument.end()) {
+            continue;
+        }
+        for (const auto& clusterId : clustersIt->second) {
+            const auto membersIt = clusterMembersById.find(clusterId);
+            if (membersIt == clusterMembersById.end()) {
+                continue;
+            }
+            for (const auto& memberHash : membersIt->second) {
+                if (memberHash.empty() || !seen.insert(memberHash).second) {
+                    continue;
+                }
+                region.includedPriorClusterMembers = true;
+                region.expandedDocumentHashes.push_back(memberHash);
+                if (region.expandedDocumentHashes.size() >= config.maxDirtyRegionDocs) {
+                    region.exceededRegionBudget = true;
+                    region.requiresWiderRebuild = true;
+                    break;
+                }
+            }
+            if (region.requiresWiderRebuild) {
+                break;
+            }
+        }
+    }
+
     region.bfsDepthReached =
         (region.includedSemanticNeighbors || region.includedPriorClusterMembers) ? 1 : 0;
     if (config.fullRebuildDocThreshold > 0 &&

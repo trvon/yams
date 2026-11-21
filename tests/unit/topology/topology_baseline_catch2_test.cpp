@@ -443,10 +443,13 @@ TEST_CASE("Topology dirty regions include every protected overlap fiber",
     CHECK(containsHash(region.value().expandedDocumentHashes, "secondary-peer"));
 }
 
-TEST_CASE("Topology dirty-region expansion modes differ only in prior-cluster members",
+TEST_CASE("Topology dirty-region expansion modes all hold the touched prior cluster whole",
           "[unit][topology][update][expansion]") {
     // Characterizes each mode now that TopologyManager can select it from config. Before,
     // only PriorClusterAndNeighbors was ever produced, so NeighborsOnly and Adaptive ran nowhere.
+    // updateArtifacts replaces every prior cluster a region document belongs to, so the connected
+    // engine closes every region over prior clusters: NeighborsOnly still has to include the
+    // seed's prior peer, or the peer would drop out of the snapshot.
     TopologyArtifactBatch existing;
     existing.clusters = {
         ClusterArtifact{
@@ -473,8 +476,8 @@ TEST_CASE("Topology dirty-region expansion modes differ only in prior-cluster me
 
     const auto neighborsOnly = regionFor(DirtyRegionExpansionMode::NeighborsOnly);
     CHECK(containsHash(neighborsOnly.expandedDocumentHashes, "neighbor"));
-    CHECK_FALSE(containsHash(neighborsOnly.expandedDocumentHashes, "peer"));
-    CHECK_FALSE(neighborsOnly.includedPriorClusterMembers);
+    CHECK(containsHash(neighborsOnly.expandedDocumentHashes, "peer"));
+    CHECK(neighborsOnly.includedPriorClusterMembers);
 
     const auto prior = regionFor(DirtyRegionExpansionMode::PriorClusterAndNeighbors);
     CHECK(containsHash(prior.expandedDocumentHashes, "neighbor"));
@@ -485,6 +488,7 @@ TEST_CASE("Topology dirty-region expansion modes differ only in prior-cluster me
     // strategy. Pinned so a real adaptive policy has to change this test deliberately.
     const auto adaptive = regionFor(DirtyRegionExpansionMode::Adaptive);
     CHECK((adaptive.expandedDocumentHashes == prior.expandedDocumentHashes));
+    CHECK((neighborsOnly.expandedDocumentHashes == prior.expandedDocumentHashes));
 }
 
 TEST_CASE("Dirty-region expansion modes round-trip through their config names",

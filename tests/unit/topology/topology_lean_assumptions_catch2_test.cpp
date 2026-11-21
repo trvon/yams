@@ -410,7 +410,7 @@ TEST_CASE("Lean contracts: region-driven incremental updates stay well-formed pa
     // Lean: Artifacts.WellFormedBatch after ITopologyEngine::updateArtifacts. The model has no
     // update theorem; corpus coverage after an update is the unstated precondition checked here.
     // updateArtifacts drops every member of a touched cluster that is not in its input, so the
-    // caller must pass the whole prior cluster; the prior-cluster expansion modes do.
+    // caller must pass the whole prior cluster; every dirty region does.
     using yams::topology::DirtyRegionExpansionMode;
     std::mt19937 rng(kSeed + 3);
     for (const auto mode :
@@ -429,13 +429,11 @@ TEST_CASE("Lean contracts: region-driven incremental updates stay well-formed pa
 }
 
 TEST_CASE("Lean contracts: a neighbors-only region update keeps every document",
-          "[unit][topology][lean][contract][property][!shouldfail]") {
-    // Same composition as above with DirtyRegionExpansionMode::NeighborsOnly. That mode leaves
-    // the untouched members of a changed document's prior cluster out of the region, and
-    // updateArtifacts removes the whole touched cluster, so those members vanish from the
-    // snapshot until the next full rebuild. TopologyManager passes the expanded region straight
-    // to updateArtifacts (TopologyManager.cpp:538, :609), so topology.dirty_region_expansion =
-    // neighbors_only loses memberships in production.
+          "[unit][topology][lean][contract][property]") {
+    // Same composition as above with DirtyRegionExpansionMode::NeighborsOnly. updateArtifacts
+    // removes every touched prior cluster whole, so defineDirtyRegion closes the region over
+    // prior clusters in every mode; otherwise the untouched members of a changed document's
+    // prior cluster would vanish from the snapshot until the next full rebuild.
     using yams::topology::DirtyRegionExpansionMode;
     std::mt19937 rng(kSeed + 6);
     for (int iteration = 0; iteration < kIterations; ++iteration) {
