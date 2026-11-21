@@ -59,6 +59,23 @@ theorem wellFormed_membershipsReferenceClusters
     membershipsReferenceClusters batch := by
   exact h.2.1
 
+/-- If a batch is well formed, every cluster member has a membership row that places it in
+that cluster, as its primary or as an overlap cluster. -/
+theorem wellFormed_membersHaveMemberships
+    (batch : TopologyArtifactBatch) (h : WellFormedBatch batch) :
+    ∀ c ∈ batch.clusters, ∀ x ∈ c.memberDocumentHashes,
+      ∃ m ∈ batch.memberships, m.documentHash = x ∧
+        (m.clusterId = c.clusterId ∨ c.clusterId ∈ m.overlapClusterIds) := by
+  exact h.2.2
+
+/-- Without overlap rows, a well-formed batch gives every member a row whose primary cluster is
+that cluster: the strict form of `clusterMembersHaveMemberships`. -/
+theorem wellFormed_noOverlap_primaryMemberships
+    (batch : TopologyArtifactBatch) (h : WellFormedBatch batch)
+    (hNo : noOverlapMemberships batch) :
+    clusterMembersHavePrimaryMemberships batch := by
+  exact (clusterMembersHaveMemberships_noOverlap_iff hNo).mp h.2.2
+
 /-- If a batch is well formed, cluster member counts are exact. -/
 theorem wellFormed_memberCounts
     (batch : TopologyArtifactBatch) (h : WellFormedBatch batch) :
