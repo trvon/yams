@@ -213,13 +213,40 @@ def RoutesReferenceClusters
     (routes : List ClusterRoute) : Prop :=
   ∀ r ∈ routes, ∃ c ∈ batch.clusters, c.clusterId = r.clusterId
 
-/-- Router contract: returned routes reference known clusters and obey the
-request limit. -/
+/-- The router's limit step: `limit = 0` means unlimited and keeps every scored route;
+otherwise keep the first `limit` (`SparseGuidedClusterRouter::route`). -/
+def applyRouteLimit (limit : Nat) (routes : List ClusterRoute) : List ClusterRoute :=
+  if limit = 0 then routes else routes.take limit
+
+/-- A positive limit bounds the route list. -/
+theorem applyRouteLimit_respectsLimit (limit : Nat) (routes : List ClusterRoute)
+    (hPos : 0 < limit) :
+    (applyRouteLimit limit routes).length ≤ limit := by
+  have hNe : limit ≠ 0 := Nat.pos_iff_ne_zero.mp hPos
+  simp only [applyRouteLimit, hNe, if_false, List.length_take]
+  exact Nat.min_le_left limit routes.length
+
+/-- A zero limit truncates nothing: every scored route stays eligible. -/
+theorem applyRouteLimit_zero (routes : List ClusterRoute) :
+    applyRouteLimit 0 routes = routes := by
+  simp [applyRouteLimit]
+
+/-- The limit step never invents a route. -/
+theorem applyRouteLimit_subset {limit : Nat} {routes : List ClusterRoute} {r : ClusterRoute}
+    (h : r ∈ applyRouteLimit limit routes) : r ∈ routes := by
+  unfold applyRouteLimit at h
+  by_cases hZero : limit = 0
+  · simpa [hZero] using h
+  · simp only [hZero, if_false] at h
+    exact List.mem_of_mem_take h
+
+/-- Router contract: returned routes reference known clusters and obey the request limit when
+it is positive (`limit = 0` means unlimited). -/
 def RouteResultContract
     (request : TopologyRouteRequest)
     (batch : TopologyArtifactBatch)
     (routes : List ClusterRoute) : Prop :=
-  RoutesReferenceClusters batch routes ∧ routes.length ≤ request.limit
+  RoutesReferenceClusters batch routes ∧ (0 < request.limit → routes.length ≤ request.limit)
 
 /-- A contracted route always points at a known cluster artifact. -/
 theorem routedCluster_known
@@ -232,14 +259,26 @@ theorem routedCluster_known
     ∃ c ∈ batch.clusters, c.clusterId = route.clusterId := by
   exact h.1 route hr
 
-/-- A contracted route result never exceeds the caller's limit. -/
+/-- A contracted route result never exceeds a positive caller limit. -/
 theorem routedCluster_limit
     {request : TopologyRouteRequest}
     {batch : TopologyArtifactBatch}
     {routes : List ClusterRoute}
-    (h : RouteResultContract request batch routes) :
+    (h : RouteResultContract request batch routes)
+    (hPos : 0 < request.limit) :
     routes.length ≤ request.limit := by
-  exact h.2
+  exact h.2 hPos
+
+/-- Applying the limit step to scored routes over known clusters meets the router contract,
+for every limit including `0`. -/
+theorem applyRouteLimit_contract
+    (request : TopologyRouteRequest)
+    (batch : TopologyArtifactBatch)
+    (scored : List ClusterRoute)
+    (hKnown : RoutesReferenceClusters batch scored) :
+    RouteResultContract request batch (applyRouteLimit request.limit scored) :=
+  ⟨fun r hr => hKnown r (applyRouteLimit_subset hr),
+    fun hPos => applyRouteLimit_respectsLimit request.limit scored hPos⟩
 
 end Yams.Topology
 

@@ -165,6 +165,7 @@ inductive RouteScoringMode where
 structure TopologyRouteRequest where
   queryText : String := ""
   seedDocumentHashes : List DocumentHash := []
+  /-- Maximum routes returned; `0` means unlimited, as in C++. -/
   limit : Nat := 8
   scoringMode : RouteScoringMode := .current
   queryEmbedding : Embedding := []

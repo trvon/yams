@@ -25,6 +25,8 @@ Yams.Topology.dirtyRegion_containsSeeds
 Yams.Topology.dirtyRegion_budgetOrWiderRebuild
 Yams.Topology.routedCluster_known
 Yams.Topology.routedCluster_limit
+Yams.Topology.applyRouteLimit_zero
+Yams.Topology.applyRouteLimit_contract
 Yams.Pipeline.postIngestPass_completionContract
 Yams.Pipeline.completion_keywordSearchable
 Yams.Pipeline.completion_semanticSearchable
@@ -52,6 +54,8 @@ Yams.SearchEngine.runSearchWithTopology_disabled_baseline
 Yams.SearchEngine.runSearchWithTopology_rerankOnly_baseline
 Yams.SearchEngine.runSearchWithTopology_respectsLimit
 Yams.SearchEngine.topologyCandidates_noArbitraryDocs
+Yams.SearchEngine.selectedTopologyClusters_respectsClusterCap
+Yams.SearchEngine.selectedTopologyClusters_unlimited
 
 # SelectiveRouting.lean, AllowedSetRetrieval.lean, RetrievalCoordinates.lean
 Yams.SearchEngine.selectiveRoute_preservesProtected

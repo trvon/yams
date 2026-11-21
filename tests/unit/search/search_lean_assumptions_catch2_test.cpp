@@ -290,8 +290,10 @@ TEST_CASE("Lean contracts: only a fully admitted, useful, bound certificate narr
 
 TEST_CASE("Lean contracts: route selection for narrowing is a bounded prefix",
           "[unit][search][lean][contract][topology][property]") {
-    // Lean TopologyInfluence.selectedTopologyClusters (= clusters.take maxClusters) and
-    // selectedTopologyClusters_respectsClusterCap. C++ adds an adaptive prefix and abstention.
+    // Lean TopologyInfluence.selectedTopologyClusters (clusters.take maxClusters, or every
+    // cluster when maxClusters = 0), selectedTopologyClusters_respectsClusterCap (maxClusters > 0)
+    // and selectedTopologyClusters_unlimited (maxClusters = 0). C++ adds an adaptive prefix and
+    // abstention; without an adaptive gap it selects the whole Lean window.
     std::mt19937 rng(kSeed + 1);
     std::uniform_int_distribution<std::size_t> count(0, 8);
     std::uniform_int_distribution<std::size_t> bound(0, 5);
@@ -319,6 +321,11 @@ TEST_CASE("Lean contracts: route selection for narrowing is a bounded prefix",
         }
         if (maxClusters > 0) {
             CHECK(selection.routes.size() <= maxClusters);
+        }
+        if (gap <= 0.0F) {
+            const std::size_t window =
+                maxClusters == 0 ? routes.size() : std::min(maxClusters, routes.size());
+            CHECK(selection.routes.size() == window);
         }
         if (!routes.empty()) {
             CHECK_FALSE(selection.routes.empty());

@@ -623,8 +623,9 @@ TEST_CASE("Lean contracts: dirty regions contain their seeds and respect the reg
 
 TEST_CASE("Lean contracts: routes name known clusters, obey the limit and are ordered",
           "[unit][topology][lean][contract][router][property]") {
-    // Lean: Contracts.RouteResultContract (RoutesReferenceClusters ∧ length ≤ limit) for
-    // limit ≥ 1, plus the score-descending, cluster-id tie-break order the router documents.
+    // Lean: Contracts.RouteResultContract (RoutesReferenceClusters ∧ length ≤ limit when
+    // limit > 0) and routedCluster_limit for limit ≥ 1, plus the score-descending, cluster-id
+    // tie-break order the router documents.
     std::mt19937 rng(kSeed + 5);
     std::uniform_int_distribution<std::size_t> size(1, 12);
     std::uniform_int_distribution<std::size_t> limit(1, 5);
@@ -674,12 +675,55 @@ TEST_CASE("Lean contracts: routes name known clusters, obey the limit and are or
     }
 }
 
-TEST_CASE("Lean contracts: a zero route limit returns no routes",
-          "[unit][topology][lean][contract][router][!shouldfail]") {
-    // Lean Contracts.RouteResultContract requires routes.length ≤ request.limit for every limit.
-    // SparseGuidedClusterRouter treats limit == 0 as "no limit" and returns every cluster, so the
-    // contract holds only for limit ≥ 1. Callers that pass 0 get an unbounded route list.
+TEST_CASE("Lean contracts: a zero route limit keeps every scored route",
+          "[unit][topology][lean][contract][router][property]") {
+    // Lean Contracts.applyRouteLimit: limit 0 means unlimited. applyRouteLimit_zero (nothing is
+    // truncated, every scored cluster stays eligible) and applyRouteLimit_contract (the result
+    // still names known clusters; RouteResultContract bounds the length only for limit > 0).
+    // Checked by comparing limit 0 with a limit no smaller than the cluster count.
+    std::mt19937 rng(kSeed + 8);
+    std::uniform_int_distribution<std::size_t> size(1, 12);
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    std::uniform_real_distribution<float> coord(-1.0F, 1.0F);
     ConnectedComponentTopologyEngine engine;
+    SparseGuidedClusterRouter router;
+    for (int iteration = 0; iteration < kIterations; ++iteration) {
+        const auto docs = randomDocuments(rng, size(rng));
+        const auto built = engine.buildArtifacts(docs, randomConfig(rng));
+        REQUIRE(built.has_value());
+        const auto& batch = built.value();
+        std::unordered_set<std::string> clusterIds;
+        for (const auto& cluster : batch.clusters) {
+            clusterIds.insert(cluster.clusterId);
+        }
+
+        TopologyRouteRequest request;
+        request.sparseDenseAlpha = unit(rng);
+        if (unit(rng) < 0.5F) {
+            request.queryEmbedding = {coord(rng), coord(rng), coord(rng)};
+        }
+        for (std::size_t i = 0; i < docs.size(); ++i) {
+            if (unit(rng) < 0.3F) {
+                request.seedDocumentHashes.push_back(docHash(i));
+            }
+        }
+        CAPTURE(iteration, docs.size(), batch.clusters.size(), request.seedDocumentHashes.size());
+
+        request.limit = 0;
+        const auto unlimited = router.route(request, batch);
+        request.limit = batch.clusters.size();
+        const auto wide = router.route(request, batch);
+        REQUIRE(unlimited.has_value());
+        REQUIRE(wide.has_value());
+        REQUIRE(unlimited.value().size() == wide.value().size());
+        for (std::size_t i = 0; i < unlimited.value().size(); ++i) {
+            CAPTURE(i);
+            CHECK(unlimited.value()[i].clusterId == wide.value()[i].clusterId);
+            CHECK(clusterIds.contains(unlimited.value()[i].clusterId));
+        }
+    }
+
+    // Two singleton clusters, both seeded: limit 0 returns both.
     const std::vector<TopologyDocumentInput> docs{
         TopologyDocumentInput{.documentHash = "a"},
         TopologyDocumentInput{.documentHash = "b"},
@@ -687,13 +731,12 @@ TEST_CASE("Lean contracts: a zero route limit returns no routes",
     const auto built = engine.buildArtifacts(docs, TopologyBuildConfig{});
     REQUIRE(built.has_value());
     REQUIRE(built.value().clusters.size() == 2U);
-
     TopologyRouteRequest request;
     request.limit = 0;
     request.seedDocumentHashes = {"a", "b"};
-    const auto routes = SparseGuidedClusterRouter{}.route(request, built.value());
+    const auto routes = router.route(request, built.value());
     REQUIRE(routes.has_value());
-    CHECK(routes.value().size() <= request.limit);
+    CHECK(routes.value().size() == 2U);
 }
 
 TEST_CASE("Lean contracts: boundary spill keeps member counts in step",
