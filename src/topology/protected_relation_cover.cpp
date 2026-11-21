@@ -1,6 +1,7 @@
 #include <yams/topology/protected_relation_cover.h>
 
 #include "protected_relation_identity_internal.h"
+#include "topology_build_utils.h"
 
 #include <algorithm>
 #include <array>
@@ -9,7 +10,9 @@
 #include <limits>
 #include <ranges>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 namespace yams::topology {
 
@@ -115,6 +118,16 @@ std::string protectedRelationConstructionIdentity(std::span<const TopologyDocume
     }
     std::vector<detail::ProtectedRelationObservation> observations;
     observations.reserve(observationCapacity);
+    using PairKey = std::pair<std::string_view, std::string_view>;
+    struct PairKeyHash {
+        std::size_t operator()(const PairKey& key) const noexcept {
+            const std::size_t first = std::hash<std::string_view>{}(key.first);
+            return first ^ (std::hash<std::string_view>{}(key.second) + 0x9E3779B97F4A7C15ULL +
+                            (first << 6U) + (first >> 2U));
+        }
+    };
+    std::unordered_map<PairKey, float, PairKeyHash> pairWeights;
+    detail::ReciprocalPairScores<PairKey, PairKeyHash> reciprocalScores;
     for (const auto& document : documents) {
         const std::string_view documentHash = document.documentHash;
         for (const auto& neighbor : document.neighbors) {
@@ -126,10 +139,28 @@ std::string protectedRelationConstructionIdentity(std::span<const TopologyDocume
                 continue;
             }
             const auto endpoints = std::minmax(documentHash, neighborHash);
+            if (config.reciprocalOnly) {
+                // Same edge rule as the engines (detail::ReciprocalPairScores): both directions
+                // must be admitted, and the pair carries the weaker one.
+                const PairKey key{endpoints.first, endpoints.second};
+                pairWeights.try_emplace(key, neighbor.score);
+                reciprocalScores.observe(key, documentHash == endpoints.first, neighbor.score);
+                continue;
+            }
             observations.push_back(detail::ProtectedRelationObservation{
                 .lhs = endpoints.first,
                 .rhs = endpoints.second,
                 .score = neighbor.score,
+            });
+        }
+    }
+    if (config.reciprocalOnly) {
+        reciprocalScores.apply(pairWeights);
+        for (const auto& [key, score] : pairWeights) {
+            observations.push_back(detail::ProtectedRelationObservation{
+                .lhs = key.first,
+                .rhs = key.second,
+                .score = score,
             });
         }
     }

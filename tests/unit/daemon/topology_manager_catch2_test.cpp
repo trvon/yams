@@ -624,6 +624,53 @@ TEST_CASE("TopologyManager connected engine keeps its incremental rebuild path",
     CHECK(clusterMembers(current) == previousMembers);
 }
 
+TEST_CASE("TopologyManager neighbors_only incremental rebuild keeps every document",
+          "[daemon][topology-manager][incremental][expansion]") {
+    // aaa1-aaa2-aaa3 is a chain: aaa3 shares aaa1's cluster but is not its semantic neighbor.
+    // A neighbors_only region seeded from aaa1 used to stop at aaa2, and updateArtifacts then
+    // removed the whole prior cluster, so aaa3 left the snapshot until the next full rebuild.
+    RebuildFixture fixture;
+    std::map<std::string, std::int64_t> ids;
+    for (const std::string hash : {"aaa1", "aaa2", "aaa3"}) {
+        ids[hash] = fixture.addDocument(hash, {1.0F, 0.0F, 0.0F, 0.0F});
+    }
+    for (const std::string hash : {"bbb1", "bbb2"}) {
+        ids[hash] = fixture.addDocument(hash, {0.0F, 1.0F, 0.0F, 0.0F});
+    }
+    fixture.linkNeighbors("aaa1", "aaa2");
+    fixture.linkNeighbors("aaa2", "aaa3");
+    fixture.linkNeighbors("bbb1", "bbb2");
+
+    TopologyManager manager(fixture.dependencies());
+    manager.setDirtyRegionExpansion(yams::topology::DirtyRegionExpansionMode::NeighborsOnly);
+    REQUIRE(manager.rebuildArtifacts("initial", false, {}, "connected").has_value());
+    const auto previous = fixture.latest();
+    REQUIRE(previous.memberships.size() == ids.size());
+    const auto previousClusters = membershipClusters(previous);
+    REQUIRE(previousClusters.at("aaa1") == previousClusters.at("aaa3"));
+    const auto previousMembers = clusterMembers(previous);
+
+    auto result = manager.rebuildArtifacts("post_ingest_drain", false, {"aaa1"}, "connected");
+    INFO((result ? "incremental rebuild succeeded" : result.error().message));
+    REQUIRE(result.has_value());
+    CHECK(result.value().stored);
+    CHECK_FALSE(result.value().fullRebuild);
+    CHECK(result.value().documentsProcessed == 3);
+
+    const auto current = fixture.latest();
+    const auto currentClusters = membershipClusters(current);
+    for (const auto& [hash, id] : ids) {
+        INFO("document=" << hash);
+        CHECK(currentClusters.contains(hash));
+    }
+    std::unordered_set<std::string> clustered;
+    for (const auto& cluster : current.clusters) {
+        clustered.insert(cluster.memberDocumentHashes.begin(), cluster.memberDocumentHashes.end());
+    }
+    CHECK(clustered.size() == ids.size());
+    CHECK(clusterMembers(current) == previousMembers);
+}
+
 namespace {
 
 // Sixteen-dimensional corpus where centroids mislead: eight linked groups, each a tight core on
