@@ -85,9 +85,9 @@ src/metadata/database.cpp:29:portability/env-read # reviewed raw environment rea
 src/metadata/database.cpp:476:portability/path-cstr # std::string filename, not filesystem::path
 src/metadata/metadata_repository.cpp:1502:portability/env-read # reviewed raw environment read
 src/metadata/migration.cpp:1565:portability/env-read # reviewed raw environment read
-src/metadata/repository/search_ops.cpp:89:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:103:portability/env-read # reviewed raw environment read
-src/metadata/repository/search_ops.cpp:120:portability/env-read # reviewed raw environment read
+src/metadata/repository/search_ops.cpp:121:portability/env-read # reviewed raw environment read
+src/metadata/repository/search_ops.cpp:138:portability/env-read # reviewed raw environment read
 src/metadata/versioning_util.cpp:101:portability/env-read # reviewed raw environment read
 src/search/search_engine.cpp:409:portability/env-read # reviewed raw environment read
 src/search/search_engine.cpp:422:portability/env-read # reviewed raw environment read
