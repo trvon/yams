@@ -84,7 +84,9 @@ std::vector<TopologyDocumentInput> randomDocuments(std::mt19937& rng, std::size_
 }
 
 /// Lean Contracts.NeighborEdgeContract: the neighbor is a corpus document, not the source, is
-/// reciprocal when reciprocal-only mode is on, and meets the minimum edge score.
+/// reciprocal when reciprocal-only mode is on, and meets the minimum edge score. In
+/// reciprocal-only mode an edge also needs ConstructionGates.ReciprocalNeighborWitness: the
+/// reverse observation passes the same contract.
 std::vector<std::pair<std::string, std::string>>
 leanRetainedEdges(const std::vector<TopologyDocumentInput>& docs,
                   const TopologyBuildConfig& config) {
@@ -92,7 +94,7 @@ leanRetainedEdges(const std::vector<TopologyDocumentInput>& docs,
     for (const auto& doc : docs) {
         corpus.insert(doc.documentHash);
     }
-    std::vector<std::pair<std::string, std::string>> edges;
+    std::vector<std::pair<std::string, std::string>> observations;
     for (const auto& doc : docs) {
         for (const auto& neighbor : doc.neighbors) {
             if (!corpus.contains(neighbor.documentHash) ||
@@ -105,7 +107,18 @@ leanRetainedEdges(const std::vector<TopologyDocumentInput>& docs,
             if (neighbor.score < static_cast<float>(config.minEdgeScore)) {
                 continue;
             }
-            edges.emplace_back(doc.documentHash, neighbor.documentHash);
+            observations.emplace_back(doc.documentHash, neighbor.documentHash);
+        }
+    }
+    if (!config.reciprocalOnly) {
+        return observations;
+    }
+    const std::set<std::pair<std::string, std::string>> admitted(observations.begin(),
+                                                                 observations.end());
+    std::vector<std::pair<std::string, std::string>> edges;
+    for (const auto& [src, dst] : observations) {
+        if (admitted.contains({dst, src})) {
+            edges.emplace_back(src, dst);
         }
     }
     return edges;
@@ -311,12 +324,11 @@ TEST_CASE("Lean contracts: capped components keep no retained edge across cluste
 }
 
 TEST_CASE("Lean contracts: an edge needs both directed observations above the score floor",
-          "[unit][topology][lean][contract][!shouldfail]") {
+          "[unit][topology][lean][contract]") {
     // Lean ConstructionGates.ReciprocalNeighborWitness admits an edge only when the forward and
-    // the reverse observation both pass minNeighborScore. The C++ engine trusts the per-neighbor
-    // `reciprocal` flag and keeps the larger of the two scores, so one strong direction is
-    // enough. The gate holds only if the extractor sets `reciprocal` from both directions with a
-    // symmetric score (cosine kNN does); the engine does not check it.
+    // the reverse observation both pass minNeighborScore. With reciprocalOnly the engine does not
+    // take the per-neighbor `reciprocal` flag's word: both endpoints must list each other above
+    // the floor, and the edge carries the weaker score.
     ConnectedComponentTopologyEngine engine;
     TopologyBuildConfig config;
     config.minEdgeScore = 0.5;

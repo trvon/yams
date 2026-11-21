@@ -249,15 +249,17 @@ TEST_CASE("Topology baseline records protected relation coverage",
         TopologyDocumentInput{
             .documentHash = "b",
             .embedding = {0.8F, 0.2F},
-            .neighbors = {{.documentHash = "c", .score = 0.70F, .reciprocal = true}}},
+            .neighbors = {{.documentHash = "a", .score = 0.95F, .reciprocal = true},
+                          {.documentHash = "c", .score = 0.70F, .reciprocal = true}}},
         TopologyDocumentInput{
             .documentHash = "c",
             .embedding = {0.0F, 1.0F},
-            .neighbors = {{.documentHash = "d", .score = 0.50F, .reciprocal = true}}},
+            .neighbors = {{.documentHash = "b", .score = 0.70F, .reciprocal = true},
+                          {.documentHash = "d", .score = 0.50F, .reciprocal = true}}},
         TopologyDocumentInput{
             .documentHash = "d",
             .embedding = {-1.0F, 0.0F},
-            .neighbors = {},
+            .neighbors = {{.documentHash = "c", .score = 0.50F, .reciprocal = true}},
         },
     };
 
@@ -289,9 +291,20 @@ TEST_CASE("Topology baseline enforces Lean edge-filter contract",
                     {.documentHash = "aaa", .score = 1.0F, .reciprocal = true},
                     {.documentHash = "", .score = 1.0F, .reciprocal = true},
                 }},
-        TopologyDocumentInput{.documentHash = "bbb", .filePath = "/repo/b.md", .neighbors = {}},
-        TopologyDocumentInput{.documentHash = "ccc", .filePath = "/repo/c.md", .neighbors = {}},
-        TopologyDocumentInput{.documentHash = "ddd", .filePath = "/repo/d.md", .neighbors = {}},
+        // Each reverse observation passes on its own: ccc is kept out by aaa's score below the
+        // floor and ddd by aaa's missing flag, since an edge needs both directions admitted.
+        TopologyDocumentInput{
+            .documentHash = "bbb",
+            .filePath = "/repo/b.md",
+            .neighbors = {{.documentHash = "aaa", .score = 0.9F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "ccc",
+            .filePath = "/repo/c.md",
+            .neighbors = {{.documentHash = "aaa", .score = 0.9F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "ddd",
+            .filePath = "/repo/d.md",
+            .neighbors = {{.documentHash = "aaa", .score = 0.9F, .reciprocal = true}}},
     };
 
     auto result = engine.buildArtifacts(docs, config);

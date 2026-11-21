@@ -3,6 +3,8 @@
 
 #include <yams/core/assert.hpp>
 
+#include "topology_build_utils.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -68,9 +70,11 @@ void applySGCSmoothing(std::vector<TopologyDocumentInput>& documents,
         }
     }
 
-    // Undirected edge set, keeping the maximum weight per pair.
+    // Undirected edge set, keeping the maximum weight per pair; with reciprocalOnly, a pair
+    // needs both directions and keeps the weaker one (detail::ReciprocalPairScores).
     std::unordered_map<std::uint64_t, float> dedup;
     dedup.reserve(n * 4);
+    detail::ReciprocalPairScores<std::uint64_t> reciprocalScores;
     const auto key = [](std::size_t a, std::size_t b) {
         const auto lo = static_cast<std::uint64_t>(std::min(a, b));
         const auto hi = static_cast<std::uint64_t>(std::max(a, b));
@@ -104,7 +108,13 @@ void applySGCSmoothing(std::vector<TopologyDocumentInput>& documents,
             if (!inserted) {
                 slot->second = std::max(slot->second, w);
             }
+            if (config.reciprocalOnly) {
+                reciprocalScores.observe(key(i, j), i < j, w);
+            }
         }
+    }
+    if (config.reciprocalOnly) {
+        reciprocalScores.apply(dedup);
     }
 
     std::vector<std::vector<Edge>> symmetric(n);

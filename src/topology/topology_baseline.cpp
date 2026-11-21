@@ -307,6 +307,7 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
     }
 
     std::unordered_map<detail::PairKey, float, detail::PairKeyHash> pairWeights;
+    detail::ReciprocalPairScores<detail::PairKey, detail::PairKeyHash> reciprocalScores;
     for (std::size_t i = 0; i < effectiveDocuments.size(); ++i) {
         for (const auto& neighbor : effectiveDocuments[i].neighbors) {
             if (neighbor.documentHash.empty()) {
@@ -334,7 +335,13 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
             } else {
                 wt->second = std::max(wt->second, neighbor.score);
             }
+            if (config.reciprocalOnly) {
+                reciprocalScores.observe(key, i < j, neighbor.score);
+            }
         }
+    }
+    if (config.reciprocalOnly) {
+        reciprocalScores.apply(pairWeights);
     }
 
     Adjacency adjacency(effectiveDocuments.size());
