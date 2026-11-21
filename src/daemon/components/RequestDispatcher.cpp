@@ -477,10 +477,24 @@ boost::asio::awaitable<Response> RequestDispatcher::dispatch(const Request& req)
         bool dbReady = state_ && state_->readiness.metadataRepoReady.load();
         bool coreReady = csReady && dbReady;
         if (!coreReady && !(isAddDocumentRequest && csReady)) {
-            // If not ready (and not an early-accepted add), return a status response.
+            // Answer with an error, not a StatusResponse: a client waiting for a GetResponse
+            // dropped the status and reported "Document content not found" for a document that
+            // exists. The wording matches the client's not-ready errors, which add retries on.
             StatusRequest statusReq;
-            statusReq.detailed = true;
-            co_return co_await handleStatusRequest(statusReq);
+            auto statusResp = co_await handleStatusRequest(statusReq);
+            std::string statusText = "initializing";
+            std::optional<ErrorResponse::RetryInfo> retry;
+            if (const auto* status = std::get_if<StatusResponse>(&statusResp)) {
+                if (!status->overallStatus.empty()) {
+                    statusText = status->overallStatus;
+                }
+                if (status->retryAfterMs > 0) {
+                    retry = ErrorResponse::RetryInfo{status->retryAfterMs, "initializing"};
+                }
+            }
+            co_return dispatch::makeErrorResponse(
+                ErrorCode::InvalidState, "Daemon not ready yet (status=" + statusText + ")",
+                std::move(retry));
         } else if (!coreReady && isAddDocumentRequest && csReady) {
             spdlog::debug(
                 "Proceeding with AddDocument during initialization (content store ready)");
