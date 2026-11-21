@@ -108,14 +108,25 @@ theorem pipelineCompletion_impliesSourceSearchability
     exact Yams.Topology.Bridge.completionContract_implies_vectorCandidate cfg before after
       hCompletion hStored hSemantic.1 hSemantic.2
 
-/-- Well-formed topology batch implies valid cluster memberships. -/
+/-- Well-formed topology batch implies valid cluster memberships: every member has a row that
+names the cluster as its primary or lists it as an overlap (boundary spill) cluster. -/
 theorem wellFormedBatch_impliesValidMemberships
     (batch : Yams.Topology.TopologyArtifactBatch)
     (hWellFormed : Yams.Topology.WellFormedBatch batch) :
     ∀ c ∈ batch.clusters, ∀ docHash ∈ c.memberDocumentHashes,
-      ∃ m ∈ batch.memberships, m.documentHash = docHash ∧ m.clusterId = c.clusterId := by
+      ∃ m ∈ batch.memberships, m.documentHash = docHash ∧
+        (m.clusterId = c.clusterId ∨ c.clusterId ∈ m.overlapClusterIds) := by
   intro c hc docHash hDoc
   exact hWellFormed.2.2 c hc docHash hDoc
+
+/-- Without overlap rows, the valid memberships name each member's cluster as primary. -/
+theorem wellFormedBatch_noOverlap_impliesPrimaryMemberships
+    (batch : Yams.Topology.TopologyArtifactBatch)
+    (hWellFormed : Yams.Topology.WellFormedBatch batch)
+    (hNo : Yams.Topology.noOverlapMemberships batch) :
+    ∀ c ∈ batch.clusters, ∀ docHash ∈ c.memberDocumentHashes,
+      ∃ m ∈ batch.memberships, m.documentHash = docHash ∧ m.clusterId = c.clusterId :=
+  Yams.Topology.wellFormed_noOverlap_primaryMemberships batch hWellFormed hNo
 
 /-- Convert ClusterArtifact to the search topology cluster abstraction. -/
 def clusterArtifactToTopologyCluster

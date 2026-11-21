@@ -17,6 +17,7 @@ inductive TopologyRoutingMode where
 /-- Bounded topology influence configuration. -/
 structure TopologyInfluenceConfig where
   mode : TopologyRoutingMode := .weakQueryOnly
+  /-- Cluster window; `0` means unlimited (`selectTopologyRoutesForNarrowing`). -/
   maxClusters : Nat := 2
   maxDocs : Nat := 64
   deriving Repr, BEq
@@ -105,10 +106,11 @@ def topologyMayLoad (mode : TopologyRoutingMode) (weakTier1Query : Bool) : Bool 
   | .hybridAssist => true
   | .rerankOnly => true
 
-/-- Candidate-expansion cluster window. -/
+/-- Candidate-expansion cluster window: the first `maxClusters` clusters, or all of them when
+`maxClusters = 0`. -/
 def selectedTopologyClusters
     (cfg : TopologyInfluenceConfig) (clusters : List TopologyCluster) : List TopologyCluster :=
-  clusters.take cfg.maxClusters
+  if cfg.maxClusters = 0 then clusters else clusters.take cfg.maxClusters
 
 /-- Flatten selected cluster members before the document cap. -/
 def selectedTopologyDocsUnbounded
@@ -365,14 +367,36 @@ theorem topologyCandidates_respectsDocCap
     exact Nat.min_le_left cfg.maxDocs (selectedTopologyDocsUnbounded cfg clusters).length
   · simp [h]
 
-/-- Selected route set respects the configured cluster cap. -/
+/-- Selected route set respects a positive cluster cap. -/
 theorem selectedTopologyClusters_respectsClusterCap
     (cfg : TopologyInfluenceConfig)
-    (clusters : List TopologyCluster) :
+    (clusters : List TopologyCluster)
+    (hPos : 0 < cfg.maxClusters) :
     (selectedTopologyClusters cfg clusters).length ≤ cfg.maxClusters := by
-  unfold selectedTopologyClusters
-  rw [List.length_take]
+  have hNe : cfg.maxClusters ≠ 0 := Nat.pos_iff_ne_zero.mp hPos
+  simp only [selectedTopologyClusters, hNe, if_false, List.length_take]
   exact Nat.min_le_left cfg.maxClusters clusters.length
+
+/-- With `maxClusters = 0` every known cluster is eligible: the window is the whole list. -/
+theorem selectedTopologyClusters_unlimited
+    (cfg : TopologyInfluenceConfig)
+    (clusters : List TopologyCluster)
+    (hZero : cfg.maxClusters = 0) :
+    selectedTopologyClusters cfg clusters = clusters := by
+  simp [selectedTopologyClusters, hZero]
+
+/-- The cluster window is a prefix of the ranked clusters, so it names no unknown cluster. -/
+theorem selectedTopologyClusters_subset
+    {cfg : TopologyInfluenceConfig}
+    {clusters : List TopologyCluster}
+    {c : TopologyCluster}
+    (h : c ∈ selectedTopologyClusters cfg clusters) :
+    c ∈ clusters := by
+  unfold selectedTopologyClusters at h
+  by_cases hZero : cfg.maxClusters = 0
+  · simpa [hZero] using h
+  · simp only [hZero, if_false] at h
+    exact List.mem_of_mem_take h
 
 /-- Disabled topology cannot add candidates. -/
 theorem topologyCandidates_disabled_empty

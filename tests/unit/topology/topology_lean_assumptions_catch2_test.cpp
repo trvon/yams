@@ -4,10 +4,10 @@
 // and router. A Lean theorem says something about YAMS only when the C++ code satisfies the
 // definitions it is stated over, so each case below names the Lean definition it stands in for.
 //
-// Property cases run the engines over small seeded random inputs. Cases tagged [!shouldfail]
-// pin a place where the C++ behaviour does not satisfy the Lean definition as written; each one
-// says why. When the code or the model changes so that the definition holds, Catch2 reports the
-// case as failed and the tag has to be removed.
+// Property cases run the engines over small seeded random inputs. A case tagged [!shouldfail]
+// pins a place where the C++ behaviour does not satisfy the Lean definition as written and says
+// why; none is left in this file. When one is added and the code or the model changes so that
+// the definition holds, Catch2 reports the case as failed and the tag has to be removed.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -124,10 +124,11 @@ leanRetainedEdges(const std::vector<TopologyDocumentInput>& docs,
     return edges;
 }
 
-/// Lean Artifacts.WellFormedBatch as written: member counts match, every membership names a
-/// produced cluster, and every cluster member has a membership row for that exact cluster.
-/// (tests/unit/topology/topology_baseline_catch2_test.cpp checks a relaxed form that also
-/// accepts a row whose overlapClusterIds names the cluster.)
+/// Lean Artifacts.WellFormedBatch: member counts match, every membership names a produced
+/// cluster, and every cluster member has a membership row that places it in that cluster
+/// (DocumentClusterMembership.placesIn: the row's clusterId is the cluster, or its
+/// overlapClusterIds lists it). Same predicate as requireWellFormedBatch in
+/// tests/unit/topology/topology_baseline_catch2_test.cpp.
 bool leanWellFormedBatch(const TopologyArtifactBatch& batch) {
     std::unordered_set<std::string> clusterIds;
     for (const auto& cluster : batch.clusters) {
@@ -136,11 +137,31 @@ bool leanWellFormedBatch(const TopologyArtifactBatch& batch) {
         }
         clusterIds.insert(cluster.clusterId);
     }
-    std::set<std::pair<std::string, std::string>> rows;
+    std::set<std::pair<std::string, std::string>> places;
     for (const auto& membership : batch.memberships) {
         if (!clusterIds.contains(membership.clusterId)) {
             return false;
         }
+        places.emplace(membership.documentHash, membership.clusterId);
+        for (const auto& overlap : membership.overlapClusterIds) {
+            places.emplace(membership.documentHash, overlap);
+        }
+    }
+    for (const auto& cluster : batch.clusters) {
+        for (const auto& hash : cluster.memberDocumentHashes) {
+            if (!places.contains({hash, cluster.clusterId})) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// Lean Artifacts.clusterMembersHavePrimaryMemberships: the strict form, a row whose clusterId
+/// is the cluster for every member.
+bool leanPrimaryMemberships(const TopologyArtifactBatch& batch) {
+    std::set<std::pair<std::string, std::string>> rows;
+    for (const auto& membership : batch.memberships) {
         rows.emplace(membership.documentHash, membership.clusterId);
     }
     for (const auto& cluster : batch.clusters) {
@@ -151,6 +172,13 @@ bool leanWellFormedBatch(const TopologyArtifactBatch& batch) {
         }
     }
     return true;
+}
+
+/// Lean Artifacts.noOverlapMemberships.
+bool leanNoOverlapMemberships(const TopologyArtifactBatch& batch) {
+    return std::ranges::all_of(batch.memberships, [](const DocumentClusterMembership& m) {
+        return m.overlapClusterIds.empty();
+    });
 }
 
 std::unordered_map<std::string, std::string> primaryClusterOf(const TopologyArtifactBatch& batch) {
@@ -230,8 +258,9 @@ TopologyBuildConfig randomConfig(std::mt19937& rng) {
 
 TEST_CASE("Lean contracts: connected engine output is a well-formed partition",
           "[unit][topology][lean][contract][property]") {
-    // Lean: Artifacts.WellFormedBatch, Connected.ConnectedFrom, Connected.NoCrossClusterEdges,
-    // Connected.IsMedoidByScore (m ∈ members), Contracts.ConnectedComponentContract.
+    // Lean: Artifacts.WellFormedBatch, Connected.ConnectedFrom, Connected.IsMedoidByScore
+    // (m ∈ members), and Contracts.component_noCrossEdges_uncapped (maxComponentDocs = 0, so
+    // NoCrossClusterEdges holds).
     std::mt19937 rng(kSeed);
     std::uniform_int_distribution<std::size_t> size(1, 12);
     ConnectedComponentTopologyEngine engine;
@@ -244,6 +273,9 @@ TEST_CASE("Lean contracts: connected engine output is a well-formed partition",
         REQUIRE(built.has_value());
         const auto& batch = built.value();
         CHECK(leanWellFormedBatch(batch));
+        // Overlap is off: Connected.wellFormed_noOverlap_primaryMemberships.
+        REQUIRE(leanNoOverlapMemberships(batch));
+        CHECK(leanPrimaryMemberships(batch));
         checkPartition(batch, docs);
 
         const auto edges = leanRetainedEdges(docs, config);
@@ -264,7 +296,8 @@ TEST_CASE("Lean contracts: connected engine output is a well-formed partition",
 
 TEST_CASE("Lean contracts: capped connected components stay connected and within the cap",
           "[unit][topology][lean][contract][property]") {
-    // Lean: ConstructionGates.ComponentsConnectedAndCapped (ConnectedFrom ∧ ComponentRespectsCap).
+    // Lean: ConstructionGates.ComponentsConnectedAndCapped (ConnectedFrom ∧ ComponentRespectsCap,
+    // cap > 0 here; cap 0 means unlimited).
     std::mt19937 rng(kSeed + 1);
     std::uniform_int_distribution<std::size_t> size(1, 12);
     std::uniform_int_distribution<std::size_t> cap(1, 4);
@@ -289,37 +322,149 @@ TEST_CASE("Lean contracts: capped connected components stay connected and within
     }
 }
 
-TEST_CASE("Lean contracts: capped components keep no retained edge across clusters",
-          "[unit][topology][lean][contract][!shouldfail]") {
-    // Lean Contracts.ConnectedComponentContract requires NoCrossClusterEdges over the retained
-    // edge set. With maxComponentDocs > 0 (TopologyManager defaults it to 64) the anti-giant split
-    // cuts retained edges, so a split component violates it. The Lean contract holds only for
-    // maxComponentDocs == 0 or when no component exceeds the cap.
+namespace {
+
+/// The original connected components over the retained edges, before the anti-giant split:
+/// Lean `componentOf` (hash to component index) and `componentSize` (index to size).
+struct OriginalComponents {
+    std::unordered_map<std::string, std::size_t> componentOf;
+    std::vector<std::size_t> componentSize;
+};
+
+OriginalComponents
+originalComponents(const std::vector<TopologyDocumentInput>& docs,
+                   const std::vector<std::pair<std::string, std::string>>& edges) {
+    std::unordered_map<std::string, std::vector<std::string>> adjacency;
+    for (const auto& [a, b] : edges) {
+        adjacency[a].push_back(b);
+        adjacency[b].push_back(a);
+    }
+    OriginalComponents out;
+    for (const auto& doc : docs) {
+        if (out.componentOf.contains(doc.documentHash)) {
+            continue;
+        }
+        const std::size_t index = out.componentSize.size();
+        out.componentSize.push_back(0);
+        std::queue<std::string> frontier;
+        frontier.push(doc.documentHash);
+        out.componentOf.emplace(doc.documentHash, index);
+        while (!frontier.empty()) {
+            const auto current = frontier.front();
+            frontier.pop();
+            ++out.componentSize[index];
+            for (const auto& next : adjacency[current]) {
+                if (out.componentOf.emplace(next, index).second) {
+                    frontier.push(next);
+                }
+            }
+        }
+    }
+    return out;
+}
+
+/// Lean Contracts.CrossEdgesOnlyFromSplit: an edge whose endpoints sit in different clusters
+/// joins two pieces of one original component that exceeded the cap (cap 0 = unlimited).
+/// Returns the number of crossing edges seen.
+std::size_t checkCrossEdgesOnlyFromSplit(
+    const TopologyArtifactBatch& batch, const std::vector<TopologyDocumentInput>& docs,
+    const std::vector<std::pair<std::string, std::string>>& edges, std::size_t cap) {
+    const auto clusterOf = primaryClusterOf(batch);
+    const auto original = originalComponents(docs, edges);
+    std::size_t crossing = 0;
+    for (const auto& [a, b] : edges) {
+        if (clusterOf.at(a) == clusterOf.at(b)) {
+            continue;
+        }
+        ++crossing;
+        CAPTURE(a, b, cap);
+        const auto component = original.componentOf.at(a);
+        CHECK(original.componentOf.at(b) == component);
+        CHECK(cap != 0);
+        CHECK(original.componentSize[component] > cap);
+    }
+    return crossing;
+}
+
+} // namespace
+
+TEST_CASE("Lean contracts: retained edges cross clusters only inside a split component",
+          "[unit][topology][lean][contract][property]") {
+    // Lean Contracts.ConnectedComponentContract with the anti-giant cap: every cluster is
+    // connected and has at most maxComponentDocs members (component_respectsCap), and a retained
+    // edge crosses clusters only between pieces of one original component larger than the cap
+    // (component_crossEdgesOnlyFromSplit). splitOversizedComponent cuts edges inside such a
+    // component. With cap 0 or no oversized component nothing crosses (component_noCrossEdges,
+    // component_noCrossEdges_uncapped).
     ConnectedComponentTopologyEngine engine;
-    TopologyBuildConfig config;
-    config.minEdgeScore = 0.5;
-    config.reciprocalOnly = true;
-    config.maxComponentDocs = 2;
-    std::vector<TopologyDocumentInput> docs;
-    for (std::size_t i = 0; i < 5; ++i) {
-        TopologyDocumentInput doc{.documentHash = docHash(i)};
-        if (i > 0) {
-            doc.neighbors.push_back(
-                {.documentHash = docHash(i - 1), .score = 0.9F, .reciprocal = true});
+
+    SECTION("a five-document chain split under cap 2, beside a pair under the cap") {
+        TopologyBuildConfig config;
+        config.minEdgeScore = 0.5;
+        config.reciprocalOnly = true;
+        config.maxComponentDocs = 2;
+        std::vector<TopologyDocumentInput> docs;
+        for (std::size_t i = 0; i < 5; ++i) {
+            TopologyDocumentInput doc{.documentHash = docHash(i)};
+            if (i > 0) {
+                doc.neighbors.push_back(
+                    {.documentHash = docHash(i - 1), .score = 0.9F, .reciprocal = true});
+            }
+            if (i + 1 < 5) {
+                doc.neighbors.push_back(
+                    {.documentHash = docHash(i + 1), .score = 0.9F, .reciprocal = true});
+            }
+            docs.push_back(std::move(doc));
         }
-        if (i + 1 < 5) {
-            doc.neighbors.push_back(
-                {.documentHash = docHash(i + 1), .score = 0.9F, .reciprocal = true});
+        docs.push_back(TopologyDocumentInput{
+            .documentHash = "p0",
+            .neighbors = {{.documentHash = "p1", .score = 0.9F, .reciprocal = true}}});
+        docs.push_back(TopologyDocumentInput{
+            .documentHash = "p1",
+            .neighbors = {{.documentHash = "p0", .score = 0.9F, .reciprocal = true}}});
+
+        const auto built = engine.buildArtifacts(docs, config);
+        REQUIRE(built.has_value());
+        const auto edges = leanRetainedEdges(docs, config);
+        for (const auto& cluster : built.value().clusters) {
+            CAPTURE(cluster.clusterId);
+            CHECK(cluster.memberCount <= config.maxComponentDocs);
+            CHECK(clusterConnected(cluster, edges));
         }
-        docs.push_back(std::move(doc));
+        CHECK(checkCrossEdgesOnlyFromSplit(built.value(), docs, edges, config.maxComponentDocs) >
+              0U);
+        const auto clusterOf = primaryClusterOf(built.value());
+        CHECK(clusterOf.at("p0") == clusterOf.at("p1"));
+
+        config.maxComponentDocs = 0;
+        const auto uncapped = engine.buildArtifacts(docs, config);
+        REQUIRE(uncapped.has_value());
+        CHECK(checkCrossEdgesOnlyFromSplit(uncapped.value(), docs, edges, 0) == 0U);
     }
 
-    const auto built = engine.buildArtifacts(docs, config);
-    REQUIRE(built.has_value());
-    const auto clusterOf = primaryClusterOf(built.value());
-    for (const auto& [a, b] : leanRetainedEdges(docs, config)) {
-        CAPTURE(a, b);
-        CHECK(clusterOf.at(a) == clusterOf.at(b));
+    SECTION("random corpora and caps") {
+        std::mt19937 rng(kSeed + 7);
+        std::uniform_int_distribution<std::size_t> size(1, 12);
+        std::uniform_int_distribution<std::size_t> cap(0, 4);
+        for (int iteration = 0; iteration < kIterations; ++iteration) {
+            const auto docs = randomDocuments(rng, size(rng));
+            auto config = randomConfig(rng);
+            config.maxComponentDocs = cap(rng);
+            CAPTURE(iteration, docs.size(), config.maxComponentDocs, config.minEdgeScore,
+                    config.reciprocalOnly);
+
+            const auto built = engine.buildArtifacts(docs, config);
+            REQUIRE(built.has_value());
+            const auto edges = leanRetainedEdges(docs, config);
+            for (const auto& cluster : built.value().clusters) {
+                CAPTURE(cluster.clusterId);
+                if (config.maxComponentDocs > 0) {
+                    CHECK(cluster.memberCount <= config.maxComponentDocs);
+                }
+                CHECK(clusterConnected(cluster, edges));
+            }
+            checkCrossEdgesOnlyFromSplit(built.value(), docs, edges, config.maxComponentDocs);
+        }
     }
 }
 
@@ -509,8 +654,9 @@ TEST_CASE("Lean contracts: dirty regions contain their seeds and respect the reg
 
 TEST_CASE("Lean contracts: routes name known clusters, obey the limit and are ordered",
           "[unit][topology][lean][contract][router][property]") {
-    // Lean: Contracts.RouteResultContract (RoutesReferenceClusters ∧ length ≤ limit) for
-    // limit ≥ 1, plus the score-descending, cluster-id tie-break order the router documents.
+    // Lean: Contracts.RouteResultContract (RoutesReferenceClusters ∧ length ≤ limit when
+    // limit > 0) and routedCluster_limit for limit ≥ 1, plus the score-descending, cluster-id
+    // tie-break order the router documents.
     std::mt19937 rng(kSeed + 5);
     std::uniform_int_distribution<std::size_t> size(1, 12);
     std::uniform_int_distribution<std::size_t> limit(1, 5);
@@ -560,12 +706,55 @@ TEST_CASE("Lean contracts: routes name known clusters, obey the limit and are or
     }
 }
 
-TEST_CASE("Lean contracts: a zero route limit returns no routes",
-          "[unit][topology][lean][contract][router][!shouldfail]") {
-    // Lean Contracts.RouteResultContract requires routes.length ≤ request.limit for every limit.
-    // SparseGuidedClusterRouter treats limit == 0 as "no limit" and returns every cluster, so the
-    // contract holds only for limit ≥ 1. Callers that pass 0 get an unbounded route list.
+TEST_CASE("Lean contracts: a zero route limit keeps every scored route",
+          "[unit][topology][lean][contract][router][property]") {
+    // Lean Contracts.applyRouteLimit: limit 0 means unlimited. applyRouteLimit_zero (nothing is
+    // truncated, every scored cluster stays eligible) and applyRouteLimit_contract (the result
+    // still names known clusters; RouteResultContract bounds the length only for limit > 0).
+    // Checked by comparing limit 0 with a limit no smaller than the cluster count.
+    std::mt19937 rng(kSeed + 8);
+    std::uniform_int_distribution<std::size_t> size(1, 12);
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    std::uniform_real_distribution<float> coord(-1.0F, 1.0F);
     ConnectedComponentTopologyEngine engine;
+    SparseGuidedClusterRouter router;
+    for (int iteration = 0; iteration < kIterations; ++iteration) {
+        const auto docs = randomDocuments(rng, size(rng));
+        const auto built = engine.buildArtifacts(docs, randomConfig(rng));
+        REQUIRE(built.has_value());
+        const auto& batch = built.value();
+        std::unordered_set<std::string> clusterIds;
+        for (const auto& cluster : batch.clusters) {
+            clusterIds.insert(cluster.clusterId);
+        }
+
+        TopologyRouteRequest request;
+        request.sparseDenseAlpha = unit(rng);
+        if (unit(rng) < 0.5F) {
+            request.queryEmbedding = {coord(rng), coord(rng), coord(rng)};
+        }
+        for (std::size_t i = 0; i < docs.size(); ++i) {
+            if (unit(rng) < 0.3F) {
+                request.seedDocumentHashes.push_back(docHash(i));
+            }
+        }
+        CAPTURE(iteration, docs.size(), batch.clusters.size(), request.seedDocumentHashes.size());
+
+        request.limit = 0;
+        const auto unlimited = router.route(request, batch);
+        request.limit = batch.clusters.size();
+        const auto wide = router.route(request, batch);
+        REQUIRE(unlimited.has_value());
+        REQUIRE(wide.has_value());
+        REQUIRE(unlimited.value().size() == wide.value().size());
+        for (std::size_t i = 0; i < unlimited.value().size(); ++i) {
+            CAPTURE(i);
+            CHECK(unlimited.value()[i].clusterId == wide.value()[i].clusterId);
+            CHECK(clusterIds.contains(unlimited.value()[i].clusterId));
+        }
+    }
+
+    // Two singleton clusters, both seeded: limit 0 returns both.
     const std::vector<TopologyDocumentInput> docs{
         TopologyDocumentInput{.documentHash = "a"},
         TopologyDocumentInput{.documentHash = "b"},
@@ -573,13 +762,12 @@ TEST_CASE("Lean contracts: a zero route limit returns no routes",
     const auto built = engine.buildArtifacts(docs, TopologyBuildConfig{});
     REQUIRE(built.has_value());
     REQUIRE(built.value().clusters.size() == 2U);
-
     TopologyRouteRequest request;
     request.limit = 0;
     request.seedDocumentHashes = {"a", "b"};
-    const auto routes = SparseGuidedClusterRouter{}.route(request, built.value());
+    const auto routes = router.route(request, built.value());
     REQUIRE(routes.has_value());
-    CHECK(routes.value().size() <= request.limit);
+    CHECK(routes.value().size() == 2U);
 }
 
 TEST_CASE("Lean contracts: boundary spill keeps member counts in step",
@@ -632,13 +820,14 @@ TEST_CASE("Lean contracts: boundary spill keeps member counts in step",
     }
 }
 
-TEST_CASE("Lean contracts: a spilled member has a membership row for its secondary cluster",
-          "[unit][topology][lean][contract][overlap][!shouldfail]") {
-    // Lean Artifacts.clusterMembersHaveMemberships requires a membership row whose clusterId is
-    // the cluster for every member hash. After boundary spill a replica is listed in the
-    // secondary cluster's members, but its only row names the primary cluster and lists the
-    // secondary in overlapClusterIds. With allowOverlap the batch does not satisfy
-    // WellFormedBatch as written; the model needs an overlap-aware membership predicate.
+TEST_CASE("Lean contracts: a spilled member is placed in its secondary cluster by overlap",
+          "[unit][topology][lean][contract][overlap]") {
+    // Lean Artifacts.clusterMembersHaveMemberships is overlap-aware: after boundary spill a
+    // replica is listed in the secondary cluster's members, and its only row names the primary
+    // cluster and lists the secondary in overlapClusterIds, which places it there
+    // (DocumentClusterMembership.placesIn). The batch satisfies WellFormedBatch
+    // (SystemContract.wellFormedBatch_impliesValidMemberships) but not the strict
+    // clusterMembersHavePrimaryMemberships, which Lean requires only without overlap rows.
     const std::vector<TopologyDocumentInput> documents{
         TopologyDocumentInput{.documentHash = "x", .embedding = {2.0F, 2.0F}},
         TopologyDocumentInput{.documentHash = "near", .embedding = {0.9F, 2.0F}},
@@ -670,6 +859,9 @@ TEST_CASE("Lean contracts: a spilled member has a membership row for its seconda
     config.overlapBoundaryDistanceRatio = 1.25;
     config.overlapResidualPenalty = 1.0;
 
+    REQUIRE(leanWellFormedBatch(batch));
     REQUIRE(applyOrthogonalBoundarySpill(documents, config, batch) == 1U);
     CHECK(leanWellFormedBatch(batch));
+    CHECK_FALSE(leanNoOverlapMemberships(batch));
+    CHECK_FALSE(leanPrimaryMemberships(batch));
 }
