@@ -1979,6 +1979,15 @@ if catch2_dep.found()
     'timeout': 30,
   }]
 
+  # Hypotheses the Lean search contracts (formal/topology) take about the C++ search path.
+  catch2_test_table += [{
+    'name': 'search_lean_assumptions',
+    'sources': files('unit/search/search_lean_assumptions_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'lean-contract'],
+    'timeout': 60,
+  }]
+
 #TuningSlot tests(provenance - tracking primitives for restructured tuning pipeline)
 #TuningSlot provenance tests
   catch2_test_table += [{
@@ -2649,6 +2658,15 @@ if catch2_dep.found()
     'sources': files('unit/topology/topology_baseline_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'topology'],
+    'timeout': 60,
+  }]
+
+  # Hypotheses the Lean topology contracts (formal/topology) take about the C++ engines.
+  catch2_test_table += [{
+    'name': 'topology_lean_assumptions',
+    'sources': files('unit/topology/topology_lean_assumptions_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology', 'lean-contract'],
     'timeout': 60,
   }]
 
