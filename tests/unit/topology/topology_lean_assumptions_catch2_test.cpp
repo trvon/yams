@@ -230,8 +230,9 @@ TopologyBuildConfig randomConfig(std::mt19937& rng) {
 
 TEST_CASE("Lean contracts: connected engine output is a well-formed partition",
           "[unit][topology][lean][contract][property]") {
-    // Lean: Artifacts.WellFormedBatch, Connected.ConnectedFrom, Connected.NoCrossClusterEdges,
-    // Connected.IsMedoidByScore (m ∈ members), Contracts.ConnectedComponentContract.
+    // Lean: Artifacts.WellFormedBatch, Connected.ConnectedFrom, Connected.IsMedoidByScore
+    // (m ∈ members), and Contracts.component_noCrossEdges_uncapped (maxComponentDocs = 0, so
+    // NoCrossClusterEdges holds).
     std::mt19937 rng(kSeed);
     std::uniform_int_distribution<std::size_t> size(1, 12);
     ConnectedComponentTopologyEngine engine;
@@ -264,7 +265,8 @@ TEST_CASE("Lean contracts: connected engine output is a well-formed partition",
 
 TEST_CASE("Lean contracts: capped connected components stay connected and within the cap",
           "[unit][topology][lean][contract][property]") {
-    // Lean: ConstructionGates.ComponentsConnectedAndCapped (ConnectedFrom ∧ ComponentRespectsCap).
+    // Lean: ConstructionGates.ComponentsConnectedAndCapped (ConnectedFrom ∧ ComponentRespectsCap,
+    // cap > 0 here; cap 0 means unlimited).
     std::mt19937 rng(kSeed + 1);
     std::uniform_int_distribution<std::size_t> size(1, 12);
     std::uniform_int_distribution<std::size_t> cap(1, 4);
@@ -289,37 +291,149 @@ TEST_CASE("Lean contracts: capped connected components stay connected and within
     }
 }
 
-TEST_CASE("Lean contracts: capped components keep no retained edge across clusters",
-          "[unit][topology][lean][contract][!shouldfail]") {
-    // Lean Contracts.ConnectedComponentContract requires NoCrossClusterEdges over the retained
-    // edge set. With maxComponentDocs > 0 (TopologyManager defaults it to 64) the anti-giant split
-    // cuts retained edges, so a split component violates it. The Lean contract holds only for
-    // maxComponentDocs == 0 or when no component exceeds the cap.
+namespace {
+
+/// The original connected components over the retained edges, before the anti-giant split:
+/// Lean `componentOf` (hash to component index) and `componentSize` (index to size).
+struct OriginalComponents {
+    std::unordered_map<std::string, std::size_t> componentOf;
+    std::vector<std::size_t> componentSize;
+};
+
+OriginalComponents
+originalComponents(const std::vector<TopologyDocumentInput>& docs,
+                   const std::vector<std::pair<std::string, std::string>>& edges) {
+    std::unordered_map<std::string, std::vector<std::string>> adjacency;
+    for (const auto& [a, b] : edges) {
+        adjacency[a].push_back(b);
+        adjacency[b].push_back(a);
+    }
+    OriginalComponents out;
+    for (const auto& doc : docs) {
+        if (out.componentOf.contains(doc.documentHash)) {
+            continue;
+        }
+        const std::size_t index = out.componentSize.size();
+        out.componentSize.push_back(0);
+        std::queue<std::string> frontier;
+        frontier.push(doc.documentHash);
+        out.componentOf.emplace(doc.documentHash, index);
+        while (!frontier.empty()) {
+            const auto current = frontier.front();
+            frontier.pop();
+            ++out.componentSize[index];
+            for (const auto& next : adjacency[current]) {
+                if (out.componentOf.emplace(next, index).second) {
+                    frontier.push(next);
+                }
+            }
+        }
+    }
+    return out;
+}
+
+/// Lean Contracts.CrossEdgesOnlyFromSplit: an edge whose endpoints sit in different clusters
+/// joins two pieces of one original component that exceeded the cap (cap 0 = unlimited).
+/// Returns the number of crossing edges seen.
+std::size_t checkCrossEdgesOnlyFromSplit(
+    const TopologyArtifactBatch& batch, const std::vector<TopologyDocumentInput>& docs,
+    const std::vector<std::pair<std::string, std::string>>& edges, std::size_t cap) {
+    const auto clusterOf = primaryClusterOf(batch);
+    const auto original = originalComponents(docs, edges);
+    std::size_t crossing = 0;
+    for (const auto& [a, b] : edges) {
+        if (clusterOf.at(a) == clusterOf.at(b)) {
+            continue;
+        }
+        ++crossing;
+        CAPTURE(a, b, cap);
+        const auto component = original.componentOf.at(a);
+        CHECK(original.componentOf.at(b) == component);
+        CHECK(cap != 0);
+        CHECK(original.componentSize[component] > cap);
+    }
+    return crossing;
+}
+
+} // namespace
+
+TEST_CASE("Lean contracts: retained edges cross clusters only inside a split component",
+          "[unit][topology][lean][contract][property]") {
+    // Lean Contracts.ConnectedComponentContract with the anti-giant cap: every cluster is
+    // connected and has at most maxComponentDocs members (component_respectsCap), and a retained
+    // edge crosses clusters only between pieces of one original component larger than the cap
+    // (component_crossEdgesOnlyFromSplit). splitOversizedComponent cuts edges inside such a
+    // component. With cap 0 or no oversized component nothing crosses (component_noCrossEdges,
+    // component_noCrossEdges_uncapped).
     ConnectedComponentTopologyEngine engine;
-    TopologyBuildConfig config;
-    config.minEdgeScore = 0.5;
-    config.reciprocalOnly = true;
-    config.maxComponentDocs = 2;
-    std::vector<TopologyDocumentInput> docs;
-    for (std::size_t i = 0; i < 5; ++i) {
-        TopologyDocumentInput doc{.documentHash = docHash(i)};
-        if (i > 0) {
-            doc.neighbors.push_back(
-                {.documentHash = docHash(i - 1), .score = 0.9F, .reciprocal = true});
+
+    SECTION("a five-document chain split under cap 2, beside a pair under the cap") {
+        TopologyBuildConfig config;
+        config.minEdgeScore = 0.5;
+        config.reciprocalOnly = true;
+        config.maxComponentDocs = 2;
+        std::vector<TopologyDocumentInput> docs;
+        for (std::size_t i = 0; i < 5; ++i) {
+            TopologyDocumentInput doc{.documentHash = docHash(i)};
+            if (i > 0) {
+                doc.neighbors.push_back(
+                    {.documentHash = docHash(i - 1), .score = 0.9F, .reciprocal = true});
+            }
+            if (i + 1 < 5) {
+                doc.neighbors.push_back(
+                    {.documentHash = docHash(i + 1), .score = 0.9F, .reciprocal = true});
+            }
+            docs.push_back(std::move(doc));
         }
-        if (i + 1 < 5) {
-            doc.neighbors.push_back(
-                {.documentHash = docHash(i + 1), .score = 0.9F, .reciprocal = true});
+        docs.push_back(TopologyDocumentInput{
+            .documentHash = "p0",
+            .neighbors = {{.documentHash = "p1", .score = 0.9F, .reciprocal = true}}});
+        docs.push_back(TopologyDocumentInput{
+            .documentHash = "p1",
+            .neighbors = {{.documentHash = "p0", .score = 0.9F, .reciprocal = true}}});
+
+        const auto built = engine.buildArtifacts(docs, config);
+        REQUIRE(built.has_value());
+        const auto edges = leanRetainedEdges(docs, config);
+        for (const auto& cluster : built.value().clusters) {
+            CAPTURE(cluster.clusterId);
+            CHECK(cluster.memberCount <= config.maxComponentDocs);
+            CHECK(clusterConnected(cluster, edges));
         }
-        docs.push_back(std::move(doc));
+        CHECK(checkCrossEdgesOnlyFromSplit(built.value(), docs, edges, config.maxComponentDocs) >
+              0U);
+        const auto clusterOf = primaryClusterOf(built.value());
+        CHECK(clusterOf.at("p0") == clusterOf.at("p1"));
+
+        config.maxComponentDocs = 0;
+        const auto uncapped = engine.buildArtifacts(docs, config);
+        REQUIRE(uncapped.has_value());
+        CHECK(checkCrossEdgesOnlyFromSplit(uncapped.value(), docs, edges, 0) == 0U);
     }
 
-    const auto built = engine.buildArtifacts(docs, config);
-    REQUIRE(built.has_value());
-    const auto clusterOf = primaryClusterOf(built.value());
-    for (const auto& [a, b] : leanRetainedEdges(docs, config)) {
-        CAPTURE(a, b);
-        CHECK(clusterOf.at(a) == clusterOf.at(b));
+    SECTION("random corpora and caps") {
+        std::mt19937 rng(kSeed + 7);
+        std::uniform_int_distribution<std::size_t> size(1, 12);
+        std::uniform_int_distribution<std::size_t> cap(0, 4);
+        for (int iteration = 0; iteration < kIterations; ++iteration) {
+            const auto docs = randomDocuments(rng, size(rng));
+            auto config = randomConfig(rng);
+            config.maxComponentDocs = cap(rng);
+            CAPTURE(iteration, docs.size(), config.maxComponentDocs, config.minEdgeScore,
+                    config.reciprocalOnly);
+
+            const auto built = engine.buildArtifacts(docs, config);
+            REQUIRE(built.has_value());
+            const auto edges = leanRetainedEdges(docs, config);
+            for (const auto& cluster : built.value().clusters) {
+                CAPTURE(cluster.clusterId);
+                if (config.maxComponentDocs > 0) {
+                    CHECK(cluster.memberCount <= config.maxComponentDocs);
+                }
+                CHECK(clusterConnected(cluster, edges));
+            }
+            checkCrossEdgesOnlyFromSplit(built.value(), docs, edges, config.maxComponentDocs);
+        }
     }
 }
 

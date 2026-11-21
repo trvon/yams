@@ -17,7 +17,10 @@ Yams.Topology.neighborEdge_noSelf
 Yams.Topology.neighborEdge_reciprocalWhenRequired
 Yams.Topology.neighborEdge_minScore
 Yams.Topology.componentMember_reachable
+Yams.Topology.component_respectsCap
+Yams.Topology.component_crossEdgesOnlyFromSplit
 Yams.Topology.component_noCrossEdges
+Yams.Topology.component_noCrossEdges_uncapped
 Yams.Topology.dirtyRegion_containsSeeds
 Yams.Topology.dirtyRegion_budgetOrWiderRebuild
 Yams.Topology.routedCluster_known

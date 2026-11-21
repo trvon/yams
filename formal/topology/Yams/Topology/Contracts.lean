@@ -65,36 +65,116 @@ theorem neighborEdge_minScore
     cfg.minEdgeScore ≤ neighbor.score := by
   exact h.2.2.2
 
-/-- Contract for a connected-component cluster: all declared members are reachable
-from the component root, and no retained graph edge crosses cluster IDs. -/
+/-- A component-size cap where `0` means unlimited (`maxComponentDocs`). -/
+def WithinComponentCap (cap size : Nat) : Prop :=
+  cap = 0 ∨ size ≤ cap
+
+/-- An original connected component is oversized when a cap is set and the component exceeds
+it; only such a component is split (`splitOversizedComponent`). -/
+def OversizedComponent (cap size : Nat) : Prop :=
+  cap ≠ 0 ∧ cap < size
+
+/-- Retained edges cross published clusters only inside a split: both endpoints came from the
+same original connected component (`componentOf`) and that component was oversized
+(`componentSize` is the size of an original component). -/
+def CrossEdgesOnlyFromSplit
+    (edges : List UEdge)
+    (cap : Nat)
+    (clusterOf : Nat → ClusterId)
+    (componentOf : Nat → Nat)
+    (componentSize : Nat → Nat) : Prop :=
+  ∀ e ∈ edges, clusterOf e.a ≠ clusterOf e.b →
+    componentOf e.a = componentOf e.b ∧ OversizedComponent cap (componentSize (componentOf e.a))
+
+/-- No original component exceeds the cap (always true when the cap is `0`). -/
+def NoOversizedComponent (cap : Nat) (componentOf : Nat → Nat) (componentSize : Nat → Nat) :
+    Prop :=
+  ∀ x, ¬ OversizedComponent cap (componentSize (componentOf x))
+
+/-- Contract for one published connected-component cluster under the anti-giant cap
+`maxComponentDocs` (`0` = unlimited): its members are reachable from its root, it has at most
+`cap` members, and a retained edge crosses clusters only between two pieces of one oversized
+original component. -/
 def ConnectedComponentContract
     (edges : List UEdge)
+    (cap : Nat)
     (root : Nat)
     (members : List Nat)
-    (clusterOf : Nat → ClusterId) : Prop :=
-  ConnectedFrom edges root members ∧ NoCrossClusterEdges edges clusterOf
+    (clusterOf : Nat → ClusterId)
+    (componentOf : Nat → Nat)
+    (componentSize : Nat → Nat) : Prop :=
+  ConnectedFrom edges root members ∧
+    WithinComponentCap cap members.length ∧
+    CrossEdgesOnlyFromSplit edges cap clusterOf componentOf componentSize
 
 /-- Membership in a connected-component artifact implies graph reachability from
 that component's root. -/
 theorem componentMember_reachable
     {edges : List UEdge}
-    {root x : Nat}
+    {cap root x : Nat}
     {members : List Nat}
     {clusterOf : Nat → ClusterId}
-    (h : ConnectedComponentContract edges root members clusterOf)
+    {componentOf componentSize : Nat → Nat}
+    (h : ConnectedComponentContract edges cap root members clusterOf componentOf componentSize)
     (hx : x ∈ members) :
     Reachable edges root x := by
   exact h.1 x hx
 
-/-- Connected-component contracts forbid retained graph edges across clusters. -/
+/-- A published cluster has at most `cap` members when a cap is set. -/
+theorem component_respectsCap
+    {edges : List UEdge}
+    {cap root : Nat}
+    {members : List Nat}
+    {clusterOf : Nat → ClusterId}
+    {componentOf componentSize : Nat → Nat}
+    (h : ConnectedComponentContract edges cap root members clusterOf componentOf componentSize)
+    (hCap : 0 < cap) :
+    members.length ≤ cap := by
+  rcases h.2.1 with h0 | hle
+  · omega
+  · exact hle
+
+/-- A retained edge that crosses clusters joins two pieces of one oversized component. -/
+theorem component_crossEdgesOnlyFromSplit
+    {edges : List UEdge}
+    {cap root : Nat}
+    {members : List Nat}
+    {clusterOf : Nat → ClusterId}
+    {componentOf componentSize : Nat → Nat}
+    (h : ConnectedComponentContract edges cap root members clusterOf componentOf componentSize)
+    {e : UEdge}
+    (he : e ∈ edges)
+    (hCross : clusterOf e.a ≠ clusterOf e.b) :
+    componentOf e.a = componentOf e.b ∧
+      cap ≠ 0 ∧ cap < componentSize (componentOf e.a) :=
+  h.2.2 e he hCross
+
+/-- When no original component exceeds the cap, no retained edge crosses clusters: the
+pre-split contract is a corollary. -/
 theorem component_noCrossEdges
+    {edges : List UEdge}
+    {cap root : Nat}
+    {members : List Nat}
+    {clusterOf : Nat → ClusterId}
+    {componentOf componentSize : Nat → Nat}
+    (h : ConnectedComponentContract edges cap root members clusterOf componentOf componentSize)
+    (hNone : NoOversizedComponent cap componentOf componentSize) :
+    NoCrossClusterEdges edges clusterOf := by
+  intro e he
+  by_cases hSame : clusterOf e.a = clusterOf e.b
+  · exact hSame
+  · exact absurd (component_crossEdgesOnlyFromSplit h he hSame).2 (hNone e.a)
+
+/-- With the cap off (`0`), no component is split and no retained edge crosses clusters. -/
+theorem component_noCrossEdges_uncapped
     {edges : List UEdge}
     {root : Nat}
     {members : List Nat}
     {clusterOf : Nat → ClusterId}
-    (h : ConnectedComponentContract edges root members clusterOf) :
-    NoCrossClusterEdges edges clusterOf := by
-  exact h.2
+    {componentOf componentSize : Nat → Nat}
+    (h : ConnectedComponentContract edges 0 root members clusterOf componentOf componentSize) :
+    NoCrossClusterEdges edges clusterOf :=
+  component_noCrossEdges h (fun _ hOver => hOver.1 rfl)
 
 /-- Contract for dirty-region expansion.
 
