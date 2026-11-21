@@ -28,6 +28,7 @@
 #include <yams/app/services/session_service.hpp>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
@@ -873,6 +874,56 @@ TEST_CASE_METHOD(GrepServiceExpectationsFixture,
     sessions->clearCurrent();
 
     start();
+    // ServiceManager construction resets the configured TuneAdvisor overrides, so the value
+    // set above is gone once the daemon starts; without this the watcher defers its pass for
+    // up to the 300 s default on a busy host.
+    yams::daemon::TuneAdvisor::setBackgroundMaxDeferralMs(0);
+
+    // Wait for what the test observes, not for a fixed number of tries: under a loaded host
+    // (a parallel sanitizer run) startup is slow, and the watcher also waits while the
+    // governor refuses admission for CPU or memory pressure. The deadlines are generous; a
+    // watcher that never runs still fails, with the admission state in the message.
+    const auto waitFor = [](std::chrono::seconds budget, const auto& done) {
+        const auto deadline = std::chrono::steady_clock::now() + budget;
+        for (;;) {
+            if (done()) {
+                return true;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return false;
+            }
+            std::this_thread::sleep_for(100ms);
+        }
+    };
+    const auto watcherState = [&] {
+        auto& governor = yams::daemon::ResourceGovernor::instance();
+        std::string deferred;
+        for (const auto kind : governor.deferredWork()) {
+            deferred += std::string(yams::daemon::deferrableWorkName(kind)) + ' ';
+        }
+        return "lifecycle=" +
+               std::to_string(static_cast<int>(daemon()->getLifecycle().snapshot().state)) +
+               " canAdmitWork=" + (governor.canAdmitWork() ? "1" : "0") + " deferred=[" + deferred +
+               "]";
+    };
+
+    REQUIRE(waitFor(120s, [&] {
+        const auto state = daemon()->getLifecycle().snapshot().state;
+        return state == yams::daemon::LifecycleState::Ready ||
+               state == yams::daemon::LifecycleState::Degraded;
+    }));
+
+    // The first completed scan saves its snapshot here, next to the store it describes.
+    const auto watchStateDir = storageDir() / "watch";
+    const auto hasSnapshot = [&] {
+        std::error_code ec;
+        return fs::exists(watchStateDir, ec) && !fs::is_empty(watchStateDir, ec);
+    };
+    {
+        const bool scanned = waitFor(180s, hasSnapshot);
+        INFO(watcherState());
+        REQUIRE(scanned);
+    }
 
     yams::app::services::RetrievalService retrievalSvc;
     yams::app::services::RetrievalOptions retrievalOpts;
@@ -882,17 +933,20 @@ TEST_CASE_METHOD(GrepServiceExpectationsFixture,
         yams::app::services::GrepOptions request;
         request.pattern = pattern;
         request.regexOnly = true;
-        for (int attempt = 0; attempt < 150; ++attempt) {
-            if (auto found = retrievalSvc.grep(request, retrievalOpts)) {
-                for (const auto& match : found.value().matches) {
+        const bool found = waitFor(120s, [&] {
+            if (auto result = retrievalSvc.grep(request, retrievalOpts)) {
+                for (const auto& match : result.value().matches) {
                     if (fs::path(match.file).filename() == fileName) {
                         return true;
                     }
                 }
             }
-            std::this_thread::sleep_for(100ms);
+            return false;
+        });
+        if (!found) {
+            UNSCOPED_INFO(pattern << " not found; " << watcherState());
         }
-        return false;
+        return found;
     };
 
     CHECK(grepFinds("watchneedlegamma", "nested.txt"));
@@ -913,9 +967,9 @@ TEST_CASE_METHOD(GrepServiceExpectationsFixture,
     }
 
     // What the watcher has seen is persisted next to the store it describes.
-    std::error_code ec;
-    CHECK(fs::exists(storageDir() / "watch", ec));
+    CHECK(hasSnapshot());
 
+    std::error_code ec;
     fs::remove_all(watched, ec);
 }
 
