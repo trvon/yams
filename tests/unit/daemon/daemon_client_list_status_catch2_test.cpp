@@ -463,6 +463,72 @@ TEST_CASE("DaemonClient list returns friendly retry error on StatusResponse",
     CHECK(result.error().message.find("initializing") != std::string::npos);
 }
 
+TEST_CASE("DaemonClient get reports a starting daemon instead of missing content",
+          "[daemon][client][get][regression]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    // A daemon before 0.23.1 answers a get with a StatusResponse while it starts. The client
+    // used to drop it and return an empty GetResponse, which cat printed as
+    // "Document content not found".
+    auto runtimeDir = makeTempRuntimeDir("get-status-" + randomSuffix());
+    auto socketPath = runtimeDir / "ipc.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    boost::asio::io_context serverIo;
+    boost::asio::local::stream_protocol::acceptor acceptor(
+        serverIo, boost::asio::local::stream_protocol::endpoint(socketPath.string()));
+
+    std::atomic<bool> sawGet{false};
+    std::thread serverThread([&] {
+        try {
+            boost::asio::local::stream_protocol::socket sock(serverIo);
+            acceptor.accept(sock);
+
+            auto frame = readFrame(sock);
+            MessageFramer framer;
+            auto parsed = framer.parse_frame(frame);
+            if (!parsed) {
+                return;
+            }
+            const auto& reqMsg = parsed.value();
+            if (const auto* reqVariant = std::get_if<Request>(&reqMsg.payload)) {
+                sawGet = std::holds_alternative<GetRequest>(*reqVariant);
+            }
+            writeStatusResponse(sock, reqMsg.requestId);
+            sock.close();
+        } catch (...) {
+        }
+    });
+
+    ClientConfig cfg;
+    cfg.socketPath = socketPath;
+    cfg.requestTimeout = 3s;
+    cfg.headerTimeout = 3s;
+    cfg.bodyTimeout = 3s;
+    cfg.autoStart = false;
+
+    DaemonClient client(cfg);
+    GetRequest req;
+    req.hash = std::string(64, 'a');
+
+    auto result = yams::cli::run_sync(client.get(req), 5s);
+
+    if (serverThread.joinable()) {
+        serverThread.join();
+    }
+    fs::remove(socketPath, ec);
+    AsioConnectionPool::shutdown_all(100ms);
+
+    CHECK(sawGet.load());
+    REQUIRE_FALSE(result.has_value());
+    REQUIRE(result.error().code == ErrorCode::InvalidState);
+    CHECK(result.error().message.find("Daemon not ready yet") != std::string::npos);
+    CHECK(result.error().message.find("initializing") != std::string::npos);
+}
+
 TEST_CASE("DaemonClient list rewrites repeated EOF to retry guidance",
           "[daemon][client][list][regression]") {
 #ifdef _WIN32
