@@ -36,10 +36,13 @@ Yams.Pipeline.graph_navigation_requires_core
 Yams.Storage.batchedCommit_contract
 Yams.Topology.Bridge.storageToSearch_contractHolds
 
-# SearchEngine.lean: search provenance and limits
+# SearchEngine.lean: search provenance, limits and semantic-mode sources
 Yams.SearchEngine.runSearch_resultsComeFromEnabledCandidates
 Yams.SearchEngine.runSearch_respectsLimit
 Yams.SearchEngine.runSearch_degradedFlag
+Yams.SearchEngine.semanticMode_noStructuralCandidates
+Yams.SearchEngine.semanticMode_admitsLexicalEvidence
+Yams.SearchEngine.semanticMode_contract
 
 # TopologyInfluence.lean: topology-augmented search
 Yams.SearchEngine.runSearchWithTopology_disabled_baseline

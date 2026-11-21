@@ -331,28 +331,73 @@ TEST_CASE("Lean contracts: route selection for narrowing is a bounded prefix",
 
 TEST_CASE("Lean contracts: semantic mode keeps every graph-text source out",
           "[unit][search][lean][contract][mode]") {
-    // Lean SearchEngine.semanticMode_noLexicalOnlyCandidates for the graphText source: C++
-    // schedules a component only when its weight is positive.
+    // Lean SearchEngine.semanticMode_noStructuralCandidates for the graphText source and
+    // applySemanticOnlyWeights (graphText := 0, graphVector := 0): C++ schedules a component
+    // only when its weight is positive.
     SearchEngineConfig config;
     config.enableIntentAdaptiveWeighting = false;
     config.textWeight = 0.50F;
     config.vectorWeight = 0.30F;
     config.graphTextWeight = 0.20F;
+    config.graphVectorWeight = 0.10F;
     const auto resolution = resolveQueryPolicy("how do embeddings work", config,
                                                seedTunedParamsFromConfig(config), std::nullopt,
                                                /*semanticOnly=*/true);
     CHECK(resolution.config.graphTextWeight <= 0.0F);
+    CHECK(resolution.config.graphVectorWeight <= 0.0F);
     CHECK(resolution.config.vectorWeight > 0.0F);
 }
 
-TEST_CASE("Lean contracts: semantic mode schedules no lexical-only component",
+TEST_CASE("Lean contracts: semantic mode caps lexical evidence and floors vector weights",
+          "[unit][search][lean][contract][mode][property]") {
+    // Lean SearchEngine.applySemanticOnlyWeights, applySemanticOnlyWeights_lexicalCapped,
+    // applySemanticOnlyWeights_vectorFloored and semanticMode_admitsLexicalEvidence. The Lean
+    // layer mirrors applySemanticOnlyLayer, which runs before WeightSlots::normalize: text is
+    // capped at 0.20, simeonText at 0.05, vector raised to at least 0.45, entityVector to at
+    // least 0.15, kg zeroed. Text is capped, not removed: it still reaches fusion.
+    std::mt19937 rng(kSeed + 3);
+    std::uniform_real_distribution<float> weight(0.0F, 1.0F);
+    for (int iteration = 0; iteration < kIterations; ++iteration) {
+        SearchEngineConfig config;
+        config.enableIntentAdaptiveWeighting = false;
+        config.textWeight = weight(rng);
+        config.simeonTextWeight = weight(rng);
+        config.vectorWeight = weight(rng);
+        config.entityVectorWeight = weight(rng);
+        config.kgWeight = weight(rng);
+        CAPTURE(iteration, config.textWeight, config.simeonTextWeight, config.vectorWeight,
+                config.entityVectorWeight, config.kgWeight);
+
+        auto params = seedTunedParamsFromConfig(config);
+        const float textBefore = params.weights.text.value;
+        const float simeonBefore = params.weights.simeonText.value;
+        const float vectorBefore = params.weights.vector.value;
+        const float entityBefore = params.weights.entityVector.value;
+        yams::search::applySemanticOnlyLayer(params);
+        const auto& w = params.weights;
+        CHECK(w.text.value == std::min(textBefore, 0.20F));
+        CHECK(w.simeonText.value == std::min(simeonBefore, 0.05F));
+        CHECK(w.vector.value == std::max(vectorBefore, 0.45F));
+        CHECK(w.entityVector.value == std::max(entityBefore, 0.15F));
+        CHECK(w.kg.value == 0.0F);
+
+        const auto resolution =
+            resolveQueryPolicy("how do embeddings work", config, seedTunedParamsFromConfig(config),
+                               std::nullopt, /*semanticOnly=*/true);
+        if (config.textWeight > 0.0F) {
+            CHECK(resolution.config.textWeight > 0.0F);
+        }
+        CHECK(resolution.config.kgWeight <= 0.0F);
+    }
+}
+
+TEST_CASE("Lean contracts: semantic mode schedules no path, tag or metadata component",
           "[unit][search][lean][contract][mode][!shouldfail]") {
-    // Lean SearchEngine.semanticMode_noLexicalOnlyCandidates: semantic mode admits no text,
-    // path, tag, metadata or graphText candidate. SearchService maps type=semantic to
-    // SearchParams::semanticOnly, and applySemanticOnlyLayer only caps the text weight at 0.20
-    // (simeonText at 0.05) and leaves path, tag and metadata weights alone, so their components
-    // still run and their candidates reach fusion. In C++ "semantic" means vector-dominant
-    // hybrid, not vector-only; the Lean source gate does not describe it.
+    // Lean SearchEngine.semanticMode_noStructuralCandidates: semantic mode admits no path, tag,
+    // metadata or graphText candidate. applySemanticOnlyConfigExtras zeroes graphText, but
+    // applySemanticOnlyLayer leaves the pathTree, tag and metadata weights alone, so their
+    // components still run in semantic mode. The C++ side has to zero those weights for the
+    // Lean gate to describe it.
     SearchEngineConfig config;
     config.enableIntentAdaptiveWeighting = false;
     config.textWeight = 0.50F;
@@ -363,7 +408,6 @@ TEST_CASE("Lean contracts: semantic mode schedules no lexical-only component",
     const auto resolution = resolveQueryPolicy("how do embeddings work", config,
                                                seedTunedParamsFromConfig(config), std::nullopt,
                                                /*semanticOnly=*/true);
-    CHECK(resolution.config.textWeight <= 0.0F);
     CHECK(resolution.config.pathTreeWeight <= 0.0F);
     CHECK(resolution.config.tagWeight <= 0.0F);
     CHECK(resolution.config.metadataWeight <= 0.0F);
