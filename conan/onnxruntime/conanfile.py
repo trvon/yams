@@ -1,5 +1,5 @@
 from conan import ConanFile
-from conan.tools.files import get, copy, save, mkdir, download, chdir
+from conan.tools.files import get, copy, save, mkdir, download, chdir, unzip
 from conan.tools.scm import Git
 from conan.errors import ConanInvalidConfiguration
 import os
@@ -324,11 +324,62 @@ class OnnxRuntimeConan(ConanFile):
         """Get DirectML package URL from NuGet"""
         return f"https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/{self.version}"
 
+    # Prebuilt runtime sources, tried in this order by build():
+    #
+    #   1. The upstream GitHub release archive (microsoft/onnxruntime). Not pinned.
+    #   2. The YAMS mirror: a trvon/yams GitHub release, tag deps-onnxruntime-<version>, holding
+    #      byte-identical copies of upstream artifacts. Upstream archives returned 404 from
+    #      2026-11-17, and a release build should not depend on one vendor's download host.
+    #      Only the artifacts listed in _MIRROR_SHA256 for this version are fetched, each checked
+    #      against its pin; an unlisted artifact skips straight to the next source.
+    #   3. NuGet (Microsoft.ML.OnnxRuntime), CPU and macOS CoreML runtimes only, pinned below.
+    #
+    # The mirror holds the NuGet package (the per-platform archives are gone upstream), so steps
+    # 2 and 3 unpack the same bytes. scripts/deps/mirror-onnxruntime.sh downloads and verifies the
+    # artifacts and prints the commands that publish the mirror release.
+    #
+    # YAMS_ONNXRUNTIME_MIRROR_URL replaces the mirror base URL (https://, http:// or file:///) for
+    # tests and air-gapped builds; "off" skips the mirror. Artifacts are still checked by sha256.
+    _MIRROR_BASE_URL = "https://github.com/trvon/yams/releases/download/deps-onnxruntime-{version}"
+
     # SHA-256 of Microsoft.ML.OnnxRuntime.<version>.nupkg from nuget.org. The NuGet fallback only
     # runs for versions listed here, so a package it unpacks is always the one that was checked.
     _NUGET_CPU_SHA256 = {
         "1.23.0": "cadbf21358de4b6002eddce08329465071271d52bb1483779f6f09670af281fc",
     }
+
+    # Mirror artifacts by version: file name -> SHA-256 of the upstream file.
+    _MIRROR_SHA256 = {
+        "1.23.0": {
+            "microsoft.ml.onnxruntime.1.23.0.nupkg": _NUGET_CPU_SHA256["1.23.0"],
+        },
+    }
+
+    def _mirror_base_url(self):
+        override = os.environ.get("YAMS_ONNXRUNTIME_MIRROR_URL", "").strip()
+        if override.lower() in ("off", "none", "0", "false"):
+            return None
+        if override:
+            return override.rstrip("/")
+        return self._MIRROR_BASE_URL.format(version=self.version)
+
+    def _download_from_mirror(self, name, dest):
+        """Fetch one listed artifact from the YAMS mirror into dest. False when not listed,
+        disabled or unreachable, so the caller moves on to the next source."""
+        sha256 = self._MIRROR_SHA256.get(str(self.version), {}).get(name)
+        base = self._mirror_base_url()
+        if not sha256 or not base:
+            return False
+        url = f"{base}/{name}"
+        self.output.info(f"Downloading ONNX Runtime from the YAMS mirror: {url}")
+        try:
+            download(self, url, dest, sha256=sha256, retry=1, retry_wait=2)
+            return True
+        except Exception as error:
+            self.output.warning(f"ONNX Runtime mirror download failed: {error}")
+            if os.path.exists(dest):
+                os.remove(dest)
+            return False
 
     def _nuget_runtime_id(self):
         os_name = str(self.settings.os)
@@ -342,7 +393,7 @@ class OnnxRuntimeConan(ConanFile):
         return None
 
     def _fetch_cpu_from_nuget(self):
-        """Fetch the CPU runtime from Microsoft's NuGet package.
+        """Fetch the CPU runtime from Microsoft's NuGet package, via the YAMS mirror first.
 
         The GitHub release archives can be unavailable (microsoft/onnxruntime returned 404 from
         2026-11-17). Microsoft.ML.OnnxRuntime carries the same libraries (byte-identical
@@ -355,13 +406,15 @@ class OnnxRuntimeConan(ConanFile):
         rid = self._nuget_runtime_id()
         if not sha256 or not rid:
             return False
-        nupkg = os.path.join(self.build_folder, f"microsoft.ml.onnxruntime.{self.version}.nupkg")
-        url = (
-            "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/"
-            f"{self.version}/microsoft.ml.onnxruntime.{self.version}.nupkg"
-        )
-        self.output.info(f"Downloading ONNX Runtime from NuGet: {url}")
-        download(self, url, nupkg, sha256=sha256)
+        nupkg_name = f"microsoft.ml.onnxruntime.{self.version}.nupkg"
+        nupkg = os.path.join(self.build_folder, nupkg_name)
+        if not self._download_from_mirror(nupkg_name, nupkg):
+            url = (
+                "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/"
+                f"{self.version}/{nupkg_name}"
+            )
+            self.output.info(f"Downloading ONNX Runtime from NuGet: {url}")
+            download(self, url, nupkg, sha256=sha256)
 
         root = os.path.join(self.build_folder, f"onnxruntime-nuget-{rid}-{self.version}")
         include_dir = os.path.join(root, "include")
@@ -402,7 +455,7 @@ class OnnxRuntimeConan(ConanFile):
 
         if not os.listdir(lib_dir) or not os.path.isfile(os.path.join(include_dir, "onnxruntime_c_api.h")):
             raise ConanInvalidConfiguration(f"NuGet package has no {rid} runtime or headers")
-        self.output.info(f"Using ONNX Runtime {self.version} from NuGet ({rid})")
+        self.output.info(f"Using ONNX Runtime {self.version} from the NuGet package ({rid})")
         return True
 
     def source(self):
@@ -558,22 +611,32 @@ class OnnxRuntimeConan(ConanFile):
         if self._is_source_build():
             self._build_from_source()
         else:
-            # Download prebuilt binaries
+            # Download prebuilt binaries. Source order is documented at _MIRROR_BASE_URL.
             url = self._get_download_url()
             self.output.info(f"Downloading ONNX Runtime from: {url}")
             try:
                 get(self, url, destination=self.build_folder, strip_root=False)
+                return
             except Exception as error:
-                # NuGet's CPU package has no CUDA, DirectML or MIGraphX runtime. Its macOS runtimes
-                # are the CoreML build, like the macOS release archives, so CoreML falls back too.
-                coreml_on_macos = (
-                    self.options.with_gpu == "coreml" and str(self.settings.os) == "Macos"
-                )
-                if self.options.with_gpu and not coreml_on_macos:
-                    raise
                 self.output.warning(f"ONNX Runtime release download failed: {error}")
-                if not self._fetch_cpu_from_nuget():
-                    raise
+                upstream_error = error
+            # 2. The same archive from the YAMS mirror, when it is listed there.
+            archive_name = url.rsplit("/", 1)[-1]
+            archive = os.path.join(self.build_folder, archive_name)
+            if self._download_from_mirror(archive_name, archive):
+                unzip(self, archive, destination=self.build_folder)
+                os.remove(archive)
+                return
+            # 3. The NuGet package (mirror copy first). NuGet's CPU package has no CUDA, DirectML
+            # or MIGraphX runtime. Its macOS runtimes are the CoreML build, like the macOS release
+            # archives, so CoreML falls back too.
+            coreml_on_macos = (
+                self.options.with_gpu == "coreml" and str(self.settings.os) == "Macos"
+            )
+            if self.options.with_gpu and not coreml_on_macos:
+                raise upstream_error
+            if not self._fetch_cpu_from_nuget():
+                raise upstream_error
 
     def _package_source_build(self):
         """Package libraries from source build"""
