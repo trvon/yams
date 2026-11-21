@@ -83,7 +83,7 @@ jobs:
             ~/.conan2/recipes
             ~/.conan2/metadata
             ~/.conan2/s
-          key: conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-windows-x86_64-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
+          key: conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-windows-x86_64-${{ hashFiles('conanfile.py', 'conan/**') }}
           restore-keys: |
             conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-windows-x86_64-
 
