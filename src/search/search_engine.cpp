@@ -1866,10 +1866,15 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         YAMS_ZONE_SCOPED_N("search_engine::fanout_parallel");
         SearchCandidateFanout fanout;
 
-        auto schedule = [&]([[maybe_unused]] const char* name, float weight,
+        auto schedule = [&](const char* name, float weight,
                             [[maybe_unused]] std::atomic<uint64_t>& queryCount,
                             [[maybe_unused]] std::atomic<uint64_t>& avgTime,
                             auto&& fn) -> std::future<Result<std::vector<ComponentResult>>> {
+            if (weight <= 0.0f) {
+                // A disabled source is skipped, not degraded (SearchObservability).
+                skipped.push_back(name);
+                traceCollector.markStageSkipped(name, "disabled_by_weight");
+            }
             return detail::scheduleComponent(weight, executor_, std::forward<decltype(fn)>(fn));
         };
 
@@ -2491,6 +2496,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                  std::atomic<uint64_t>& queryCount,
                                  std::atomic<uint64_t>& avgTime) {
             if (weight <= 0.0f) {
+                skipped.push_back(name);
                 traceCollector.markStageSkipped(name, "disabled_by_weight");
                 return;
             }

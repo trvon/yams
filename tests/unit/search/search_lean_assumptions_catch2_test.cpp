@@ -9,6 +9,7 @@
 // definition holds, Catch2 reports the case as failed and the tag has to be removed.
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <yams/search/evidence_search_pipeline.h>
 #include <yams/search/search_engine_config.h>
@@ -482,17 +483,18 @@ TEST_CASE("Lean contracts: end-to-end results are stored documents within the li
 }
 
 TEST_CASE("Lean contracts: every disabled source is reported as skipped",
-          "[unit][search][lean][contract][engine][!shouldfail]") {
+          "[unit][search][lean][contract][engine]") {
     // Lean SearchEngine.disabledSource_isSkipped: a source whose gate is off appears in the
-    // response's skipped list. SearchEngine leaves a zero-weight component unscheduled without
-    // recording it; skippedComponents only names stages skipped at run time (kg under the
-    // semantic budget guard, graph_rerank, cross_rerank). topologyRoutingTestConfig sets the path,
-    // tag, metadata and kg weights to zero.
+    // response's skipped list. SearchEngine records a zero-weight component as skipped when it
+    // declines to schedule it, and a skipped component does not make the response degraded.
+    // topologyRoutingTestConfig sets the path, tag, metadata and kg weights to zero.
     namespace support = yams::search::topology_test_support;
     support::TopologySearchFixture fix;
     support::seedTopologyDocuments(fix);
     const auto generator = support::makeFixedGenerator({1.0F, 0.0F});
-    const auto config = support::topologyRoutingTestConfig(false);
+    auto config = support::topologyRoutingTestConfig(false);
+    config.enableParallelExecution = GENERATE(true, false);
+    CAPTURE(config.enableParallelExecution);
     REQUIRE(config.pathTreeWeight <= 0.0F);
     REQUIRE(config.metadataWeight <= 0.0F);
 
@@ -502,4 +504,7 @@ TEST_CASE("Lean contracts: every disabled source is reported as skipped",
     CAPTURE(skipped);
     CHECK(std::ranges::find(skipped, "path") != skipped.end());
     CHECK(std::ranges::find(skipped, "metadata") != skipped.end());
+    CHECK(std::ranges::find(response.value().contributingComponents, "path") ==
+          response.value().contributingComponents.end());
+    CHECK_FALSE(response.value().isDegraded);
 }
