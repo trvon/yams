@@ -105,7 +105,9 @@ Constants:
 - `WriterPref`: a waiting writer stops new readers (libc++, Windows SRW) or
   not (glibc).
 - `Recycle`: finished requests start again, for unbounded load.
-- `AnnounceFirst`: hypothetical, not in the code. See Findings.
+- `CheckFirst`: `try_acquire_operation_guard()` reads `resets_in_progress_`
+  before each `try_lock_shared` (current code) instead of only after a
+  failed one (6d5c9510a). See Findings.
 
 Properties:
 
@@ -128,8 +130,9 @@ Properties:
 | `_new_wp` | current | writer-pref | 3 requests | pass | pass |
 | `_new_rp` | current | reader-pref | 3 requests | pass | pass |
 | `_new_wp_load` | current | writer-pref | 2, recycled | pass | pass |
-| `_new_rp_load` | current | reader-pref | 2, recycled | `ResetReturns` violated | violated |
-| `_announce_rp_load` | AnnounceFirst | reader-pref | 2, recycled | pass | pass |
+| `_new_rp_load` | current | reader-pref | 2, recycled | pass | pass |
+| `_lockfirst_wp_load` | 6d5c9510a | writer-pref | 2, recycled | pass | pass |
+| `_lockfirst_rp_load` | 6d5c9510a | reader-pref | 2, recycled | `ResetReturns` violated | violated |
 | `_old_wp` | before 6d5c9510a | writer-pref | 3 requests | deadlock | deadlock |
 | `_old_rp` | before 6d5c9510a | reader-pref | 3 requests | deadlock | deadlock |
 
@@ -147,9 +150,11 @@ thread is free. Reader-preferring locks do not avoid this one.
 
 ## State counts
 
-TLC 2.19, `-workers auto`, Apple Silicon Mac. Runs that stop at a
-violation report the states explored so far. Those counts, and the depth
-reported with several workers, vary a little between runs.
+TLC 2.19. `DaemonReadiness`: `-workers auto`, Apple Silicon Mac.
+`ClientIoReset`: `-workers 8`, Linux, at low priority on a loaded host, so
+its times are slow. Runs that stop at a violation report the states
+explored so far. Those counts, and the depth reported with several
+workers, vary between runs.
 
 | Configuration | Generated | Distinct | Depth | Time |
 |---------------|-----------|----------|-------|------|
@@ -159,27 +164,28 @@ reported with several workers, vary a little between runs.
 | `DaemonReadiness_old` | 1,742 | 859 | 8 | 1 s |
 | `DaemonReadiness_witness` | 942 | 531 | 8 | 1 s |
 | `DaemonReadiness_ipclate` | 33,830 | 11,959 | 12 | 1 s |
-| `ClientIoReset_new_wp` | 9,914,976 | 3,861,707 | 32 | 3 min 25 s |
-| `ClientIoReset_new_rp` | 9,917,142 | 3,861,707 | 32 | 3 min 47 s |
+| `ClientIoReset_new_wp` | 9,914,976 | 3,861,707 | 32 | 10 min 5 s |
+| `ClientIoReset_new_rp` | 9,914,976 | 3,861,707 | 32 | 9 min 45 s |
 | `ClientIoReset_new_wp_load` | 77,725 | 28,932 | 27 | 3 s |
-| `ClientIoReset_announce_rp_load` | 77,725 | 28,932 | 27 | 3 s |
-| `ClientIoReset_new_rp_load` | 77,809 | 28,932 | - | 3 s |
-| `ClientIoReset_old_wp` | 16,038 | 8,002 | 10 | 1 s |
-| `ClientIoReset_old_rp` | 14,405 | 6,806 | 11 | 1 s |
+| `ClientIoReset_new_rp_load` | 77,725 | 28,932 | 27 | 3 s |
+| `ClientIoReset_lockfirst_wp_load` | 77,725 | 28,932 | 27 | 3 s |
+| `ClientIoReset_lockfirst_rp_load` | 77,809 | 28,932 | - | 2 s |
+| `ClientIoReset_old_wp` | 5,089 | 2,781 | 8 | 1 s |
+| `ClientIoReset_old_rp` | 12,277 | 5,883 | 9 | 1 s |
 
-The full script takes about 9 minutes.
+The full script takes about 9 minutes on the Mac.
 
 ## Findings
 
-`_new_rp_load`: with a reader-preferring `shared_mutex` (libstdc++ on glibc)
-`reset()` can wait indefinitely while creations keep overlapping, for
-example clients that keep reconnecting to a stopped daemon.
-`try_acquire_operation_guard()` reads `resets_in_progress_` only after
-`try_lock_shared()` fails, and on glibc that call succeeds while a writer
+`_lockfirst_rp_load`: with a reader-preferring `shared_mutex` (libstdc++ on
+glibc) and the 6d5c9510a guard, `reset()` can wait indefinitely while
+creations keep overlapping, for example clients that keep reconnecting to a
+stopped daemon. That guard read `resets_in_progress_` only after
+`try_lock_shared()` failed, and on glibc that call succeeds while a writer
 waits. Each creation holds the shared lock across its connect and backoff,
 so the lock never drains. This is a liveness gap, not a deadlock: it ends
-when the creations stop. `AnnounceFirst` (check the counter before
-`try_lock_shared`) passes the same configuration.
+when the creations stop. The current guard checks the counter before every
+`try_lock_shared` (`CheckFirst`), and `_new_rp_load` passes.
 
 ## Limits
 
@@ -188,6 +194,9 @@ when the creations stop. `AnnounceFirst` (check the counter before
   in `asio_transport.cpp` bounds the real waits).
 - `shared_mutex` is modeled as writer- or reader-preferring with no
   spurious `try_lock_shared` success; spurious failure is modeled.
+- With `CheckFirst`, the counter read and `try_lock_shared` are one step.
+  In the code a reset announced between them admits that one reader; it
+  is bounded and does not affect `ResetReturns`.
 - Readiness flags are read once in `RequestDispatcher::dispatch`, as the
   code does; the handler reads the repository later.
 - GetStats, Shutdown and the remaining request kinds are not modeled.
