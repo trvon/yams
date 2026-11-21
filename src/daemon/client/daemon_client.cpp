@@ -1413,8 +1413,28 @@ DaemonClient::sendRequestStreaming(const Request& req,
     // The adapter creates its own connection, and calling connect() here
     // causes a double connection issue where the POSIX socket immediately EOFs
 
-    auto onHeader = [handler](const Response& r) { handler->onHeaderReceived(r); };
-    auto onChunk = [handler](const Response& r, bool last) {
+    // Daemons before 0.23.1 answer any request with a StatusResponse while they start. Handlers
+    // that expect another type dropped it (get reported "Document content not found"), so turn
+    // it into the not-ready error here.
+    const bool expectsStatus = std::holds_alternative<StatusRequest>(ownedReq);
+    auto notReady = [handler, expectsStatus,
+                     operation = std::string(getRequestName(ownedReq))](const Response& r) {
+        const auto* status = expectsStatus ? nullptr : std::get_if<StatusResponse>(&r);
+        if (!status) {
+            return false;
+        }
+        handler->onError(makeNotReadyErrorFromStatus(*status, operation));
+        return true;
+    };
+    auto onHeader = [handler, notReady](const Response& r) {
+        if (!notReady(r)) {
+            handler->onHeaderReceived(r);
+        }
+    };
+    auto onChunk = [handler, notReady](const Response& r, bool last) {
+        if (notReady(r)) {
+            return false;
+        }
         // Log progress events and still forward them so request-specific handlers can
         // surface or collect them for CLI output.
         if (auto* ev = std::get_if<EmbeddingEvent>(&r)) {
