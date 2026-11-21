@@ -36,8 +36,9 @@ DaemonReadiness_ipclate invariant:GetNeverNotFound
 ClientIoReset_new_wp pass
 ClientIoReset_new_rp pass
 ClientIoReset_new_wp_load pass
-ClientIoReset_announce_rp_load pass
-ClientIoReset_new_rp_load property
+ClientIoReset_new_rp_load pass
+ClientIoReset_lockfirst_wp_load pass
+ClientIoReset_lockfirst_rp_load property
 ClientIoReset_old_wp deadlock
 ClientIoReset_old_rp deadlock
 "

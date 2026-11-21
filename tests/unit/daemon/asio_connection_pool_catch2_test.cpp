@@ -289,6 +289,32 @@ TEST_CASE("AsioConnectionPool fails fast instead of blocking an IO thread during
     pool->shutdown(100ms);
 }
 
+TEST_CASE("GlobalIOContext operation guard fails while a reset is announced",
+          "[daemon][connection-pool][shutdown][unit]") {
+    // reset() announces itself, then waits for the exclusive lock. A reader-preferring
+    // shared_mutex (glibc) still grants try_lock_shared to new readers while it waits; if the
+    // guard took the lock before reading the announcement, overlapping creations could keep
+    // the lock shared and starve reset() (formal/tla/ClientIoReset.tla, _lockfirst_rp_load).
+    // Announcing without taking the lock reproduces that state on any platform.
+    auto& ctx = GlobalIOContext::instance();
+    {
+        auto guard = ctx.try_acquire_operation_guard();
+        REQUIRE(guard.owns_lock());
+    }
+
+    GlobalIOContext::testing_announce_reset();
+    auto pending = ctx.try_acquire_operation_guard();
+    const bool ownedWhilePending = pending.owns_lock();
+    if (pending.owns_lock()) {
+        pending.unlock();
+    }
+    GlobalIOContext::testing_withdraw_reset();
+    CHECK_FALSE(ownedWhilePending);
+
+    auto after = ctx.try_acquire_operation_guard();
+    CHECK(after.owns_lock());
+}
+
 TEST_CASE("AsioConnectionPool drops closed socket on reuse", "[daemon][connection-pool][unit]") {
 #ifdef _WIN32
     SKIP("Unix domain socket tests skipped on Windows");

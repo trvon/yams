@@ -7,7 +7,8 @@
 (* The one exception is a blocking lock_shared(): the thread stays taken   *)
 (* until the lock is granted. One reset() runs on a non-IO thread.         *)
 (*                                                                         *)
-(* Line references are to origin/main 7080fe645 (2026-11-20).              *)
+(* Line references are to origin/main 7080fe645 (2026-11-20), except the  *)
+(* guard GIO:159-176, which is the CheckFirst version.                     *)
 (*   GIO src/daemon/client/global_io_context.cpp                           *)
 (*   POOL src/daemon/client/asio_connection_pool.cpp                       *)
 (*   CONN src/daemon/client/asio_connection.cpp                            *)
@@ -20,20 +21,22 @@ CONSTANTS
     NIO,         \* number of IO threads
     FailFast,    \* TRUE: 6d5c9510a. reset() announces itself (GIO:142) and
                  \*       create_connection() uses try_acquire_operation_guard()
-                 \*       (POOL:747-750, GIO:159-172).
+                 \*       (POOL:747-750, GIO:159-176).
                  \* FALSE: before 6d5c9510a. create_connection() blocks in
                  \*       acquire_operation_guard() (GIO:155-157).
     WriterPref,  \* TRUE: a waiting writer stops new readers (libc++, Windows SRW).
                  \* FALSE: readers enter while a writer waits (glibc default).
     MaxRetry,    \* EOF retries per request (TR:650-662 retry loop)
     Recycle,     \* TRUE: finished requests start again (unbounded load)
-    AnnounceFirst \* Hypothetical, not in the code: try_acquire_operation_guard()
-                  \* checks resets_in_progress_ before try_lock_shared, so it
-                  \* fails fast whenever a reset is announced.
+    CheckFirst   \* TRUE: current code. try_acquire_operation_guard() reads
+                 \*       resets_in_progress_ before each try_lock_shared
+                 \*       (GIO:165-172), so it fails whenever a reset is announced.
+                 \* FALSE: 6d5c9510a. It calls try_lock_shared first and reads
+                 \*       the counter only after a failure.
 
 ASSUME NIO \in Nat \ {0} /\ MaxRetry \in Nat
 ASSUME FailFast \in BOOLEAN /\ WriterPref \in BOOLEAN /\ Recycle \in BOOLEAN
-ASSUME AnnounceFirst \in BOOLEAN /\ (AnnounceFirst => FailFast)
+ASSUME CheckFirst \in BOOLEAN /\ (CheckFirst => FailFast)
 
 \* Connection slots. Without Recycle each attempt creates at most one
 \* connection; with Recycle closed, unreferenced slots are reused.
@@ -155,9 +158,9 @@ Acquire(r) ==
           ELSE IF FailFast THEN                                 \* POOL:747-750
              IF SharedGrantable /\ resets = 0 THEN
                 AfterGuard(r, p) /\ UNCHANGED <<rconn, cinuse>>
-             ELSE IF SharedGrantable /\ ~AnnounceFirst THEN
-                \* try_lock_shared succeeds, or fails spuriously and then sees
-                \* the announcement (GIO:162-166).
+             ELSE IF SharedGrantable /\ ~CheckFirst THEN
+                \* 6d5c9510a: try_lock_shared succeeds, or fails spuriously
+                \* and then sees the announcement.
                 \/ AfterGuard(r, p) /\ UNCHANGED <<rconn, cinuse>>
                 \/ Fail(r) /\ UNCHANGED <<rconn, cinuse, readers>>
              ELSE
