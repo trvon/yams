@@ -443,9 +443,15 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
     fsmConfig.repair_backoff_ms = 250;
     fsmConfig.max_retries = static_cast<uint32_t>(shutdownState->config.maxRetries);
 
+    // One FSM cycle per batch taken off the pending queue: Scan (the batch was collected), Detect
+    // (detectMissingWork), Fix (dispatch embedding repair), Reindex (dispatch FTS5 indexing),
+    // Complete, then back to Idle. Fix and Reindex are entered only when the batch has that
+    // work; periodic maintenance and the startup scan coroutine are outside the cycle.
     core::RepairFsm fsm(fsmConfig);
-    fsm.set_on_state_change([](core::RepairFsm::State state) {
+    fsm.set_on_state_change([this](core::RepairFsm::State state) {
         spdlog::debug("RepairFsm state: {}", core::RepairFsm::to_string(state));
+        if (repairStageObserver_)
+            repairStageObserver_(state);
     });
 
     bool initialScanEnqueued = false;
@@ -611,12 +617,19 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             continue;
         }
 
-        if (!running_.load(std::memory_order_relaxed))
+        // A cycle exists only for a batch actually taken off the queue, so it is decided from
+        // the drained batch itself.
+        fsm.start(); // Scan: this cycle's candidates were collected above
+
+        if (!running_.load(std::memory_order_relaxed)) {
+            fsm.reset(); // stopping: the cycle is abandoned
             continue;
+        }
 
         if (state_)
             state_->stats.repairBusyTicks++;
 
+        fsm.advance(core::RepairFsm::State::Detect);
         auto [missingEmbeddings, missingFts5] = detectMissingWork(batch);
         auto meta_repo = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
 
@@ -642,6 +655,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             }
             spdlog::debug("RepairService: deferring batch ({} docs) under {} pressure",
                           batch.size(), pressureLevelName(pressureLevel));
+            fsm.reset(); // cycle abandoned; the re-queued batch starts a new one
             timer.expires_after(std::chrono::milliseconds(500));
             co_await timer.async_wait(boost::asio::use_awaitable);
             continue;
@@ -675,6 +689,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
 
         // Queue embedding repair jobs
         if (!missingEmbeddings.empty()) {
+            fsm.advance(core::RepairFsm::State::Fix);
             if (state_)
                 state_->stats.repairBatchesAttempted++;
             submitRepairStatusUpdate(ctx_, meta_repo, missingEmbeddings,
@@ -698,6 +713,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
                                          yams::metadata::RepairStatus::Pending,
                                          "RepairService::queueEmbeddings/rollback");
                 InternalEventBus::instance().incEmbedDropped();
+                fsm.fail();
             }
         }
 
@@ -709,6 +725,9 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
                           (shutdownState->config.allowDegraded && activeConnFn_ &&
                            activeConnFn_() <= shutdownState->config.maxActiveDuringDegraded));
         if (!missingFts5.empty() && allowFts5) {
+            // Rejected when the embedding dispatch already failed the cycle; the FTS5 dispatch
+            // is independent of it and still runs.
+            fsm.advance(core::RepairFsm::State::Reindex);
             InternalEventBus::Fts5Job ftsJob{
                 .hashes = missingFts5,
                 .ids = {},
@@ -719,11 +738,16 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
                     "fts5_jobs", 512);
             bool queued = co_await queueWithBackoff(fts5Q, std::move(ftsJob), timer, running_,
                                                     "FTS5", missingFts5.size(), 100, 2000);
-            if (queued)
+            if (queued) {
                 InternalEventBus::instance().incFts5Queued();
-            else
+            } else {
                 InternalEventBus::instance().incFts5Dropped();
+                fsm.fail();
+            }
         }
+
+        fsm.advance(core::RepairFsm::State::Complete); // rejected after a failed dispatch
+        fsm.reset();
 
         timer.expires_after(100ms);
         co_await timer.async_wait(boost::asio::use_awaitable);
