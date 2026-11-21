@@ -4,10 +4,10 @@
 // and router. A Lean theorem says something about YAMS only when the C++ code satisfies the
 // definitions it is stated over, so each case below names the Lean definition it stands in for.
 //
-// Property cases run the engines over small seeded random inputs. Cases tagged [!shouldfail]
-// pin a place where the C++ behaviour does not satisfy the Lean definition as written; each one
-// says why. When the code or the model changes so that the definition holds, Catch2 reports the
-// case as failed and the tag has to be removed.
+// Property cases run the engines over small seeded random inputs. A case tagged [!shouldfail]
+// pins a place where the C++ behaviour does not satisfy the Lean definition as written and says
+// why; none is left in this file. When one is added and the code or the model changes so that
+// the definition holds, Catch2 reports the case as failed and the tag has to be removed.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -124,10 +124,11 @@ leanRetainedEdges(const std::vector<TopologyDocumentInput>& docs,
     return edges;
 }
 
-/// Lean Artifacts.WellFormedBatch as written: member counts match, every membership names a
-/// produced cluster, and every cluster member has a membership row for that exact cluster.
-/// (tests/unit/topology/topology_baseline_catch2_test.cpp checks a relaxed form that also
-/// accepts a row whose overlapClusterIds names the cluster.)
+/// Lean Artifacts.WellFormedBatch: member counts match, every membership names a produced
+/// cluster, and every cluster member has a membership row that places it in that cluster
+/// (DocumentClusterMembership.placesIn: the row's clusterId is the cluster, or its
+/// overlapClusterIds lists it). Same predicate as requireWellFormedBatch in
+/// tests/unit/topology/topology_baseline_catch2_test.cpp.
 bool leanWellFormedBatch(const TopologyArtifactBatch& batch) {
     std::unordered_set<std::string> clusterIds;
     for (const auto& cluster : batch.clusters) {
@@ -136,11 +137,31 @@ bool leanWellFormedBatch(const TopologyArtifactBatch& batch) {
         }
         clusterIds.insert(cluster.clusterId);
     }
-    std::set<std::pair<std::string, std::string>> rows;
+    std::set<std::pair<std::string, std::string>> places;
     for (const auto& membership : batch.memberships) {
         if (!clusterIds.contains(membership.clusterId)) {
             return false;
         }
+        places.emplace(membership.documentHash, membership.clusterId);
+        for (const auto& overlap : membership.overlapClusterIds) {
+            places.emplace(membership.documentHash, overlap);
+        }
+    }
+    for (const auto& cluster : batch.clusters) {
+        for (const auto& hash : cluster.memberDocumentHashes) {
+            if (!places.contains({hash, cluster.clusterId})) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// Lean Artifacts.clusterMembersHavePrimaryMemberships: the strict form, a row whose clusterId
+/// is the cluster for every member.
+bool leanPrimaryMemberships(const TopologyArtifactBatch& batch) {
+    std::set<std::pair<std::string, std::string>> rows;
+    for (const auto& membership : batch.memberships) {
         rows.emplace(membership.documentHash, membership.clusterId);
     }
     for (const auto& cluster : batch.clusters) {
@@ -151,6 +172,13 @@ bool leanWellFormedBatch(const TopologyArtifactBatch& batch) {
         }
     }
     return true;
+}
+
+/// Lean Artifacts.noOverlapMemberships.
+bool leanNoOverlapMemberships(const TopologyArtifactBatch& batch) {
+    return std::ranges::all_of(batch.memberships, [](const DocumentClusterMembership& m) {
+        return m.overlapClusterIds.empty();
+    });
 }
 
 std::unordered_map<std::string, std::string> primaryClusterOf(const TopologyArtifactBatch& batch) {
@@ -245,6 +273,9 @@ TEST_CASE("Lean contracts: connected engine output is a well-formed partition",
         REQUIRE(built.has_value());
         const auto& batch = built.value();
         CHECK(leanWellFormedBatch(batch));
+        // Overlap is off: Connected.wellFormed_noOverlap_primaryMemberships.
+        REQUIRE(leanNoOverlapMemberships(batch));
+        CHECK(leanPrimaryMemberships(batch));
         checkPartition(batch, docs);
 
         const auto edges = leanRetainedEdges(docs, config);
@@ -789,13 +820,14 @@ TEST_CASE("Lean contracts: boundary spill keeps member counts in step",
     }
 }
 
-TEST_CASE("Lean contracts: a spilled member has a membership row for its secondary cluster",
-          "[unit][topology][lean][contract][overlap][!shouldfail]") {
-    // Lean Artifacts.clusterMembersHaveMemberships requires a membership row whose clusterId is
-    // the cluster for every member hash. After boundary spill a replica is listed in the
-    // secondary cluster's members, but its only row names the primary cluster and lists the
-    // secondary in overlapClusterIds. With allowOverlap the batch does not satisfy
-    // WellFormedBatch as written; the model needs an overlap-aware membership predicate.
+TEST_CASE("Lean contracts: a spilled member is placed in its secondary cluster by overlap",
+          "[unit][topology][lean][contract][overlap]") {
+    // Lean Artifacts.clusterMembersHaveMemberships is overlap-aware: after boundary spill a
+    // replica is listed in the secondary cluster's members, and its only row names the primary
+    // cluster and lists the secondary in overlapClusterIds, which places it there
+    // (DocumentClusterMembership.placesIn). The batch satisfies WellFormedBatch
+    // (SystemContract.wellFormedBatch_impliesValidMemberships) but not the strict
+    // clusterMembersHavePrimaryMemberships, which Lean requires only without overlap rows.
     const std::vector<TopologyDocumentInput> documents{
         TopologyDocumentInput{.documentHash = "x", .embedding = {2.0F, 2.0F}},
         TopologyDocumentInput{.documentHash = "near", .embedding = {0.9F, 2.0F}},
@@ -827,6 +859,9 @@ TEST_CASE("Lean contracts: a spilled member has a membership row for its seconda
     config.overlapBoundaryDistanceRatio = 1.25;
     config.overlapResidualPenalty = 1.0;
 
+    REQUIRE(leanWellFormedBatch(batch));
     REQUIRE(applyOrthogonalBoundarySpill(documents, config, batch) == 1U);
     CHECK(leanWellFormedBatch(batch));
+    CHECK_FALSE(leanNoOverlapMemberships(batch));
+    CHECK_FALSE(leanPrimaryMemberships(batch));
 }

@@ -188,10 +188,48 @@ def ClusterArtifact.memberCountMatches (c : ClusterArtifact) : Prop :=
 def membershipsReferenceClusters (batch : TopologyArtifactBatch) : Prop :=
   ∀ m ∈ batch.memberships, ∃ c ∈ batch.clusters, c.clusterId = m.clusterId
 
-/-- Structural invariant every cluster member should have a corresponding membership row. -/
+/-- A membership row places its document in cluster `id`: as its primary cluster, or as an
+overlap (boundary spill) cluster. -/
+def DocumentClusterMembership.placesIn (m : DocumentClusterMembership) (id : ClusterId) : Prop :=
+  m.clusterId = id ∨ id ∈ m.overlapClusterIds
+
+/-- Structural invariant every cluster member should have a corresponding membership row.
+Overlap-aware: boundary spill (`applyOrthogonalBoundarySpill`) lists a spilled copy in the
+secondary cluster's members, while the document's single row names the primary cluster and
+lists the secondary in `overlapClusterIds`. -/
 def clusterMembersHaveMemberships (batch : TopologyArtifactBatch) : Prop :=
   ∀ c ∈ batch.clusters, ∀ h ∈ c.memberDocumentHashes,
+    ∃ m ∈ batch.memberships, m.documentHash = h ∧ m.placesIn c.clusterId
+
+/-- The strict form: every member has a row whose primary cluster is that cluster. -/
+def clusterMembersHavePrimaryMemberships (batch : TopologyArtifactBatch) : Prop :=
+  ∀ c ∈ batch.clusters, ∀ h ∈ c.memberDocumentHashes,
     ∃ m ∈ batch.memberships, m.documentHash = h ∧ m.clusterId = c.clusterId
+
+/-- No membership row lists an overlap cluster (overlap off, or nothing spilled). -/
+def noOverlapMemberships (batch : TopologyArtifactBatch) : Prop :=
+  ∀ m ∈ batch.memberships, m.overlapClusterIds = []
+
+/-- The strict form implies the overlap-aware one. -/
+theorem clusterMembersHaveMemberships_of_primary {batch : TopologyArtifactBatch}
+    (h : clusterMembersHavePrimaryMemberships batch) : clusterMembersHaveMemberships batch := by
+  intro c hc x hx
+  rcases h c hc x hx with ⟨m, hm, hDoc, hId⟩
+  exact ⟨m, hm, hDoc, Or.inl hId⟩
+
+/-- Without overlap rows the two forms coincide. -/
+theorem clusterMembersHaveMemberships_noOverlap_iff {batch : TopologyArtifactBatch}
+    (hNo : noOverlapMemberships batch) :
+    clusterMembersHaveMemberships batch ↔ clusterMembersHavePrimaryMemberships batch := by
+  constructor
+  · intro h c hc x hx
+    rcases h c hc x hx with ⟨m, hm, hDoc, hPlace⟩
+    refine ⟨m, hm, hDoc, ?_⟩
+    rcases hPlace with hId | hOverlap
+    · exact hId
+    · rw [hNo m hm] at hOverlap
+      simp at hOverlap
+  · exact clusterMembersHaveMemberships_of_primary
 
 /-- Main well-formedness target for topology batches, independent of the algorithm. -/
 def WellFormedBatch (batch : TopologyArtifactBatch) : Prop :=
