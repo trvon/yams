@@ -10,13 +10,13 @@
 # then prints the gh commands that publish it as the prerelease
 # deps-onnxruntime-<version> on trvon/yams. It publishes nothing itself.
 #
-# The recipe tries this mirror after the upstream GitHub archive and before
-# nuget.org (see _MIRROR_BASE_URL in the recipe). Upstream GitHub archives for
-# 1.23.0 return 404, so the mirror carries the NuGet package only.
+# The recipe does not use a mirror. It falls back from the upstream GitHub
+# archive (gone since 2026-11-18) to nuget.org. Keep this script for the case
+# where NuGet drops the package too: publish the mirror, then teach the recipe
+# to try it before NuGet, checked against the same pinned SHA-256.
 #
 # For a version the recipe does not pin yet, the script prints the SHA-256 to
-# add to _NUGET_CPU_SHA256 and _MIRROR_SHA256 and exits 2 without printing
-# publish commands.
+# add to _NUGET_CPU_SHA256 and exits 2 without printing publish commands.
 set -euo pipefail
 
 version="${1:?usage: $0 <version> [outdir]}"
@@ -85,7 +85,6 @@ if [ -z "$pinned" ]; then
   echo
   echo "$version is not pinned in $recipe. After review, add:"
   echo "  _NUGET_CPU_SHA256:  \"$version\": \"$have_sha256\","
-  echo "  _MIRROR_SHA256:     \"$version\": {\"$nupkg\": _NUGET_CPU_SHA256[\"$version\"]},"
   exit 2
 fi
 if [ "$pinned" != "$have_sha256" ]; then
@@ -108,7 +107,7 @@ To publish the mirror (not run by this script):
 
   gh release create "$tag" --repo "$repo" --prerelease \\
     --title "ONNX Runtime $version (dependency mirror)" \\
-    --notes "Unmodified copy of $nupkg from nuget.org, used by conan/onnxruntime when upstream downloads fail. SHA-256 $have_sha256."
+    --notes "Unmodified copy of $nupkg from nuget.org, for builds when upstream downloads fail. SHA-256 $have_sha256."
   gh release upload "$tag" --repo "$repo" \\
     "$outdir/$nupkg" "$outdir/SHA256SUMS"
 
