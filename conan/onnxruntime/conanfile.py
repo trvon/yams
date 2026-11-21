@@ -564,8 +564,12 @@ class OnnxRuntimeConan(ConanFile):
             try:
                 get(self, url, destination=self.build_folder, strip_root=False)
             except Exception as error:
-                # The NuGet package is the CPU runtime only; GPU and DirectML have no fallback.
-                if self.options.with_gpu:
+                # NuGet's CPU package has no CUDA, DirectML or MIGraphX runtime. Its macOS runtimes
+                # are the CoreML build, like the macOS release archives, so CoreML falls back too.
+                coreml_on_macos = (
+                    self.options.with_gpu == "coreml" and str(self.settings.os) == "Macos"
+                )
+                if self.options.with_gpu and not coreml_on_macos:
                     raise
                 self.output.warning(f"ONNX Runtime release download failed: {error}")
                 if not self._fetch_cpu_from_nuget():
