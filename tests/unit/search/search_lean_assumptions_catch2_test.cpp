@@ -28,6 +28,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "tests/common/test_helpers_catch2.h"
 #include "tests/unit/search/topology_search_test_support.h"
 
 using yams::search::ComponentResult;
@@ -372,6 +373,10 @@ TEST_CASE("Lean contracts: allowed-set vector retrieval never leaves the allowed
           "[unit][search][lean][contract][vector][property]") {
     // Lean AllowedSetRetrieval.RetrieverRespectsAllowedSet, the premise of
     // retrieveRoutes_noInvent: every hit of a routed request names an allowed document.
+    // CI runs unit tests with vectors disabled; this case needs the real engines.
+    yams::test::ScopedEnvVar enableVectors{"YAMS_DISABLE_VECTORS", std::nullopt};
+    yams::test::ScopedEnvVar enableVector{"YAMS_DISABLE_VECTOR", std::nullopt};
+    yams::test::ScopedEnvVar initSqliteVec{"YAMS_SQLITE_VEC_SKIP_INIT", std::nullopt};
     using yams::vector::CandidateFilterMode;
     using yams::vector::VectorDatabase;
     using yams::vector::VectorDatabaseConfig;
