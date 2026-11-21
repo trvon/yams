@@ -803,6 +803,14 @@ public:
     search(const std::string& query, int limit = 50, int offset = 0,
            const std::optional<std::vector<int64_t>>& docIds = std::nullopt) override;
 
+    /// Keyword search entry point. Same as search(), except that a natural-language query whose
+    /// implicit-AND match returns less than a full page is rerun as a BM25-ranked OR over the
+    /// same terms. Candidate generators (hybrid text, grep prefilter) keep using search().
+    /// YAMS_FTS_NL_OR_FALLBACK=0/1 overrides the default of either entry point.
+    Result<SearchResults>
+    searchKeyword(const std::string& query, int limit = 50, int offset = 0,
+                  const std::optional<std::vector<int64_t>>& docIds = std::nullopt);
+
     // Fuzzy search operations
     Result<SearchResults>
     fuzzySearch(const std::string& query, float minSimilarity = 0.7f, int limit = 50,
@@ -1299,6 +1307,9 @@ private:
     void recordPathHit(const std::string& normalizedPath) const;
     void ensurePathHitRingInitialized() const;
     void updateQueryCache(const std::string& key, const SearchResults& results) const;
+    Result<SearchResults> searchFullText(const std::string& query, int limit, int offset,
+                                         const std::optional<std::vector<int64_t>>& docIds,
+                                         bool nlOrFallbackByDefault);
     void invalidateQueryCache() const;
     std::optional<std::vector<int64_t>> getCachedFtsIndexedIds() const;
     void setCachedFtsIndexedIds(const std::vector<int64_t>& docIds) const;
