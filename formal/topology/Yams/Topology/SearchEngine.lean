@@ -6,6 +6,7 @@ namespace Yams.SearchEngine
 /-- Abstract search component sources in the live C++ search engine. -/
 inductive SearchSource where
   | text
+  | simeonText
   | path
   | vector
   | entityVector
@@ -28,6 +29,7 @@ structure SearchConfig where
   mode : SearchMode := .hybrid
   limit : Nat := 10
   textEnabled : Bool := true
+  simeonTextEnabled : Bool := true
   pathEnabled : Bool := true
   vectorEnabled : Bool := true
   entityVectorEnabled : Bool := true
@@ -62,12 +64,13 @@ structure SearchResponse where
   deriving Repr, BEq
 
 def allSources : List SearchSource :=
-  [.text, .path, .vector, .entityVector, .knowledgeGraph, .tag, .metadata, .graphText,
+  [.text, .simeonText, .path, .vector, .entityVector, .knowledgeGraph, .tag, .metadata, .graphText,
     .graphVector]
 
 def sourceAvailable (cfg : SearchConfig) (source : SearchSource) : Bool :=
   match source with
   | .text => cfg.textEnabled
+  | .simeonText => cfg.simeonTextEnabled
   | .path => cfg.pathEnabled
   | .vector => cfg.vectorEnabled
   | .entityVector => cfg.entityVectorEnabled
@@ -77,14 +80,16 @@ def sourceAvailable (cfg : SearchConfig) (source : SearchSource) : Bool :=
   | .graphText => cfg.graphExpansionEnabled && cfg.textEnabled
   | .graphVector => cfg.graphExpansionEnabled && cfg.vectorEnabled
 
-/-- Mode-level source gate. Keyword mode may not use vector-only sources;
-semantic mode may not use lexical-only sources. Hybrid admits all enabled sources. -/
+/-- Mode-level source gate. Keyword mode may not use vector-only sources. Semantic mode drops
+the structural sources (path, tag, metadata, graphText) but keeps text and simeonText: they
+still run, as capped evidence (`applySemanticOnlyWeights`). Measured on BEIR, banning them cost
+22 nDCG@10 points on scifact (67.0 to 44.8) and 12 on nfcorpus. Hybrid admits all enabled
+sources. -/
 def sourceAllowedByMode (mode : SearchMode) (source : SearchSource) : Bool :=
   match mode, source with
   | .keyword, .vector => false
   | .keyword, .entityVector => false
   | .keyword, .graphVector => false
-  | .semantic, .text => false
   | .semantic, .path => false
   | .semantic, .tag => false
   | .semantic, .metadata => false
@@ -217,28 +222,126 @@ theorem keywordMode_noVectorCandidates
   · intro hv
     simp [sourceEnabled, sourceAllowedByMode, hMode, hv] at hEnabled
 
-/-- Semantic mode cannot admit lexical-only candidates. -/
-theorem semanticMode_noLexicalOnlyCandidates
+/-- Semantic mode admits no structural candidate: path, tag, metadata and graphText
+contribute nothing. -/
+theorem semanticMode_noStructuralCandidates
     {cfg : SearchConfig} {candidates : List ComponentCandidate} {c : ComponentCandidate}
     (hMode : cfg.mode = .semantic)
     (h : c ∈ collectCandidates cfg candidates) :
-    c.source ≠ .text ∧ c.source ≠ .path ∧ c.source ≠ .tag ∧ c.source ≠ .metadata ∧
-      c.source ≠ .graphText := by
+    c.source ≠ .path ∧ c.source ≠ .tag ∧ c.source ≠ .metadata ∧ c.source ≠ .graphText := by
   have hEnabled := collectCandidates_enabled h
-  constructor
-  · intro hs
-    simp [sourceEnabled, sourceAllowedByMode, hMode, hs] at hEnabled
-  constructor
-  · intro hs
-    simp [sourceEnabled, sourceAllowedByMode, hMode, hs] at hEnabled
-  constructor
-  · intro hs
-    simp [sourceEnabled, sourceAllowedByMode, hMode, hs] at hEnabled
-  constructor
-  · intro hs
-    simp [sourceEnabled, sourceAllowedByMode, hMode, hs] at hEnabled
-  · intro hs
-    simp [sourceEnabled, sourceAllowedByMode, hMode, hs] at hEnabled
+  refine ⟨?_, ?_, ?_, ?_⟩ <;>
+    (intro hs; simp [sourceEnabled, sourceAllowedByMode, hMode, hs] at hEnabled)
+
+/-- Semantic mode keeps lexical evidence: an enabled text or simeonText candidate reaches
+fusion. Its influence is bounded by the weight caps below, not by the source gate. -/
+theorem semanticMode_admitsLexicalEvidence
+    {cfg : SearchConfig} {candidates : List ComponentCandidate} {c : ComponentCandidate}
+    (hMode : cfg.mode = .semantic)
+    (hc : c ∈ candidates)
+    (hLexical : (c.source = .text ∧ cfg.textEnabled = true) ∨
+      (c.source = .simeonText ∧ cfg.simeonTextEnabled = true)) :
+    c ∈ collectCandidates cfg candidates := by
+  simp only [collectCandidates, List.mem_filter]
+  refine ⟨hc, ?_⟩
+  rcases hLexical with ⟨hs, hEn⟩ | ⟨hs, hEn⟩ <;>
+    simp [sourceEnabled, sourceAvailable, sourceAllowedByMode, hMode, hs, hEn]
+
+/-! ### Semantic-mode fusion weights
+
+Mirrors `applySemanticOnlyLayer` and `applySemanticOnlyConfigExtras` in
+`src/search/tuning_pipeline.cpp`. Weights are hundredths (`20` stands for 0.20) so caps and
+floors are exact naturals. The C++ layer runs before `WeightSlots::normalize`; the caps and
+floors are stated at that point. -/
+
+/-- Per-source fusion weights, in hundredths. -/
+structure SourceWeights where
+  text : Nat := 0
+  simeonText : Nat := 0
+  path : Nat := 0
+  vector : Nat := 0
+  entityVector : Nat := 0
+  kg : Nat := 0
+  tag : Nat := 0
+  metadata : Nat := 0
+  graphText : Nat := 0
+  graphVector : Nat := 0
+  deriving Repr, BEq
+
+/-- Fusion weight of one source. -/
+def SourceWeights.weight (w : SourceWeights) : SearchSource → Nat
+  | .text => w.text
+  | .simeonText => w.simeonText
+  | .path => w.path
+  | .vector => w.vector
+  | .entityVector => w.entityVector
+  | .knowledgeGraph => w.kg
+  | .tag => w.tag
+  | .metadata => w.metadata
+  | .graphText => w.graphText
+  | .graphVector => w.graphVector
+
+/-- Semantic-mode cap on the text weight (0.20). -/
+def semanticTextCap : Nat := 20
+/-- Semantic-mode cap on the simeonText weight (0.05). -/
+def semanticSimeonTextCap : Nat := 5
+/-- Semantic-mode floor on the vector weight (0.45). -/
+def semanticVectorFloor : Nat := 45
+/-- Semantic-mode floor on the entityVector weight (0.15). -/
+def semanticEntityVectorFloor : Nat := 15
+
+/-- The semantic-only weight layer: cap text and simeonText, floor vector and entityVector,
+zero the KG and graph-expansion weights. -/
+def applySemanticOnlyWeights (w : SourceWeights) : SourceWeights :=
+  { w with
+    text := min w.text semanticTextCap
+    simeonText := min w.simeonText semanticSimeonTextCap
+    vector := max w.vector semanticVectorFloor
+    entityVector := max w.entityVector semanticEntityVectorFloor
+    kg := 0
+    graphText := 0
+    graphVector := 0 }
+
+/-- Semantic-mode contract over a candidate list and the effective weights: structural
+sources contribute no candidate, text and simeonText contribute only under their caps, and the
+vector and entityVector weights meet their floors. -/
+def SemanticModeContract
+    (cfg : SearchConfig) (w : SourceWeights) (candidates : List ComponentCandidate) : Prop :=
+  (∀ c ∈ collectCandidates cfg candidates,
+    c.source ≠ .path ∧ c.source ≠ .tag ∧ c.source ≠ .metadata ∧ c.source ≠ .graphText) ∧
+  (∀ c ∈ collectCandidates cfg candidates,
+    (c.source = .text → w.weight c.source ≤ semanticTextCap) ∧
+    (c.source = .simeonText → w.weight c.source ≤ semanticSimeonTextCap)) ∧
+  semanticVectorFloor ≤ w.vector ∧
+  semanticEntityVectorFloor ≤ w.entityVector
+
+/-- The semantic-only layer caps the lexical weights. -/
+theorem applySemanticOnlyWeights_lexicalCapped (w : SourceWeights) :
+    (applySemanticOnlyWeights w).text ≤ semanticTextCap ∧
+      (applySemanticOnlyWeights w).simeonText ≤ semanticSimeonTextCap := by
+  simp only [applySemanticOnlyWeights]
+  exact ⟨Nat.min_le_right _ _, Nat.min_le_right _ _⟩
+
+/-- The semantic-only layer floors the vector weights. -/
+theorem applySemanticOnlyWeights_vectorFloored (w : SourceWeights) :
+    semanticVectorFloor ≤ (applySemanticOnlyWeights w).vector ∧
+      semanticEntityVectorFloor ≤ (applySemanticOnlyWeights w).entityVector := by
+  simp only [applySemanticOnlyWeights]
+  exact ⟨Nat.le_max_right _ _, Nat.le_max_right _ _⟩
+
+/-- Semantic mode with the semantic-only weight layer satisfies the semantic-mode contract
+for every candidate list and every incoming weight vector. -/
+theorem semanticMode_contract
+    {cfg : SearchConfig} (hMode : cfg.mode = .semantic)
+    (w : SourceWeights) (candidates : List ComponentCandidate) :
+    SemanticModeContract cfg (applySemanticOnlyWeights w) candidates := by
+  have hCap := applySemanticOnlyWeights_lexicalCapped w
+  have hFloor := applySemanticOnlyWeights_vectorFloored w
+  refine ⟨fun c hc => semanticMode_noStructuralCandidates hMode hc, ?_, hFloor.1, hFloor.2⟩
+  intro c _hc
+  refine ⟨fun hs => ?_, fun hs => ?_⟩
+  · rw [hs]; exact hCap.1
+  · rw [hs]; exact hCap.2
 
 /-- Disabled sources are observable in the skipped set. -/
 theorem disabledSource_isSkipped

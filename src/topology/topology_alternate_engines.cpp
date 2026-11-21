@@ -52,6 +52,7 @@ PairWeightMap buildPairWeights(std::span<const TopologyDocumentInput> documents,
                                const std::unordered_map<std::string, std::size_t>& indexByHash,
                                const TopologyBuildConfig& config) {
     PairWeightMap pairWeights;
+    detail::ReciprocalPairScores<detail::PairKey, detail::PairKeyHash> reciprocalScores;
     for (std::size_t i = 0; i < documents.size(); ++i) {
         for (const auto& neighbor : documents[i].neighbors) {
             if (neighbor.documentHash.empty()) {
@@ -79,7 +80,13 @@ PairWeightMap buildPairWeights(std::span<const TopologyDocumentInput> documents,
             } else {
                 wt->second = std::max(wt->second, neighbor.score);
             }
+            if (config.reciprocalOnly) {
+                reciprocalScores.observe(key, i < j, neighbor.score);
+            }
         }
+    }
+    if (config.reciprocalOnly) {
+        reciprocalScores.apply(pairWeights);
     }
     return pairWeights;
 }

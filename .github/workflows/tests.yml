@@ -407,7 +407,7 @@ jobs:
           # Same Conan client and same os/arch suffix only: no cross-arch or
           # cross-version fallback. Compiler upgrades need no key bump because
           # host profiles carry the detected compiler.version (package_id).
-          key: conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
+          key: conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/**') }}
           restore-keys: |
             conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-${{ matrix.suffix }}-
       - name: Conan cache diagnostics

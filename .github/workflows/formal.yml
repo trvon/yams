@@ -1,0 +1,74 @@
+# yamllint disable rule:line-length
+# Builds the Lean formalization in formal/topology and gates it with
+# scripts/formal/check-lean.sh: no sorry/admit/native_decide, no unreviewed
+# axiom/opaque declarations, and main theorems depend only on the standard axioms.
+name: Formal
+
+'on':
+  pull_request:
+    paths:
+      - 'formal/**'
+      - 'scripts/formal/**'
+      - '.github/workflows/formal.yml'
+  push:
+    branches: [main, experimental]
+    paths:
+      - 'formal/**'
+      - 'scripts/formal/**'
+      - '.github/workflows/formal.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: formal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lean:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # elan release and the sha256 of its linux x86_64 tarball. Upstream publishes
+      # no checksums; this one was computed from the v4.2.3 release asset.
+      ELAN_VERSION: v4.2.3
+      ELAN_SHA256: df0b2b3a439961ffcbb3985214365ffe40f49bc871df04dff268c7d8e21ca8b2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.elan
+            formal/topology/.lake
+          key: formal-${{ runner.os }}-${{ env.ELAN_VERSION }}-${{ hashFiles('formal/topology/lean-toolchain', 'formal/topology/lake-manifest.json') }}
+
+      - name: Install elan
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/.elan/bin/elan" ]; then
+            tmp=$(mktemp -d)
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/elan.tar.gz" \
+              "https://github.com/leanprover/elan/releases/download/${ELAN_VERSION}/elan-x86_64-unknown-linux-gnu.tar.gz"
+            echo "${ELAN_SHA256}  $tmp/elan.tar.gz" | sha256sum -c -
+            tar -xzf "$tmp/elan.tar.gz" -C "$tmp"
+            "$tmp/elan-init" -y --no-modify-path --default-toolchain none
+            rm -rf "$tmp"
+          fi
+          echo "$HOME/.elan/bin" >>"$GITHUB_PATH"
+
+      - name: Install the pinned Lean toolchain
+        working-directory: formal/topology
+        run: |
+          # A restored ~/.elan cache already has it, and elan fails on a reinstall.
+          toolchain="$(cat lean-toolchain)"
+          if ! elan toolchain list | grep -qF "${toolchain}"; then
+            elan toolchain install "${toolchain}"
+          fi
+          lean --version
+
+      - name: Build and check proofs
+        run: scripts/formal/check-lean.sh

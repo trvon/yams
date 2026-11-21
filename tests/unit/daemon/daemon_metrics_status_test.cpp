@@ -7070,6 +7070,27 @@ TEST_CASE("RequestDispatcher preserves failed lifecycle instead of reporting ini
     CHECK_FALSE(status.ready);
 }
 
+TEST_CASE("RequestDispatcher answers a request before core readiness with a not-ready error",
+          "[daemon][readiness][regression]") {
+    // A StatusResponse here made the client report "Document content not found" for a get
+    // that reached a starting daemon.
+    StateComponent state;
+    StubLifecycle lifecycle{LifecycleState::Starting};
+    RequestDispatcher dispatcher(&lifecycle, nullptr, &state);
+
+    GetRequest get;
+    get.hash = std::string(64, 'a');
+    const auto response = dispatchRequest(dispatcher, Request{get});
+    REQUIRE(std::holds_alternative<ErrorResponse>(response));
+    const auto& error = std::get<ErrorResponse>(response);
+    CHECK(error.code == ErrorCode::InvalidState);
+    CHECK(error.message.rfind("Daemon not ready yet (status=", 0) == 0);
+
+    // Status itself still answers while the daemon starts.
+    const auto status = dispatchRequest(dispatcher, Request{StatusRequest{}});
+    CHECK(std::holds_alternative<StatusResponse>(status));
+}
+
 TEST_CASE("RequestDispatcher: status refreshes cold snapshot without retry hint",
           "[daemon][status][freshness]") {
     StateComponent state;

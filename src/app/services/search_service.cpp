@@ -2413,8 +2413,8 @@ private:
                 return resp;
             }
 
-            auto r = ctx_.metadataRepo->search(processedQuery, static_cast<int>(searchReq.limit), 0,
-                                               docIds);
+            auto r = ctx_.metadataRepo->searchKeyword(processedQuery,
+                                                      static_cast<int>(searchReq.limit), 0, docIds);
             if (!r) {
                 return Error{ErrorCode::InternalError,
                              "Full-text search failed: " + r.error().message};
@@ -2426,7 +2426,7 @@ private:
                 searchReq.metadataFilters.empty() && !sessionFilterApplied &&
                 searchReq.scopePathPrefix.empty();
             if (effectiveResults.totalCount == 0 && docIds.has_value() && pathOnlyPrefilter) {
-                auto unfiltered = ctx_.metadataRepo->search(
+                auto unfiltered = ctx_.metadataRepo->searchKeyword(
                     processedQuery, static_cast<int>(searchReq.limit), 0, std::nullopt);
                 if (unfiltered) {
                     effectiveResults = std::move(unfiltered.value());
