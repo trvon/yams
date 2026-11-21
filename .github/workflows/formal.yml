@@ -63,7 +63,11 @@ jobs:
       - name: Install the pinned Lean toolchain
         working-directory: formal/topology
         run: |
-          elan toolchain install "$(cat lean-toolchain)"
+          # A restored ~/.elan cache already has it, and elan fails on a reinstall.
+          toolchain="$(cat lean-toolchain)"
+          if ! elan toolchain list | grep -qF "${toolchain}"; then
+            elan toolchain install "${toolchain}"
+          fi
           lean --version
 
       - name: Build and check proofs
