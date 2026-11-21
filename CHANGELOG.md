@@ -11,6 +11,16 @@
 
 * **retrieval:** apply basename and location-metadata filters before pagination; retain distinct current locations for shared-content grep candidates and enforce worktree scope after FTS/semantic projection.
 
+## [0.23.2](https://github.com/trvon/yams/compare/v0.23.1...v0.23.2) (2026-11-21)
+
+
+### Fixed
+
+* **conan:** fall back to NuGet for the macOS CoreML runtime too ([be93e38](https://github.com/trvon/yams/commit/be93e381aac0d375b16b2bf2258e045417255b06))
+* **daemon:** answer requests during startup with a not-ready error ([0b48eed](https://github.com/trvon/yams/commit/0b48eed50ce34958a38dd3b8ff22ee705a1b299f))
+* **packaging:** wait for the daemon to report ready in upgrade checks ([b4780fc](https://github.com/trvon/yams/commit/b4780fc6176fcfb5311790f4e621fe8c6f84a9dd))
+* unblock the v0.23.1 release (macOS ONNX Runtime, startup not-ready, Arch upgrade check) ([7080fe6](https://github.com/trvon/yams/commit/7080fe64555ef4603ba79127e35aa02d536f72f6))
+
 ## [0.23.1](https://github.com/trvon/yams/compare/v0.23.0...v0.23.1) (2026-11-20)
 
 Fixes on top of 0.23.0.
