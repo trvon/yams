@@ -1278,7 +1278,7 @@ struct MCPKgIngestAliasInput {
 struct MCPGraphRequest {
     using RequestType = MCPGraphRequest;
 
-    // Action discriminator: "query" (default) | "ingest"
+    // Action discriminator: "query" (default) | "ingest" | "remove"
     std::string action{"query"};
 
     // ── Query fields ──────────────────────────────────────────
@@ -1321,8 +1321,14 @@ struct MCPGraphRequest {
     std::vector<MCPKgIngestEdgeInput> edges;
     std::vector<MCPKgIngestAliasInput> aliases;
     std::string documentHash; // associate ingested entities with a document
-    bool skipExistingNodes{true};
-    bool skipExistingEdges{true};
+    // Default is upsert; true leaves existing rows untouched and counts them as skipped.
+    bool skipExistingNodes{false};
+    bool skipExistingEdges{false};
+
+    // ── Removal fields (used when action == "remove") ────────
+    // Required caller namespace (properties.ns). `relation` narrows removal to those edges.
+    std::string ns;
+    bool dryRun{false};
 
     static MCPGraphRequest fromJson(const json& j);
     json toJson() const;
@@ -1357,6 +1363,14 @@ struct MCPGraphResponse {
     uint64_t aliasesSkipped{0};
     std::vector<std::string> errors;
     bool success{true};
+    uint64_t nodesUpdated{0};
+    uint64_t edgesUpdated{0};
+    json unresolvedEdges = json::array();
+
+    // ── Removal result fields (populated when action == "remove") ──
+    uint64_t nodesRemoved{0};
+    uint64_t edgesRemoved{0};
+    bool dryRun{false};
 
     static MCPGraphResponse fromJson(const json& j);
     json toJson() const;

@@ -1660,8 +1660,12 @@ MCPGraphRequest MCPGraphRequest::fromJson(const json& j) {
     }
 
     req.documentHash = j.value("document_hash", std::string{});
-    req.skipExistingNodes = j.value("skip_existing_nodes", true);
-    req.skipExistingEdges = j.value("skip_existing_edges", true);
+    req.skipExistingNodes = j.value("skip_existing_nodes", false);
+    req.skipExistingEdges = j.value("skip_existing_edges", false);
+
+    // Removal fields (only relevant when action == "remove")
+    req.ns = j.value("ns", std::string{});
+    req.dryRun = j.value("dry_run", false);
 
     return req;
 }
@@ -1733,6 +1737,10 @@ json MCPGraphRequest::toJson() const {
         j["document_hash"] = documentHash;
     j["skip_existing_nodes"] = skipExistingNodes;
     j["skip_existing_edges"] = skipExistingEdges;
+    if (!ns.empty())
+        j["ns"] = ns;
+    if (dryRun)
+        j["dry_run"] = dryRun;
 
     return j;
 }
@@ -1767,6 +1775,15 @@ MCPGraphResponse MCPGraphResponse::fromJson(const json& j) {
     resp.aliasesSkipped = j.value("aliases_skipped", uint64_t{0});
     resp.success = j.value("success", true);
     detail::readStringArray(j, "errors", resp.errors);
+    resp.nodesUpdated = j.value("nodes_updated", uint64_t{0});
+    resp.edgesUpdated = j.value("edges_updated", uint64_t{0});
+    if (j.contains("unresolved_edges") && j["unresolved_edges"].is_array())
+        resp.unresolvedEdges = j["unresolved_edges"];
+
+    // Removal result fields
+    resp.nodesRemoved = j.value("nodes_removed", uint64_t{0});
+    resp.edgesRemoved = j.value("edges_removed", uint64_t{0});
+    resp.dryRun = j.value("dry_run", false);
 
     return resp;
 }
@@ -1783,6 +1800,16 @@ json MCPGraphResponse::toJson() const {
         j["edges_skipped"] = edgesSkipped;
         j["aliases_inserted"] = aliasesInserted;
         j["aliases_skipped"] = aliasesSkipped;
+        j["nodes_updated"] = nodesUpdated;
+        j["edges_updated"] = edgesUpdated;
+        j["unresolved_edges"] = unresolvedEdges.is_array() ? unresolvedEdges : json::array();
+        j["success"] = success;
+        if (!errors.empty())
+            j["errors"] = errors;
+    } else if (action == "remove") {
+        j["nodes_removed"] = nodesRemoved;
+        j["edges_removed"] = edgesRemoved;
+        j["dry_run"] = dryRun;
         j["success"] = success;
         if (!errors.empty())
             j["errors"] = errors;

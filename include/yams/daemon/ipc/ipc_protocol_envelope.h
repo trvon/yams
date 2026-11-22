@@ -102,6 +102,8 @@ enum class MessageType : uint8_t {
     // Lifecycle-owned memory sync operations.
     MemorySyncRequest = 78,
     UnlinkPathRequest = 79,
+    // Scoped KG removal by caller namespace.
+    KgRemoveRequest = 80,
 
     // Responses
     SearchResponse = 128,
@@ -155,6 +157,7 @@ enum class MessageType : uint8_t {
     // KG ingest (PBI-093 Phase 2)
     KgIngestRequest = 70,
     KgIngestResponse = 168,
+    KgRemoveResponse = 184,
     // Generic metadata value counts query (MCP client mode)
     MetadataValueCountsRequest = 71,
     // Batch request (Track B: Communication Overhead Reduction)

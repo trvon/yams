@@ -1189,3 +1189,38 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "unknown tool returns error",
     // Should be a routing error since this tool doesn't exist in either registry
     CHECK(isRoutingError(result));
 }
+
+TEST_CASE_METHOD(CompositeDispatchFixture, "query - graph remove is rejected as a write",
+                 "[mcp][composite][query][graph]") {
+    auto result = callTool(
+        "query",
+        json{{"steps",
+              json::array({{{"op", "graph"}, {"params", {{"action", "remove"}, {"ns", "pb"}}}}})}});
+
+    INFO("result: " << result.dump(2));
+    CHECK(isCompositeError(result, "graph_remove"));
+}
+
+TEST_CASE_METHOD(CompositeDispatchFixture, "execute - graph_remove without ns fails closed",
+                 "[mcp][composite][execute][graph]") {
+    auto result = callTool(
+        "execute",
+        json{{"operations",
+              json::array({{{"op", "graph_remove"}, {"params", {{"relation", "cites"}}}}})}});
+
+    INFO("result: " << result.dump(2));
+    CHECK_FALSE(isRoutingError(result));
+    CHECK(isCompositeError(result, "requires 'ns'"));
+}
+
+TEST_CASE_METHOD(CompositeDispatchFixture, "execute - graph_ingest and graph_remove reach handler",
+                 "[mcp][composite][execute][graph]") {
+    for (const auto* op : {"graph_ingest", "graph_remove"}) {
+        auto result =
+            callTool("execute",
+                     json{{"operations", json::array({{{"op", op}, {"params", {{"ns", "pb"}}}}})}});
+        INFO(op << " result: " << result.dump(2));
+        CHECK_FALSE(isRoutingError(result));
+        CHECK(reachedHandler(result));
+    }
+}

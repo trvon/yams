@@ -5819,12 +5819,160 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
         const auto& ingestResp = std::get<KgIngestResponse>(resp);
         CHECK(ingestResp.success);
-        CHECK(ingestResp.nodesInserted == 1);
+        CHECK(ingestResp.nodesInserted == 0);
+        CHECK(ingestResp.nodesUpdated == 1);
         CHECK(ingestResp.edgesSkipped == 1);
         CHECK(ingestResp.aliasesSkipped == 1);
         REQUIRE(ingestResp.errors.size() == 2);
         CHECK(ingestResp.errors[0] == "Edge destination node not found: fn:missing");
         CHECK(ingestResp.errors[1] == "Alias node not found: fn:missing");
+        REQUIRE(ingestResp.unresolvedEdges.size() == 1);
+        CHECK(ingestResp.unresolvedEdges[0].srcNodeKey == "fn:existing");
+        CHECK(ingestResp.unresolvedEdges[0].dstNodeKey == "fn:missing");
+        CHECK(ingestResp.unresolvedEdges[0].relation == "calls");
+        CHECK_FALSE(ingestResp.unresolvedEdges[0].srcMissing);
+        CHECK(ingestResp.unresolvedEdges[0].dstMissing);
+    }
+
+    SECTION("kg ingest counts inserted and updated rows instead of request sizes") {
+        fixture.initMetadata();
+
+        KgIngestRequest req;
+        req.nodes.push_back(KgIngestNode{"paper:a", "A", "paper", R"({"ns":"pb"})"});
+        req.nodes.push_back(KgIngestNode{"paper:b", "B", "paper", R"({"ns":"pb"})"});
+        req.edges.push_back(KgIngestEdge{"paper:a", "paper:b", "cites", 1.0f, R"({"ns":"pb"})"});
+        // Same edge twice in one request: the second is an update, not a second insert.
+        req.edges.push_back(KgIngestEdge{"paper:a", "paper:b", "cites", 1.0f, R"({"ns":"pb"})"});
+
+        auto first = dispatchRequest(*fixture.dispatcher, Request{req});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(first));
+        const auto& firstResp = std::get<KgIngestResponse>(first);
+        CHECK(firstResp.success);
+        CHECK(firstResp.nodesInserted == 2);
+        CHECK(firstResp.nodesUpdated == 0);
+        CHECK(firstResp.edgesInserted == 1);
+        CHECK(firstResp.edgesUpdated == 1);
+        CHECK(firstResp.unresolvedEdges.empty());
+
+        req.nodes[0].label = "A renamed";
+        auto second = dispatchRequest(*fixture.dispatcher, Request{req});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(second));
+        const auto& secondResp = std::get<KgIngestResponse>(second);
+        CHECK(secondResp.success);
+        CHECK(secondResp.nodesInserted == 0);
+        CHECK(secondResp.nodesUpdated == 2);
+        CHECK(secondResp.edgesInserted == 0);
+        CHECK(secondResp.edgesUpdated == 2);
+
+        auto renamed = fixture.kgStore->getNodeByKey("paper:a");
+        REQUIRE(renamed.has_value());
+        REQUIRE(renamed.value().has_value());
+        CHECK(renamed.value()->label.value_or("") == "A renamed");
+    }
+
+    SECTION("kg ingest skip_existing flags leave existing rows untouched") {
+        fixture.initMetadata();
+        auto src = fixture.upsertNode("fn:skip:src", "original", "function");
+        fixture.upsertNode("fn:skip:dst", "dst", "function");
+
+        KgIngestRequest seed;
+        seed.edges.push_back(
+            KgIngestEdge{"fn:skip:src", "fn:skip:dst", "calls", 1.0f, R"({"version":1})"});
+        auto seeded = dispatchRequest(*fixture.dispatcher, Request{seed});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(seeded));
+        REQUIRE(std::get<KgIngestResponse>(seeded).edgesInserted == 1);
+
+        KgIngestRequest req;
+        req.skipExistingNodes = true;
+        req.skipExistingEdges = true;
+        req.nodes.push_back(KgIngestNode{"fn:skip:src", "replaced", "function", ""});
+        req.nodes.push_back(KgIngestNode{"fn:skip:new", "new", "function", ""});
+        req.edges.push_back(
+            KgIngestEdge{"fn:skip:src", "fn:skip:dst", "calls", 1.0f, R"({"version":2})"});
+        req.edges.push_back(KgIngestEdge{"fn:skip:src", "fn:skip:new", "calls", 1.0f, ""});
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& ingestResp = std::get<KgIngestResponse>(resp);
+        CHECK(ingestResp.success);
+        CHECK(ingestResp.nodesInserted == 1);
+        CHECK(ingestResp.nodesSkipped == 1);
+        CHECK(ingestResp.nodesUpdated == 0);
+        CHECK(ingestResp.edgesInserted == 1);
+        CHECK(ingestResp.edgesSkipped == 1);
+        CHECK(ingestResp.edgesUpdated == 0);
+        CHECK(ingestResp.unresolvedEdges.empty());
+
+        auto kept = fixture.kgStore->getNodeByKey("fn:skip:src");
+        REQUIRE(kept.has_value());
+        REQUIRE(kept.value().has_value());
+        CHECK(kept.value()->label.value_or("") == "original");
+        auto edges = fixture.kgStore->getEdgesFrom(src, std::string_view("calls"), 10, 0);
+        REQUIRE(edges.has_value());
+        REQUIRE(edges.value().size() == 2);
+        for (const auto& edge : edges.value()) {
+            if (edge.properties && edge.properties->find("version") != std::string::npos) {
+                CHECK(*edge.properties == R"({"version":1})");
+            }
+        }
+    }
+
+    SECTION("kg remove requires a namespace") {
+        fixture.initMetadata();
+        KgRemoveRequest req;
+        req.relation = "cites";
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        CHECK(std::get<ErrorResponse>(resp).code == ErrorCode::InvalidArgument);
+    }
+
+    SECTION("kg remove deletes only the caller namespace") {
+        fixture.initMetadata();
+        KgIngestRequest ingest;
+        ingest.nodes.push_back(KgIngestNode{"paper:x", "X", "paper", R"({"ns":"pb"})"});
+        ingest.nodes.push_back(KgIngestNode{"paper:y", "Y", "paper", R"({"ns":"pb"})"});
+        ingest.nodes.push_back(KgIngestNode{"note:z", "Z", "note", ""});
+        ingest.edges.push_back(KgIngestEdge{"paper:x", "paper:y", "cites", 1.0f, R"({"ns":"pb"})"});
+        ingest.edges.push_back(KgIngestEdge{"note:z", "paper:x", "about", 1.0f, ""});
+        auto ingested = dispatchRequest(*fixture.dispatcher, Request{ingest});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(ingested));
+        REQUIRE(std::get<KgIngestResponse>(ingested).success);
+
+        KgRemoveRequest dry;
+        dry.ns = "pb";
+        dry.dryRun = true;
+        auto dryResp = dispatchRequest(*fixture.dispatcher, Request{dry});
+        REQUIRE(std::holds_alternative<KgRemoveResponse>(dryResp));
+        CHECK(std::get<KgRemoveResponse>(dryResp).dryRun);
+        CHECK(std::get<KgRemoveResponse>(dryResp).nodesRemoved == 2);
+        CHECK(std::get<KgRemoveResponse>(dryResp).edgesRemoved == 2);
+        auto stillThere = fixture.kgStore->getNodeByKey("paper:x");
+        REQUIRE(stillThere.has_value());
+        CHECK(stillThere.value().has_value());
+
+        KgRemoveRequest byRelation;
+        byRelation.ns = "pb";
+        byRelation.relation = "cites";
+        auto relResp = dispatchRequest(*fixture.dispatcher, Request{byRelation});
+        REQUIRE(std::holds_alternative<KgRemoveResponse>(relResp));
+        CHECK(std::get<KgRemoveResponse>(relResp).nodesRemoved == 0);
+        CHECK(std::get<KgRemoveResponse>(relResp).edgesRemoved == 1);
+
+        KgRemoveRequest all;
+        all.ns = "pb";
+        auto allResp = dispatchRequest(*fixture.dispatcher, Request{all});
+        REQUIRE(std::holds_alternative<KgRemoveResponse>(allResp));
+        CHECK(std::get<KgRemoveResponse>(allResp).nodesRemoved == 2);
+        CHECK(std::get<KgRemoveResponse>(allResp).edgesRemoved == 1);
+
+        auto gone = fixture.kgStore->getNodeByKey("paper:y");
+        REQUIRE(gone.has_value());
+        CHECK_FALSE(gone.value().has_value());
+        auto kept = fixture.kgStore->getNodeByKey("note:z");
+        REQUIRE(kept.has_value());
+        CHECK(kept.value().has_value());
     }
 
     SECTION("kg ingest inserts nodes edges and aliases") {

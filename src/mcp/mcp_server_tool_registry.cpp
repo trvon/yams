@@ -803,9 +803,10 @@ void MCPServer::initializeToolRegistry() {
                    {{"type", "string"},
                     {"description",
                      "Operation: 'query' (default) to traverse/explore the graph, 'ingest' to "
-                     "insert nodes/edges/aliases, 'lookup' to resolve a graph node by label or "
+                     "upsert nodes/edges/aliases, 'remove' to delete rows of one caller "
+                     "namespace (requires 'ns'), 'lookup' to resolve a graph node by label or "
                      "alias, 'trace' for a path between two nodes"},
-                    {"enum", json::array({"query", "ingest", "lookup", "trace"})},
+                    {"enum", json::array({"query", "ingest", "remove", "lookup", "trace"})},
                     {"default", "query"}}},
                   // ── Navigation parameters (lookup/trace) ──
                   {"symbol",
@@ -925,16 +926,31 @@ void MCPServer::initializeToolRegistry() {
                      "Associate ingested entities with this document (action=ingest)"}}},
                   {"skip_existing_nodes",
                    {{"type", "boolean"},
-                    {"description", "Skip nodes that already exist by node_key (action=ingest)"},
-                    {"default", true}}},
+                    {"description",
+                     "Leave nodes that already exist by node_key untouched and count them as "
+                     "skipped; default upserts them (action=ingest)"},
+                    {"default", false}}},
                   {"skip_existing_edges",
                    {{"type", "boolean"},
                     {"description",
-                     "Skip edges that already exist by src/dst/relation (action=ingest)"},
-                    {"default", true}}}}}},
+                     "Leave edges that already exist by src/dst/relation untouched and count "
+                     "them as skipped; default upserts them (action=ingest)"},
+                    {"default", false}}},
+                  // ── Removal parameters (used when action == "remove") ──
+                  {"ns",
+                   {{"type", "string"},
+                    {"description",
+                     "Caller namespace matched against properties.ns (action=remove, "
+                     "required). With 'relation', only that relation's edges are removed; "
+                     "without it, the namespace's nodes, edges and incident edges are removed"}}},
+                  {"dry_run",
+                   {{"type", "boolean"},
+                    {"description", "Report removal counts without deleting (action=remove)"},
+                    {"default", false}}}}}},
             "Query or mutate the knowledge graph. Use action='query' (default) to explore "
-            "relationships, or action='ingest' to bulk-insert nodes, edges, and aliases "
-            "(e.g., token-to-Strong's/lemma graphs).",
+            "relationships, action='ingest' to bulk-upsert nodes, edges, and aliases "
+            "(e.g., token-to-Strong's/lemma graphs), or action='remove' with 'ns' to delete "
+            "one caller namespace.",
             "Knowledge Graph", addAnnotation);
     }
 
@@ -1028,8 +1044,8 @@ void MCPServer::initializeToolRegistry() {
                        {"properties",
                         {{"op",
                           {{"type", "string"},
-                           {"enum",
-                            json::array({"add", "update", "delete", "restore", "download"})}}},
+                           {"enum", json::array({"add", "update", "delete", "restore", "download",
+                                                 "graph_ingest", "graph_remove"})}}},
                          {"params",
                           {{"type", "object"},
                            {"description",
@@ -1042,9 +1058,8 @@ void MCPServer::initializeToolRegistry() {
                       "If true, continue executing remaining operations after a failure."},
                      {"default", false}}}}},
                  {"required", json::array({"operations"})}},
-            "Write operations: add, update, delete, restore, download. Supports batching "
-            "multiple "
-            "operations in a single call.",
+            "Write operations: add, update, delete, restore, download, graph_ingest, "
+            "graph_remove. Supports batching multiple operations in a single call.",
             "Execute YAMS Operations",
             ToolAnnotation{.readOnlyHint = false,
                            .destructiveHint = true,

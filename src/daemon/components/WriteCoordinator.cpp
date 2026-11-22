@@ -666,10 +666,18 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                              std::is_same_v<T, DeleteEdgesForSourceFileOp> ||
                                              std::is_same_v<T, DeleteEdgesByRelationOp> ||
                                              std::is_same_v<T, DeleteOrphanedEdgesOp> ||
-                                             std::is_same_v<T, DeleteOrphanedDocEntitiesOp>) {
+                                             std::is_same_v<T, DeleteOrphanedDocEntitiesOp> ||
+                                             std::is_same_v<T, DeleteGraphNamespaceOp>) {
                             r = drainEdgeBuffer();
                             if (r) {
                                 r = applyOp(kgBatch, concrete);
+                            }
+                        } else if constexpr (std::is_same_v<T, IngestGraphOp>) {
+                            // Writes straight to the transaction so its classification reads
+                            // every earlier op in this apply, including buffered edges.
+                            r = drainEdgeBuffer();
+                            if (r) {
+                                r = applyOp(kgBatch, concrete, nodeKeyToId);
                             }
                         } else {
                             r = applyOp(kgBatch, concrete);
@@ -1357,6 +1365,205 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
         stats_.aliasesAdded += resolved.size();
     }
     return r;
+}
+
+Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
+                                       IngestGraphOp& op,
+                                       std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
+    if (!op.outcome) {
+        op.outcome = std::make_shared<GraphIngestOutcome>();
+    }
+    auto& outcome = *op.outcome;
+    outcome = GraphIngestOutcome{};
+    // Resolve against this transaction, not the pre-apply prefetch: earlier ops in the same
+    // apply may have created or removed the node.
+    const auto lookup = [&](const std::string& key) -> Result<std::optional<std::int64_t>> {
+        if (key.empty()) {
+            return std::optional<std::int64_t>{};
+        }
+        auto node = kgBatch.getNodeByKey(key);
+        if (!node) {
+            return node.error();
+        }
+        if (!node.value().has_value()) {
+            return std::optional<std::int64_t>{};
+        }
+        nodeKeyToId[key] = node.value()->id;
+        return std::optional<std::int64_t>{node.value()->id};
+    };
+    // Counts for a stage are published only once that stage's write succeeded. A failed op
+    // does not roll back earlier stages (applyBatches commits the transaction), so the
+    // published counts describe what was written.
+    const auto failAt = [&](GraphIngestOutcome::Stage stage, Error error) -> Result<void> {
+        outcome.failedStage = stage;
+        return error;
+    };
+
+    {
+        std::uint64_t inserted = 0;
+        std::uint64_t updated = 0;
+        std::uint64_t skipped = 0;
+        std::vector<metadata::KGNode> toUpsert;
+        toUpsert.reserve(op.nodes.size());
+        std::unordered_set<std::string> seenNodeKeys;
+        for (auto& node : op.nodes) {
+            if (node.nodeKey.empty()) {
+                ++skipped;
+                continue;
+            }
+            bool exists = !seenNodeKeys.insert(node.nodeKey).second;
+            if (!exists) {
+                auto existing = lookup(node.nodeKey);
+                if (!existing) {
+                    return failAt(GraphIngestOutcome::Stage::Nodes, existing.error());
+                }
+                exists = existing.value().has_value();
+            }
+            if (exists && op.skipExistingNodes) {
+                ++skipped;
+                continue;
+            }
+            ++(exists ? updated : inserted);
+            toUpsert.push_back(std::move(node));
+        }
+        if (!toUpsert.empty()) {
+            auto ids = kgBatch.upsertNodes(toUpsert);
+            if (!ids) {
+                return failAt(GraphIngestOutcome::Stage::Nodes, ids.error());
+            }
+            for (std::size_t i = 0; i < toUpsert.size() && i < ids.value().size(); ++i) {
+                nodeKeyToId[toUpsert[i].nodeKey] = ids.value()[i];
+            }
+            std::lock_guard<std::mutex> lock(statsMutex_);
+            stats_.nodesUpserted += toUpsert.size();
+        }
+        outcome.nodesInserted = inserted;
+        outcome.nodesUpdated = updated;
+        outcome.nodesSkipped = skipped;
+    }
+
+    {
+        std::uint64_t inserted = 0;
+        std::uint64_t updated = 0;
+        std::uint64_t skipped = 0;
+        std::vector<GraphIngestUnresolvedEdge> unresolved;
+        std::vector<metadata::KGEdge> resolved;
+        resolved.reserve(op.edges.size());
+        std::unordered_set<std::string> seenEdges;
+        for (const auto& deferred : op.edges) {
+            auto src = lookup(deferred.srcNodeKey);
+            if (!src) {
+                return failAt(GraphIngestOutcome::Stage::Edges, src.error());
+            }
+            auto dst = lookup(deferred.dstNodeKey);
+            if (!dst) {
+                return failAt(GraphIngestOutcome::Stage::Edges, dst.error());
+            }
+            if (!src.value() || !dst.value()) {
+                ++skipped;
+                unresolved.push_back(GraphIngestUnresolvedEdge{
+                    deferred.srcNodeKey, deferred.dstNodeKey, deferred.relation,
+                    !src.value().has_value(), !dst.value().has_value()});
+                continue;
+            }
+            const auto srcId = *src.value();
+            const auto dstId = *dst.value();
+            const auto edgeKey =
+                std::to_string(srcId) + '\x1f' + std::to_string(dstId) + '\x1f' + deferred.relation;
+            bool exists = !seenEdges.insert(edgeKey).second;
+            if (!exists) {
+                auto page = kgBatch.getEdgesBetweenPage(srcId, dstId, deferred.relation);
+                if (!page) {
+                    return failAt(GraphIngestOutcome::Stage::Edges, page.error());
+                }
+                exists = !page.value().empty();
+            }
+            if (exists && op.skipExistingEdges) {
+                ++skipped;
+                continue;
+            }
+            ++(exists ? updated : inserted);
+            metadata::KGEdge edge;
+            edge.srcNodeId = srcId;
+            edge.dstNodeId = dstId;
+            edge.relation = deferred.relation;
+            edge.weight = deferred.weight;
+            edge.properties = deferred.properties;
+            resolved.push_back(std::move(edge));
+        }
+        // Unresolved edges are reported even when the write below fails.
+        outcome.unresolvedEdges = std::move(unresolved);
+        if (!resolved.empty()) {
+            if (auto added = kgBatch.addEdgesUnique(resolved); !added) {
+                return failAt(GraphIngestOutcome::Stage::Edges, added.error());
+            }
+            std::lock_guard<std::mutex> lock(statsMutex_);
+            stats_.edgesAdded += resolved.size();
+        }
+        outcome.edgesInserted = inserted;
+        outcome.edgesUpdated = updated;
+        outcome.edgesSkipped = skipped;
+    }
+
+    {
+        std::vector<std::string> unresolvedKeys;
+        std::vector<metadata::KGAlias> aliases;
+        aliases.reserve(op.aliases.size());
+        for (auto& intent : op.aliases) {
+            auto nodeId = lookup(intent.nodeKey);
+            if (!nodeId) {
+                return failAt(GraphIngestOutcome::Stage::Aliases, nodeId.error());
+            }
+            if (!nodeId.value()) {
+                unresolvedKeys.push_back(intent.nodeKey);
+                continue;
+            }
+            metadata::KGAlias alias;
+            alias.nodeId = *nodeId.value();
+            alias.alias = std::move(intent.alias);
+            alias.source = std::move(intent.source);
+            alias.confidence = intent.confidence;
+            aliases.push_back(std::move(alias));
+        }
+        outcome.aliasesSkipped = unresolvedKeys.size();
+        outcome.unresolvedAliasKeys = std::move(unresolvedKeys);
+        if (!aliases.empty()) {
+            if (auto added = kgBatch.addAliases(aliases); !added) {
+                return failAt(GraphIngestOutcome::Stage::Aliases, added.error());
+            }
+            std::lock_guard<std::mutex> lock(statsMutex_);
+            stats_.aliasesAdded += aliases.size();
+        }
+        outcome.aliasesInserted = aliases.size();
+    }
+
+    outcome.applied = true;
+    return Result<void>();
+}
+
+Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
+                                       DeleteGraphNamespaceOp& op) {
+    if (op.ns.empty()) {
+        return Error{ErrorCode::InvalidArgument, "Namespace removal requires a namespace"};
+    }
+    std::optional<std::string_view> relation;
+    if (op.relation) {
+        relation = *op.relation;
+    }
+    auto removed = kgBatch.deleteByNamespace(op.ns, relation, op.dryRun);
+    if (!removed) {
+        return removed.error();
+    }
+    if (!op.dryRun) {
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        stats_.nodesDeleted += static_cast<std::uint64_t>(removed.value().nodesDeleted);
+        stats_.edgesDeleted += static_cast<std::uint64_t>(removed.value().edgesDeleted);
+    }
+    if (op.outcome) {
+        op.outcome->counts = removed.value();
+        op.outcome->applied = true;
+    }
+    return Result<void>();
 }
 
 Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,

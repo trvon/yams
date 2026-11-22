@@ -163,6 +163,56 @@ struct InsertRelationshipOp {
 struct AddSymSpellTermsOp {
     std::vector<std::string> terms;
 };
+// Caller-facing graph ingest (KgIngestRequest). Unlike UpsertNodesOp/AddDeferredEdgesOp it
+// classifies every row against this transaction's state and reports the outcome, including
+// edges whose endpoints do not resolve, instead of dropping them silently.
+struct GraphIngestAlias {
+    std::string nodeKey;
+    std::string alias;
+    std::string source;
+    float confidence = 1.0f;
+};
+struct GraphIngestUnresolvedEdge {
+    std::string srcNodeKey;
+    std::string dstNodeKey;
+    std::string relation;
+    bool srcMissing = false;
+    bool dstMissing = false;
+};
+struct GraphIngestOutcome {
+    enum class Stage { None, Nodes, Edges, Aliases };
+    std::uint64_t nodesInserted = 0;
+    std::uint64_t nodesUpdated = 0;
+    std::uint64_t nodesSkipped = 0;
+    std::uint64_t edgesInserted = 0;
+    std::uint64_t edgesUpdated = 0;
+    std::uint64_t edgesSkipped = 0;
+    std::uint64_t aliasesInserted = 0;
+    std::uint64_t aliasesSkipped = 0;
+    std::vector<GraphIngestUnresolvedEdge> unresolvedEdges;
+    std::vector<std::string> unresolvedAliasKeys;
+    Stage failedStage = Stage::None;
+    bool applied = false;
+};
+struct IngestGraphOp {
+    std::vector<metadata::KGNode> nodes;
+    std::vector<DeferredEdgeOp> edges;
+    std::vector<GraphIngestAlias> aliases;
+    bool skipExistingNodes = false;
+    bool skipExistingEdges = false;
+    std::shared_ptr<GraphIngestOutcome> outcome;
+};
+struct GraphNamespaceRemovalOutcome {
+    metadata::NamespaceRemovalResult counts;
+    bool applied = false;
+};
+// Scoped removal by properties.ns. There is deliberately no relation-only form.
+struct DeleteGraphNamespaceOp {
+    std::string ns;
+    std::optional<std::string> relation;
+    bool dryRun = false;
+    std::shared_ptr<GraphNamespaceRemovalOutcome> outcome;
+};
 struct AcknowledgeKnowledgeGraphOp {
     std::int64_t documentId{0};
     std::string token;
@@ -178,7 +228,7 @@ using WriteOp =
                  UpsertTreeSnapshotOp, SetMetadataBatchOp, UpdateExtractionStatusOp,
                  UpdateEmbeddingStatusByHashOp, UpdateEmbeddingStatusByHashesOp,
                  CompleteDocumentEmbeddingsByHashesOp, InsertRelationshipOp, AddSymSpellTermsOp,
-                 AcknowledgeKnowledgeGraphOp>;
+                 AcknowledgeKnowledgeGraphOp, IngestGraphOp, DeleteGraphNamespaceOp>;
 
 struct WriteBatch {
     std::string source;
@@ -346,6 +396,10 @@ private:
                          DeleteOrphanedEdgesOp& op);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
                          DeleteOrphanedDocEntitiesOp& op);
+    Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, IngestGraphOp& op,
+                         std::unordered_map<std::string, std::int64_t>& nodeKeyToId);
+    Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
+                         DeleteGraphNamespaceOp& op);
     Result<void> applyMetadataOp(UpdateRepairStatusOp& op);
     Result<void> applyMetadataOp(UpsertTreeSnapshotOp& op);
     Result<void> applyMetadataOp(SetMetadataBatchOp& op);

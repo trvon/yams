@@ -679,3 +679,64 @@ TEST_CASE("MCP DTO parsing - GraphResponse optional emission", "[mcp][dto][graph
         CHECK_FALSE(j.contains("connected_nodes"));
     }
 }
+
+TEST_CASE("MCP DTO parsing - graph ingest upserts by default and remove carries a namespace",
+          "[mcp][dto][graph][catch2]") {
+    using yams::mcp::MCPGraphRequest;
+    using yams::mcp::MCPGraphResponse;
+
+    {
+        const auto r = MCPGraphRequest::fromJson(json{{"action", "ingest"}});
+        CHECK_FALSE(r.skipExistingNodes);
+        CHECK_FALSE(r.skipExistingEdges);
+        const auto skip = MCPGraphRequest::fromJson(json{
+            {"action", "ingest"}, {"skip_existing_nodes", true}, {"skip_existing_edges", true}});
+        CHECK(skip.skipExistingNodes);
+        CHECK(skip.skipExistingEdges);
+    }
+
+    {
+        const auto r = MCPGraphRequest::fromJson(json{
+            {"action", "remove"}, {"ns", "paperbridge"}, {"relation", "cites"}, {"dry_run", true}});
+        CHECK(r.action == "remove");
+        CHECK(r.ns == "paperbridge");
+        CHECK(r.relation == "cites");
+        CHECK(r.dryRun);
+        const auto again = MCPGraphRequest::fromJson(r.toJson());
+        CHECK(again.ns == "paperbridge");
+        CHECK(again.dryRun);
+    }
+
+    {
+        MCPGraphResponse r;
+        r.action = "ingest";
+        r.nodesInserted = 1;
+        r.nodesUpdated = 2;
+        r.edgesUpdated = 3;
+        r.unresolvedEdges = json::array({json{{"src_node_key", "a"},
+                                              {"dst_node_key", "b"},
+                                              {"relation", "cites"},
+                                              {"src_missing", false},
+                                              {"dst_missing", true}}});
+        const auto j = r.toJson();
+        CHECK(j["nodes_updated"] == 2);
+        CHECK(j["edges_updated"] == 3);
+        REQUIRE(j["unresolved_edges"].size() == 1);
+        CHECK(j["unresolved_edges"][0]["dst_missing"] == true);
+        CHECK(MCPGraphResponse::fromJson(j).toJson() == j);
+    }
+
+    {
+        MCPGraphResponse r;
+        r.action = "remove";
+        r.nodesRemoved = 4;
+        r.edgesRemoved = 9;
+        r.dryRun = true;
+        const auto j = r.toJson();
+        CHECK(j["nodes_removed"] == 4);
+        CHECK(j["edges_removed"] == 9);
+        CHECK(j["dry_run"] == true);
+        CHECK_FALSE(j.contains("connected_nodes"));
+        CHECK(MCPGraphResponse::fromJson(j).toJson() == j);
+    }
+}

@@ -78,8 +78,8 @@ src/cli/commands/update_command.cpp:512:portability/env-read # reviewed raw envi
 src/cli/hot_cold_utils.h:13:portability/env-read # reviewed raw environment read
 src/daemon/components/DaemonMetrics.cpp:237:portability/env-read # reviewed raw environment read
 src/daemon/components/DaemonMetrics.cpp:2168:portability/env-read # reviewed raw environment read
-src/daemon/components/RequestDispatcher.cpp:613:portability/env-read # reviewed raw environment read
-src/daemon/components/RequestDispatcher.cpp:616:portability/env-read # reviewed raw environment read
+src/daemon/components/RequestDispatcher.cpp:614:portability/env-read # reviewed raw environment read
+src/daemon/components/RequestDispatcher.cpp:617:portability/env-read # reviewed raw environment read
 src/metadata/connection_pool.cpp:1000:portability/jthread # feature-test guarded std::jthread
 src/metadata/database.cpp:29:portability/env-read # reviewed raw environment read
 src/metadata/database.cpp:476:portability/path-cstr # std::string filename, not filesystem::path

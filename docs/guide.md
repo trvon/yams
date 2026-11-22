@@ -108,6 +108,16 @@ yams graph --relations
 The graph links documents to their paths, versions, extracted entities and
 semantically similar neighbours.
 
+Other tools can add their own nodes and edges and remove them by namespace:
+
+```bash
+yams graph ingest --file graph.json --json   # or --file - for stdin
+yams graph remove --ns paperbridge --relation cites --dry-run
+```
+
+Mark rows with `"properties": {"ns": "<tool>"}` so document cleanup leaves them
+alone. Payload, counts and cleanup rules: [External graph ingest](architecture/graph-ingest.md).
+
 ## Check health
 
 ```bash

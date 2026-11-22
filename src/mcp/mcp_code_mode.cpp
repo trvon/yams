@@ -149,7 +149,7 @@ std::optional<std::string> normalizeQueryParamsForOp(const std::string& op, json
         }
 
         const std::string action = params.value("action", std::string{"query"});
-        if (action != "ingest") {
+        if (action != "ingest" && action != "remove") {
             const bool hasTarget =
                 hasNonEmptyStringField(params, "hash") || hasNonEmptyStringField(params, "name") ||
                 hasNonEmptyStringField(params, "node_key") || hasGraphNodeIdField(params);
@@ -516,6 +516,48 @@ json MCPServer::describeOp(const std::string& target) const {
                      {"default", false}}}}}},
             "execute", false};
 
+        ops["graph_ingest"] = {
+            "Upsert knowledge-graph nodes, edges and aliases. Returns rows inserted, updated "
+            "and skipped, and unresolved_edges for edges whose endpoints do not exist. Mark "
+            "rows with properties.ns to keep them out of document cleanup.",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"nodes",
+                    {{"type", "array"},
+                     {"description", "Nodes: node_key, type, label, properties"}}},
+                   {"edges",
+                    {{"type", "array"},
+                     {"description",
+                      "Edges: src_node_key, dst_node_key, relation, weight, properties"}}},
+                   {"aliases",
+                    {{"type", "array"},
+                     {"description", "Aliases: node_key, alias, source, confidence"}}},
+                   {"skip_existing_nodes",
+                    {{"type", "boolean"},
+                     {"description", "Leave existing nodes untouched"},
+                     {"default", false}}},
+                   {"skip_existing_edges",
+                    {{"type", "boolean"},
+                     {"description", "Leave existing edges untouched"},
+                     {"default", false}}}}}},
+            "execute", false};
+
+        ops["graph_remove"] = {
+            "Delete knowledge-graph rows of one caller namespace (properties.ns). With "
+            "'relation', only that relation's namespaced edges; without it, the namespace's "
+            "nodes, edges and incident edges. Never removes by relation alone.",
+            json{{"type", "object"},
+                 {"properties",
+                  {{"ns", {{"type", "string"}, {"description", "Namespace (required)"}}},
+                   {"relation",
+                    {{"type", "string"}, {"description", "Only remove edges of this relation"}}},
+                   {"dry_run",
+                    {{"type", "boolean"},
+                     {"description", "Report counts without deleting"},
+                     {"default", false}}}}},
+                 {"required", json::array({"ns"})}},
+            "execute", false};
+
         ops["restore"] = {
             "Restore documents from a collection or snapshot",
             json{{"type", "object"},
@@ -627,7 +669,8 @@ json MCPServer::describeAllOps() const {
     return json{{"query_ops", json::array({"search", "grep", "list", "list_collections",
                                            "list_snapshots", "suggest_context", "semantic_dedupe",
                                            "graph", "get", "status", "describe"})},
-                {"execute_ops", json::array({"add", "update", "delete", "restore", "download"})},
+                {"execute_ops", json::array({"add", "update", "delete", "restore", "download",
+                                             "graph_ingest", "graph_remove"})},
                 {"session_ops", json::array({"start", "stop", "pin", "unpin", "watch"})}};
 }
 
@@ -722,6 +765,9 @@ MCPServer::dispatchPipelineStep(std::string op, json params, std::size_t stepInd
         } else {
             step.data = result.value().toJson();
         }
+    } else if (op == "graph" && params.value("action", std::string{}) == "remove") {
+        // The query tool is advertised read-only; removal goes through execute.
+        fail("graph action 'remove' is a write; use the execute tool with op 'graph_remove'");
     } else if (op == "graph") {
         auto req = MCPGraphRequest::fromJson(params);
         auto result = co_await handleGraphQuery(req);
@@ -820,8 +866,14 @@ boost::asio::awaitable<json> MCPServer::handleBatchExecute(const json& args) {
     cfg.summaryPrefix = "Execute";
     cfg.invalidOpHint = "Use the 'query' tool for read operations (search, grep, list, etc).";
     cfg.opTable = {
-        {"add", "add"},         {"update", "update"},     {"delete", "delete_by_name"},
-        {"restore", "restore"}, {"download", "download"}, {"download_jobs", "download_jobs"},
+        {"add", "add"},
+        {"update", "update"},
+        {"delete", "delete_by_name"},
+        {"restore", "restore"},
+        {"download", "download"},
+        {"download_jobs", "download_jobs"},
+        {"graph_ingest", "graph"},
+        {"graph_remove", "graph"},
     };
     cfg.stepProjector = projections::executeStepProjection;
     cfg.finalResultBuilder = projections::executeFinalResult;
@@ -831,6 +883,12 @@ boost::asio::awaitable<json> MCPServer::handleBatchExecute(const json& args) {
             auto normalized = detail::normalizeAddParams(params);
             return ModeRouterNormalizeResult{std::move(normalized.params),
                                              std::move(normalized.error)};
+        }
+        if (op == "graph_ingest" || op == "graph_remove") {
+            if (!params.is_object()) {
+                params = json::object();
+            }
+            params["action"] = op == "graph_ingest" ? "ingest" : "remove";
         }
         return ModeRouterNormalizeResult{std::move(params), std::nullopt};
     };

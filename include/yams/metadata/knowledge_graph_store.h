@@ -150,6 +150,16 @@ struct DocumentGraphCleanupResult {
     std::int64_t edgesDeleted{0};
 };
 
+// Property key that marks a node or edge as owned by an external caller (for example
+// `{"ns":"paperbridge"}`). Document cleanup and orphan repair never remove such rows by their
+// document_hash/file_path/source_file properties; only namespace removal does.
+inline constexpr std::string_view kExternalNamespaceProperty = "ns";
+
+struct NamespaceRemovalResult {
+    std::int64_t nodesDeleted{0};
+    std::int64_t edgesDeleted{0};
+};
+
 struct KGPathRange {
     std::string lower;
     std::string upper;
@@ -203,6 +213,15 @@ public:
         virtual Result<void> deleteDocEntitiesForDocument(std::int64_t documentId) = 0;
         virtual Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) = 0;
         virtual Result<std::int64_t> deleteEdgesByRelation(std::string_view relation) = 0;
+        /// Remove rows whose properties.ns equals `ns` (never empty). With a relation, only
+        /// edges of that relation carrying the namespace are removed and nodes are kept.
+        /// Without one, namespaced edges, namespaced nodes, and every edge incident to a
+        /// removed node are removed. dryRun reports the counts without deleting.
+        virtual Result<NamespaceRemovalResult>
+        deleteByNamespace(std::string_view /*ns*/, std::optional<std::string_view> /*relation*/,
+                          bool /*dryRun*/) {
+            return Error{ErrorCode::NotImplemented, "Namespace removal is not implemented"};
+        }
         virtual Result<std::int64_t> deleteOrphanedEdges() = 0;
         virtual Result<std::int64_t> deleteOrphanedDocEntities() = 0;
         virtual Result<void> commit() = 0;

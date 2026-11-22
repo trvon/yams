@@ -2763,6 +2763,146 @@ template <> struct ProtoBinding<GraphRepairResponse> {
     }
 };
 
+// KG ingest and scoped removal. KgIngest had a protobuf schema but no binding, so it could
+// not cross the socket transport.
+template <> struct ProtoBinding<KgIngestRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kKgIngestRequest;
+    static void set(Envelope& env, const KgIngestRequest& r) {
+        auto* o = env.mutable_kg_ingest_request();
+        o->mutable_nodes()->Reserve(static_cast<int>(r.nodes.size()));
+        for (const auto& n : r.nodes) {
+            auto* wire = o->add_nodes();
+            wire->set_node_key(n.nodeKey);
+            wire->set_label(n.label);
+            wire->set_type(n.type);
+            wire->set_properties(n.properties);
+        }
+        o->mutable_edges()->Reserve(static_cast<int>(r.edges.size()));
+        for (const auto& e : r.edges) {
+            auto* wire = o->add_edges();
+            wire->set_src_node_key(e.srcNodeKey);
+            wire->set_dst_node_key(e.dstNodeKey);
+            wire->set_relation(e.relation);
+            wire->set_weight(e.weight);
+            wire->set_properties(e.properties);
+        }
+        o->mutable_aliases()->Reserve(static_cast<int>(r.aliases.size()));
+        for (const auto& a : r.aliases) {
+            auto* wire = o->add_aliases();
+            wire->set_node_key(a.nodeKey);
+            wire->set_alias(a.alias);
+            wire->set_source(a.source);
+            wire->set_confidence(a.confidence);
+        }
+        o->set_document_hash(r.documentHash);
+        o->set_skip_existing_nodes(r.skipExistingNodes);
+        o->set_skip_existing_edges(r.skipExistingEdges);
+    }
+    static KgIngestRequest get(const Envelope& env) {
+        const auto& i = env.kg_ingest_request();
+        KgIngestRequest r{};
+        r.nodes.reserve(static_cast<std::size_t>(i.nodes_size()));
+        for (const auto& n : i.nodes()) {
+            r.nodes.push_back(KgIngestNode{n.node_key(), n.label(), n.type(), n.properties()});
+        }
+        r.edges.reserve(static_cast<std::size_t>(i.edges_size()));
+        for (const auto& e : i.edges()) {
+            r.edges.push_back(KgIngestEdge{e.src_node_key(), e.dst_node_key(), e.relation(),
+                                           e.weight(), e.properties()});
+        }
+        r.aliases.reserve(static_cast<std::size_t>(i.aliases_size()));
+        for (const auto& a : i.aliases()) {
+            r.aliases.push_back(KgIngestAlias{a.node_key(), a.alias(), a.source(), a.confidence()});
+        }
+        r.documentHash = i.document_hash();
+        r.skipExistingNodes = i.skip_existing_nodes();
+        r.skipExistingEdges = i.skip_existing_edges();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<KgIngestResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kKgIngestResponse;
+    static void set(Envelope& env, const KgIngestResponse& r) {
+        auto* o = env.mutable_kg_ingest_response();
+        o->set_nodes_inserted(r.nodesInserted);
+        o->set_nodes_skipped(r.nodesSkipped);
+        o->set_edges_inserted(r.edgesInserted);
+        o->set_edges_skipped(r.edgesSkipped);
+        o->set_aliases_inserted(r.aliasesInserted);
+        o->set_aliases_skipped(r.aliasesSkipped);
+        set_string_list(r.errors, o->mutable_errors());
+        o->set_success(r.success);
+        o->set_nodes_updated(r.nodesUpdated);
+        o->set_edges_updated(r.edgesUpdated);
+        for (const auto& edge : r.unresolvedEdges) {
+            auto* wire = o->add_unresolved_edges();
+            wire->set_src_node_key(edge.srcNodeKey);
+            wire->set_dst_node_key(edge.dstNodeKey);
+            wire->set_relation(edge.relation);
+            wire->set_src_missing(edge.srcMissing);
+            wire->set_dst_missing(edge.dstMissing);
+        }
+    }
+    static KgIngestResponse get(const Envelope& env) {
+        const auto& i = env.kg_ingest_response();
+        KgIngestResponse r{};
+        r.nodesInserted = i.nodes_inserted();
+        r.nodesSkipped = i.nodes_skipped();
+        r.edgesInserted = i.edges_inserted();
+        r.edgesSkipped = i.edges_skipped();
+        r.aliasesInserted = i.aliases_inserted();
+        r.aliasesSkipped = i.aliases_skipped();
+        r.errors = get_string_list(i.errors());
+        r.success = i.success();
+        r.nodesUpdated = i.nodes_updated();
+        r.edgesUpdated = i.edges_updated();
+        r.unresolvedEdges.reserve(static_cast<std::size_t>(i.unresolved_edges_size()));
+        for (const auto& edge : i.unresolved_edges()) {
+            r.unresolvedEdges.push_back(
+                KgIngestUnresolvedEdge{edge.src_node_key(), edge.dst_node_key(), edge.relation(),
+                                       edge.src_missing(), edge.dst_missing()});
+        }
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<KgRemoveRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kKgRemoveRequest;
+    static void set(Envelope& env, const KgRemoveRequest& r) {
+        auto* o = env.mutable_kg_remove_request();
+        o->set_ns(r.ns);
+        o->set_relation(r.relation);
+        o->set_dry_run(r.dryRun);
+    }
+    static KgRemoveRequest get(const Envelope& env) {
+        const auto& i = env.kg_remove_request();
+        KgRemoveRequest r{};
+        r.ns = i.ns();
+        r.relation = i.relation();
+        r.dryRun = i.dry_run();
+        return r;
+    }
+};
+
+template <> struct ProtoBinding<KgRemoveResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kKgRemoveResponse;
+    static void set(Envelope& env, const KgRemoveResponse& r) {
+        auto* o = env.mutable_kg_remove_response();
+        o->set_nodes_removed(r.nodesRemoved);
+        o->set_edges_removed(r.edgesRemoved);
+        o->set_dry_run(r.dryRun);
+    }
+    static KgRemoveResponse get(const Envelope& env) {
+        const auto& i = env.kg_remove_response();
+        KgRemoveResponse r{};
+        r.nodesRemoved = i.nodes_removed();
+        r.edgesRemoved = i.edges_removed();
+        r.dryRun = i.dry_run();
+        return r;
+    }
+};
+
 template <> struct ProtoBinding<GraphValidateRequest> {
     static constexpr Envelope::PayloadCase case_v = Envelope::kGraphValidateRequest;
     static void set(Envelope& env, const GraphValidateRequest& /*r*/) {
@@ -4051,6 +4191,16 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kKgIngestRequest: {
+            auto v = ProtoBinding<KgIngestRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
+        case Envelope::kKgRemoveRequest: {
+            auto v = ProtoBinding<KgRemoveRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
         case Envelope::kGraphValidateRequest: {
             auto v = ProtoBinding<GraphValidateRequest>::get(env);
             m.payload = Request{std::move(v)};
@@ -4246,6 +4396,16 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         case Envelope::kGraphRepairResponse: {
             auto v = ProtoBinding<GraphRepairResponse>::get(env);
             m.payload = Response{std::in_place_type<GraphRepairResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kKgIngestResponse: {
+            auto v = ProtoBinding<KgIngestResponse>::get(env);
+            m.payload = Response{std::in_place_type<KgIngestResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kKgRemoveResponse: {
+            auto v = ProtoBinding<KgRemoveResponse>::get(env);
+            m.payload = Response{std::in_place_type<KgRemoveResponse>, std::move(v)};
             break;
         }
         case Envelope::kGraphValidateResponse: {

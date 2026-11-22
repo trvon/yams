@@ -677,125 +677,149 @@ RequestDispatcher::handleKgIngestRequest(const KgIngestRequest& req) {
     KgIngestResponse resp;
 
     auto* coord = serviceManager_ ? serviceManager_->getWriteCoordinator() : nullptr;
-    if (coord) {
-        auto wb = std::make_unique<WriteBatch>();
-        wb->source = "RPC::ingestGraph";
-
-        std::unordered_set<std::string> knownNodeKeys;
-        knownNodeKeys.reserve(req.nodes.size() + req.edges.size() * 2 + req.aliases.size());
-        for (const auto& n : req.nodes) {
-            if (!n.nodeKey.empty()) {
-                knownNodeKeys.insert(n.nodeKey);
-            }
-        }
-        auto nodeExists = [&](const std::string& nodeKey) -> bool {
-            if (nodeKey.empty()) {
-                return false;
-            }
-            if (knownNodeKeys.contains(nodeKey)) {
-                return true;
-            }
-            auto nodeRes = kgStore->getNodeByKey(nodeKey);
-            if (nodeRes && nodeRes.value().has_value()) {
-                knownNodeKeys.insert(nodeKey);
-                return true;
-            }
-            return false;
-        };
-
-        if (!req.nodes.empty()) {
-            std::vector<KGNode> nodes;
-            nodes.reserve(req.nodes.size());
-            for (const auto& n : req.nodes) {
-                KGNode node;
-                node.nodeKey = n.nodeKey;
-                node.label = n.label.empty() ? std::nullopt : std::make_optional(n.label);
-                node.type = n.type.empty() ? std::nullopt : std::make_optional(n.type);
-                node.properties =
-                    n.properties.empty() ? std::nullopt : std::make_optional(n.properties);
-                nodes.push_back(std::move(node));
-            }
-            wb->ops.emplace_back(UpsertNodesOp{std::move(nodes)});
-        }
-
-        if (!req.edges.empty()) {
-            std::vector<DeferredEdgeOp> deferred;
-            deferred.reserve(req.edges.size());
-            for (const auto& edge : req.edges) {
-                const bool srcOk = nodeExists(edge.srcNodeKey);
-                const bool dstOk = nodeExists(edge.dstNodeKey);
-                if (!srcOk || !dstOk) {
-                    ++resp.edgesSkipped;
-                    if (!srcOk) {
-                        resp.errors.push_back("Edge source node not found: " + edge.srcNodeKey);
-                    }
-                    if (!dstOk) {
-                        resp.errors.push_back("Edge destination node not found: " +
-                                              edge.dstNodeKey);
-                    }
-                    continue;
-                }
-                DeferredEdgeOp op;
-                op.srcNodeKey = edge.srcNodeKey;
-                op.dstNodeKey = edge.dstNodeKey;
-                op.relation = edge.relation;
-                op.weight = edge.weight;
-                op.properties =
-                    edge.properties.empty() ? std::nullopt : std::make_optional(edge.properties);
-                deferred.push_back(std::move(op));
-            }
-            wb->ops.emplace_back(AddDeferredEdgesOp{std::move(deferred)});
-        }
-
-        if (!req.aliases.empty()) {
-            std::vector<KGAlias> aliases;
-            aliases.reserve(req.aliases.size());
-            for (const auto& a : req.aliases) {
-                if (!nodeExists(a.nodeKey)) {
-                    ++resp.aliasesSkipped;
-                    resp.errors.push_back("Alias node not found: " + a.nodeKey);
-                    continue;
-                }
-                KGAlias alias;
-                alias.nodeId = 0;
-                alias.alias = a.alias;
-                std::string realSource = a.source.empty() ? std::string{} : a.source;
-                alias.source = realSource + "|" + a.nodeKey;
-                alias.confidence = a.confidence;
-                aliases.push_back(std::move(alias));
-            }
-            wb->ops.emplace_back(AddAliasesOp{std::move(aliases)});
-        }
-
-        coord->enqueue(std::move(wb));
-        auto fr = coord->flush();
-        if (!fr) {
-            resp.success = false;
-            const auto validEdges = req.edges.size() - resp.edgesSkipped;
-            const auto validAliases = req.aliases.size() - resp.aliasesSkipped;
-            if (!req.nodes.empty()) {
-                resp.errors.push_back("Node upsert failed: " + fr.error().message);
-            } else if (validEdges > 0) {
-                resp.errors.push_back("Edge insert failed: " + fr.error().message);
-            } else if (validAliases > 0) {
-                resp.success = true;
-                resp.errors.push_back("Alias insert failed: " + fr.error().message);
-            } else {
-                resp.errors.push_back("Flush failed: " + fr.error().message);
-            }
-        } else {
-            resp.success = true;
-            resp.nodesInserted = static_cast<uint32_t>(req.nodes.size());
-            resp.edgesInserted = static_cast<uint32_t>(req.edges.size() - resp.edgesSkipped);
-            resp.aliasesInserted = static_cast<uint32_t>(req.aliases.size() - resp.aliasesSkipped);
-        }
-        spdlog::info("KgIngest (via WriteCoordinator) completed: {} nodes, {} edges, {} aliases",
-                     resp.nodesInserted, resp.edgesInserted, resp.aliasesInserted);
+    if (!coord) {
+        resp.success = false;
+        resp.errors.push_back("WriteCoordinator unavailable");
         co_return resp;
     }
 
-    resp.success = false;
-    resp.errors.push_back("WriteCoordinator unavailable");
+    // One op classifies and writes every row inside the writer's transaction, so the counts
+    // below are rows inserted/updated/skipped, not request sizes.
+    IngestGraphOp op;
+    op.skipExistingNodes = req.skipExistingNodes;
+    op.skipExistingEdges = req.skipExistingEdges;
+    op.nodes.reserve(req.nodes.size());
+    for (const auto& n : req.nodes) {
+        KGNode node;
+        node.nodeKey = n.nodeKey;
+        node.label = n.label.empty() ? std::nullopt : std::make_optional(n.label);
+        node.type = n.type.empty() ? std::nullopt : std::make_optional(n.type);
+        node.properties = n.properties.empty() ? std::nullopt : std::make_optional(n.properties);
+        op.nodes.push_back(std::move(node));
+    }
+    op.edges.reserve(req.edges.size());
+    for (const auto& edge : req.edges) {
+        DeferredEdgeOp deferred;
+        deferred.srcNodeKey = edge.srcNodeKey;
+        deferred.dstNodeKey = edge.dstNodeKey;
+        deferred.relation = edge.relation;
+        deferred.weight = edge.weight;
+        deferred.properties =
+            edge.properties.empty() ? std::nullopt : std::make_optional(edge.properties);
+        op.edges.push_back(std::move(deferred));
+    }
+    op.aliases.reserve(req.aliases.size());
+    for (const auto& a : req.aliases) {
+        op.aliases.push_back(GraphIngestAlias{a.nodeKey, a.alias, a.source, a.confidence});
+    }
+    auto outcome = std::make_shared<GraphIngestOutcome>();
+    op.outcome = outcome;
+
+    auto wb = std::make_unique<WriteBatch>();
+    wb->source = "RPC::ingestGraph";
+    wb->ops.emplace_back(std::move(op));
+    coord->enqueue(std::move(wb));
+    auto fr = coord->flush();
+
+    resp.nodesInserted = outcome->nodesInserted;
+    resp.nodesUpdated = outcome->nodesUpdated;
+    resp.nodesSkipped = outcome->nodesSkipped;
+    resp.edgesInserted = outcome->edgesInserted;
+    resp.edgesUpdated = outcome->edgesUpdated;
+    resp.edgesSkipped = outcome->edgesSkipped;
+    resp.aliasesInserted = outcome->aliasesInserted;
+    resp.aliasesSkipped = outcome->aliasesSkipped;
+    resp.unresolvedEdges.reserve(outcome->unresolvedEdges.size());
+    for (const auto& edge : outcome->unresolvedEdges) {
+        if (edge.srcMissing) {
+            resp.errors.push_back("Edge source node not found: " + edge.srcNodeKey);
+        }
+        if (edge.dstMissing) {
+            resp.errors.push_back("Edge destination node not found: " + edge.dstNodeKey);
+        }
+        resp.unresolvedEdges.push_back(KgIngestUnresolvedEdge{
+            edge.srcNodeKey, edge.dstNodeKey, edge.relation, edge.srcMissing, edge.dstMissing});
+    }
+    for (const auto& key : outcome->unresolvedAliasKeys) {
+        resp.errors.push_back("Alias node not found: " + key);
+    }
+
+    if (!fr) {
+        resp.success = false;
+        switch (outcome->failedStage) {
+            case GraphIngestOutcome::Stage::Nodes:
+                resp.errors.push_back("Node upsert failed: " + fr.error().message);
+                break;
+            case GraphIngestOutcome::Stage::Edges:
+                resp.errors.push_back("Edge insert failed: " + fr.error().message);
+                break;
+            case GraphIngestOutcome::Stage::Aliases:
+                // Nodes and edges were committed; only the aliases are missing.
+                resp.success = true;
+                resp.errors.push_back("Alias insert failed: " + fr.error().message);
+                break;
+            case GraphIngestOutcome::Stage::None:
+                resp.errors.push_back("Flush failed: " + fr.error().message);
+                break;
+        }
+    } else if (!outcome->applied) {
+        resp.success = false;
+        resp.errors.push_back("Graph ingest was not applied");
+    } else {
+        resp.success = true;
+    }
+    spdlog::info("KgIngest completed: nodes +{} ~{} ={}, edges +{} ~{} ={} ({} unresolved), "
+                 "aliases +{} ={}",
+                 resp.nodesInserted, resp.nodesUpdated, resp.nodesSkipped, resp.edgesInserted,
+                 resp.edgesUpdated, resp.edgesSkipped, resp.unresolvedEdges.size(),
+                 resp.aliasesInserted, resp.aliasesSkipped);
+    co_return resp;
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handleKgRemoveRequest(const KgRemoveRequest& req) {
+    if (req.ns.empty()) {
+        co_return dispatch::makeErrorResponse(
+            ErrorCode::InvalidArgument,
+            "Graph removal requires a namespace (properties.ns); relation-only removal is not "
+            "supported");
+    }
+    auto* coord = serviceManager_ ? serviceManager_->getWriteCoordinator() : nullptr;
+    if (!coord) {
+        co_return dispatch::makeErrorResponse(ErrorCode::NotInitialized,
+                                              "WriteCoordinator unavailable");
+    }
+
+    DeleteGraphNamespaceOp op;
+    op.ns = req.ns;
+    if (!req.relation.empty()) {
+        op.relation = req.relation;
+    }
+    op.dryRun = req.dryRun;
+    auto outcome = std::make_shared<GraphNamespaceRemovalOutcome>();
+    op.outcome = outcome;
+
+    auto wb = std::make_unique<WriteBatch>();
+    wb->source = "RPC::removeGraphNamespace";
+    wb->ops.emplace_back(std::move(op));
+    coord->enqueue(std::move(wb));
+    if (auto fr = coord->flush(); !fr) {
+        co_return dispatch::makeErrorResponse(fr.error().code,
+                                              "Graph removal failed: " + fr.error().message);
+    }
+    if (!outcome->applied) {
+        co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                              "Graph removal was not applied");
+    }
+
+    KgRemoveResponse resp;
+    resp.nodesRemoved =
+        static_cast<uint64_t>(std::max<std::int64_t>(0, outcome->counts.nodesDeleted));
+    resp.edgesRemoved =
+        static_cast<uint64_t>(std::max<std::int64_t>(0, outcome->counts.edgesDeleted));
+    resp.dryRun = req.dryRun;
+    spdlog::info("KgRemove ns='{}' relation='{}' dry_run={}: {} nodes, {} edges", req.ns,
+                 req.relation, req.dryRun, resp.nodesRemoved, resp.edgesRemoved);
     co_return resp;
 }
 

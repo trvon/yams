@@ -2832,9 +2832,9 @@ struct KgIngestRequest {
     // Optional: associate all entities with a document
     std::string documentHash; // If set, links entities to this document
 
-    // Options
-    bool skipExistingNodes{true}; // Skip nodes that already exist (by nodeKey)
-    bool skipExistingEdges{true}; // Skip edges that already exist (by src/dst/relation)
+    // Options. Default is upsert: existing nodes/edges are refreshed and counted as updated.
+    bool skipExistingNodes{false}; // Leave nodes that already exist (by nodeKey) untouched
+    bool skipExistingEdges{false}; // Leave edges that already exist (src/dst/relation) untouched
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -3193,6 +3193,30 @@ struct UnlinkPathRequest {
     }
 };
 
+// Scoped graph removal. A distinct operation, never a KgIngestRequest flag: an older daemon
+// would ignore the flag and ingest. The namespace is required; there is no relation-only form.
+struct KgRemoveRequest {
+    std::string ns;       // Matches properties.ns on nodes and edges. Must not be empty.
+    std::string relation; // Optional: only edges with this relation (nodes are kept).
+    bool dryRun{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << ns << relation << dryRun;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<KgRemoveRequest> deserialize(Deserializer& deser) {
+        KgRemoveRequest request;
+        YAMS_TRY(ipc_detail::readField(deser, request.ns));
+        YAMS_TRY(ipc_detail::readField(deser, request.relation));
+        YAMS_TRY(ipc_detail::readField(deser, request.dryRun));
+        return request;
+    }
+};
+
 // Variant type for all requests
 using Request = std::variant<
     SearchRequest, GetRequest, GetInitRequest, GetChunkRequest, GetEndRequest, DeleteRequest,
@@ -3206,6 +3230,6 @@ using Request = std::variant<
     RestoreCollectionRequest, RestoreSnapshotRequest, GraphQueryRequest, GraphExploreRequest,
     GraphSymbolLookupRequest, GraphTraceRequest, GraphRepairRequest, GraphValidateRequest,
     KgIngestRequest, MetadataValueCountsRequest, MemorySyncRequest, RepairRequest,
-    UnlinkPathRequest>;
+    UnlinkPathRequest, KgRemoveRequest>;
 
 } // namespace yams::daemon

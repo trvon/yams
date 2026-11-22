@@ -1880,6 +1880,7 @@ public:
                 DELETE FROM kg_nodes
                 WHERE CASE WHEN json_valid(properties)
                            THEN json_extract(properties, '$.document_hash') END = ?
+                  AND CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
             )");
             if (!symStmtR)
                 return symStmtR.error();
@@ -1923,10 +1924,11 @@ public:
             // covered by deleteNodesForDocumentHash. Their edges cascade via FK once removed.
             auto stmtR = db.prepare(R"(
                 DELETE FROM kg_nodes
-                WHERE CASE WHEN json_valid(properties)
+                WHERE (CASE WHEN json_valid(properties)
                            THEN json_extract(properties, '$.file_path') END = ?
                    OR CASE WHEN json_valid(properties)
-                           THEN json_extract(properties, '$.source_file') END = ?
+                           THEN json_extract(properties, '$.source_file') END = ?)
+                  AND CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
             )");
             if (!stmtR)
                 return stmtR.error();
@@ -1948,13 +1950,16 @@ public:
         return withWriteConnection([&](Database& db) -> Result<std::int64_t> {
             // NOT IN subqueries exclude NULLs explicitly (SQL NULL semantics would otherwise
             // make the predicate never match). Edges of deleted nodes cascade via FK.
+            // Nodes carrying an `ns` property belong to an external caller (graph ingest) and are
+            // never treated as document-bound; only the doc:/blob: key clauses still apply.
             static constexpr const char* kSql = R"SQL(
                 DELETE FROM kg_nodes WHERE
                   (node_key LIKE 'doc:%' AND substr(node_key, 5) NOT IN
                      (SELECT sha256_hash FROM documents WHERE sha256_hash IS NOT NULL))
                   OR (node_key LIKE 'blob:%' AND substr(node_key, 6) NOT IN
                      (SELECT sha256_hash FROM documents WHERE sha256_hash IS NOT NULL))
-                  OR (CASE WHEN json_valid(properties)
+                  OR (CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
+                      AND ((CASE WHEN json_valid(properties)
                            THEN json_extract(properties, '$.document_hash') END IS NOT NULL
                       AND CASE WHEN json_valid(properties)
                                THEN json_extract(properties, '$.document_hash') END NOT IN
@@ -1968,7 +1973,7 @@ public:
                            THEN json_extract(properties, '$.source_file') END IS NOT NULL
                       AND CASE WHEN json_valid(properties)
                                THEN json_extract(properties, '$.source_file') END NOT IN
-                         (SELECT file_path FROM documents WHERE file_path IS NOT NULL))
+                         (SELECT file_path FROM documents WHERE file_path IS NOT NULL))))
             )SQL";
             auto stmtR = db.prepare(kSql);
             if (!stmtR)
@@ -1988,6 +1993,7 @@ public:
                 DELETE FROM kg_edges
                 WHERE CASE WHEN json_valid(properties)
                            THEN json_extract(properties, '$.source_file') END = ?
+                  AND CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
             )");
             if (!stmtR)
                 return stmtR.error();
@@ -3359,6 +3365,7 @@ public:
             DELETE FROM kg_nodes
             WHERE CASE WHEN json_valid(properties)
                        THEN json_extract(properties, '$.document_hash') END = ?
+              AND CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
         )");
         if (!symStmtR)
             return symStmtR.error();
@@ -3391,6 +3398,7 @@ public:
             DELETE FROM kg_edges
             WHERE CASE WHEN json_valid(properties)
                        THEN json_extract(properties, '$.source_file') END = ?
+              AND CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
         )");
         if (!edgeStmtResult) {
             return edgeStmtResult.error();
@@ -3407,6 +3415,7 @@ public:
             DELETE FROM kg_nodes
             WHERE CASE WHEN json_valid(properties)
                        THEN json_extract(properties, '$.document_hash') END = ?
+              AND CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
         )");
         if (!hashNodeStmtResult) {
             return hashNodeStmtResult.error();
@@ -3415,10 +3424,11 @@ public:
 
         auto pathNodeStmtResult = db.prepare(R"(
             DELETE FROM kg_nodes
-            WHERE CASE WHEN json_valid(properties)
+            WHERE (CASE WHEN json_valid(properties)
                        THEN json_extract(properties, '$.file_path') END = ?
                OR CASE WHEN json_valid(properties)
-                       THEN json_extract(properties, '$.source_file') END = ?
+                       THEN json_extract(properties, '$.source_file') END = ?)
+              AND CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
         )");
         if (!pathNodeStmtResult) {
             return pathNodeStmtResult.error();
@@ -3561,6 +3571,7 @@ public:
             DELETE FROM kg_edges
             WHERE CASE WHEN json_valid(properties)
                        THEN json_extract(properties, '$.source_file') END = ?
+              AND CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
         )");
         if (!stmtR)
             return stmtR.error();
@@ -3597,6 +3608,93 @@ public:
         spdlog::debug("WriteBatch::deleteEdgesByRelation: deleted {} edges for relation {}",
                       deleted, relation);
         return deleted;
+    }
+
+    Result<NamespaceRemovalResult> deleteByNamespace(std::string_view ns,
+                                                     std::optional<std::string_view> relation,
+                                                     bool dryRun) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        if (ns.empty()) {
+            return Error{ErrorCode::InvalidArgument, "Namespace removal requires a namespace"};
+        }
+        if (relation && relation->empty()) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Namespace removal relation must not be empty"};
+        }
+        Database& db = **conn_;
+
+        static constexpr const char* kEdgeNs =
+            "CASE WHEN json_valid(kg_edges.properties) "
+            "THEN json_extract(kg_edges.properties, '$.ns') END = ?1";
+        static constexpr const char* kNodeNs =
+            "SELECT id FROM kg_nodes WHERE CASE WHEN json_valid(properties) "
+            "THEN json_extract(properties, '$.ns') END = ?1";
+
+        std::string edgeWhere = std::string(kEdgeNs);
+        if (relation) {
+            edgeWhere += " AND relation = ?2";
+        } else {
+            edgeWhere += std::string(" OR src_node_id IN (") + kNodeNs + ") OR dst_node_id IN (" +
+                         kNodeNs + ")";
+        }
+        const std::string nodeWhere = std::string("id IN (") + kNodeNs + ")";
+
+        const auto run = [&](const std::string& sql, bool counting) -> Result<std::int64_t> {
+            auto stmtR = db.prepare(sql);
+            if (!stmtR)
+                return stmtR.error();
+            auto stmt = std::move(stmtR).value();
+            if (auto bound = stmt.bind(1, ns); !bound)
+                return bound.error();
+            if (relation && sql.find("?2") != std::string::npos) {
+                if (auto bound = stmt.bind(2, *relation); !bound)
+                    return bound.error();
+            }
+            if (!counting) {
+                if (auto executed = stmt.execute(); !executed)
+                    return executed.error();
+                return static_cast<std::int64_t>(db.changes());
+            }
+            auto stepped = stmt.step();
+            if (!stepped)
+                return stepped.error();
+            return stepped.value() ? stmt.getInt64(0) : std::int64_t{0};
+        };
+
+        NamespaceRemovalResult result;
+        if (dryRun) {
+            auto edges = run("SELECT COUNT(*) FROM kg_edges WHERE " + edgeWhere, true);
+            if (!edges)
+                return edges.error();
+            result.edgesDeleted = edges.value();
+            if (!relation) {
+                auto nodes = run("SELECT COUNT(*) FROM kg_nodes WHERE " + nodeWhere, true);
+                if (!nodes)
+                    return nodes.error();
+                result.nodesDeleted = nodes.value();
+            }
+            return result;
+        }
+
+        // Delete incident edges explicitly rather than relying on the FK cascade so the edge
+        // count is exact and the cached edge total stays consistent.
+        auto edges = run("DELETE FROM kg_edges WHERE " + edgeWhere, false);
+        if (!edges)
+            return edges.error();
+        result.edgesDeleted = edges.value();
+        edgeCountDelta_ -= std::max<std::int64_t>(0, result.edgesDeleted);
+        if (!relation) {
+            auto nodes = run("DELETE FROM kg_nodes WHERE " + nodeWhere, false);
+            if (!nodes)
+                return nodes.error();
+            result.nodesDeleted = nodes.value();
+        }
+        spdlog::debug("WriteBatch::deleteByNamespace: ns={} relation={} nodes={} edges={}", ns,
+                      relation ? *relation : std::string_view{"*"}, result.nodesDeleted,
+                      result.edgesDeleted);
+        return result;
     }
 
     Result<std::int64_t> deleteOrphanedEdges() override {
