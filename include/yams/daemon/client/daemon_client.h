@@ -462,46 +462,4 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
                         ". Possible CLI/daemon protocol mismatch; run 'yams daemon restart'"};
 }
 
-// ============================================================================
-// Circuit Breaker for Resilience
-// ============================================================================
-
-class CircuitBreaker {
-public:
-    enum class State {
-        Closed,  // Normal operation
-        Open,    // Failing, reject requests
-        HalfOpen // Testing recovery
-    };
-
-    struct Config {
-        size_t failureThreshold;
-        size_t successThreshold;
-        std::chrono::seconds openTimeout;
-        std::chrono::seconds halfOpenTimeout;
-
-        Config() : failureThreshold(5), successThreshold(2), openTimeout(30), halfOpenTimeout(10) {}
-    };
-
-    explicit CircuitBreaker(const Config& config = Config{});
-
-    // Record result
-    void recordSuccess();
-    void recordFailure();
-
-    State getState() const { return state_; }
-
-private:
-    void transitionTo(State newState);
-
-    State state_ = State::Closed;
-    Config config_;
-
-    size_t consecutiveFailures_ = 0;
-    size_t consecutiveSuccesses_ = 0;
-
-    std::chrono::steady_clock::time_point lastStateChange_;
-    std::chrono::steady_clock::time_point openedAt_;
-};
-
 } // namespace yams::daemon

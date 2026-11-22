@@ -180,6 +180,32 @@ std::optional<RouteMatch<QueryCommunity>> CommunityRouteFamily::classify(std::st
     return std::nullopt;
 }
 
+std::size_t countWhitespaceTerms(std::string_view query) noexcept {
+    std::size_t terms = 0;
+    bool inTerm = false;
+    for (unsigned char c : query) {
+        const bool space = std::isspace(c) != 0;
+        if (!space && !inTerm) {
+            ++terms;
+        }
+        inTerm = !space;
+    }
+    return terms;
+}
+
+bool isShortQueryBudgeted(QueryIntent intent, std::string_view query) {
+    switch (intent) {
+        case QueryIntent::Code:
+        case QueryIntent::Path:
+            return countWhitespaceTerms(query) <= kShortQueryBudgetMaxTerms;
+        case QueryIntent::Mixed:
+            return tokenCount(query) <= kShortQueryBudgetMaxTerms;
+        case QueryIntent::Prose:
+            return false;
+    }
+    return false;
+}
+
 RouteMatch<QueryIntent> QueryRouter::classifyIntent(std::string_view query) const {
     RouteFamilyRouter<IntentRouteFamily> router;
     return router.classify(query, IntentRouteFamily::Context{})

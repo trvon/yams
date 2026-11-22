@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -101,6 +102,20 @@ struct QueryRouteDecision {
     RouteMatch<QueryRetrievalMode> retrievalMode{QueryRetrievalMode::Hybrid, 0.0f, {}};
     std::optional<RouteMatch<QueryCommunity>> community;
 };
+
+/// Queries of at most this many terms take the short-query semantic budget. It matches the
+/// router's prose boundary: three or more alphanumeric tokens without code signals is prose.
+inline constexpr std::size_t kShortQueryBudgetMaxTerms = 2;
+
+/// Number of whitespace-separated terms. An identifier or path counts as one term, so
+/// "src/search/search_engine.cpp" is 1 term where tokenizeLower() yields 5 tokens.
+[[nodiscard]] std::size_t countWhitespaceTerms(std::string_view query) noexcept;
+
+/// Whether a query gets the short-query semantic budget (capped vector fan-out, no KG or
+/// graph rerank). Code and Path intents need a short query too: one CamelCase word or one
+/// slash makes the router label a whole sentence Code or Path, and a sentence is not a
+/// lookup. Mixed intent keeps its alphanumeric-token rule.
+[[nodiscard]] bool isShortQueryBudgeted(QueryIntent intent, std::string_view query);
 
 class QueryRouter {
 public:

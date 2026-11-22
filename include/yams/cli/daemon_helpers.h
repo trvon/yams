@@ -488,7 +488,6 @@ inline bool operator==(const yams::daemon::ClientConfig& lhs,
            lhs.connectTimeout == rhs.connectTimeout && lhs.headerTimeout == rhs.headerTimeout &&
            lhs.bodyTimeout == rhs.bodyTimeout && lhs.requestTimeout == rhs.requestTimeout &&
            lhs.maxRetries == rhs.maxRetries && lhs.autoStart == rhs.autoStart &&
-           lhs.enableCircuitBreaker == rhs.enableCircuitBreaker &&
            lhs.enableChunkedResponses == rhs.enableChunkedResponses &&
            lhs.maxChunkSize == rhs.maxChunkSize && lhs.maxInflight == rhs.maxInflight &&
            lhs.progressiveOutput == rhs.progressiveOutput &&

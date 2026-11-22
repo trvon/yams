@@ -567,6 +567,24 @@ TEST_CASE("SearchTuner: handles missing KG", "[unit][search_tuner][edge]") {
     CHECK((reason.find("no_kg") != std::string::npos));
 }
 
+TEST_CASE("SearchTuner: no_kg reason reports the edges the gate ignores",
+          "[unit][search_tuner][edge]") {
+    CorpusStats stats;
+    stats.docCount = 500;
+    stats.codeRatio = 0.8f;
+    stats.symbolDensity = 0.0f;
+    // A fresh code store: no kg_doc_entities, ~8 semantic_neighbor edges per doc.
+    stats.kgEdgeCount = 4000;
+    stats.kgEdgeDensity = 8.0;
+    stats.kgRelationalEdgeCount = 12;
+    stats.kgRelationalEdgeDensity = 0.024;
+
+    std::string reason;
+    (void)SearchTuner::computeState(stats, reason);
+    CHECK((reason.find("no_kg(entity_density=0.00, relational_edges=12, "
+                       "non_relational_edges=3988)") != std::string::npos));
+}
+
 TEST_CASE("SearchTuner: seedRuntimeConfig preserves explicit graph overrides without KG",
           "[unit][search_tuner][edge]") {
     CorpusStats stats;
@@ -2198,4 +2216,65 @@ TEST_CASE("SearchTuner: embedding-neighbour edges alone do not enable graph scor
     const auto& p = tuner.getParams();
     CHECK_FALSE(p.graphEnablePathEnumeration);
     CHECK_FALSE(p.enableGraphQueryExpansion);
+}
+
+namespace {
+
+CorpusStats codeCorpusStats(int64_t entityVectorCount) {
+    CorpusStats stats;
+    stats.docCount = 500;
+    stats.codeRatio = 0.85;
+    stats.proseRatio = 0.10;
+    stats.pathDepthAvg = 4.0;
+    stats.pathRelativeDepthAvg = 3.0;
+    stats.embeddingCoverage = 1.0;
+    stats.entityVectorCount = entityVectorCount;
+    return stats;
+}
+
+} // namespace
+
+TEST_CASE("SearchTuner: entity_vector weight is zero when the store has no entity vectors",
+          "[unit][search_tuner][dead_source]") {
+    const auto stats = codeCorpusStats(0);
+    REQUIRE((SearchTuner::computeState(stats) == TuningState::SMALL_CODE));
+
+    SearchTuner tuner(stats);
+    const auto cfg = tuner.getConfig();
+    CHECK((cfg.entityVectorWeight == Approx(0.0f)));
+    // The mass moves to live legs instead of vanishing.
+    const float total = cfg.textWeight + cfg.simeonTextWeight + cfg.vectorWeight +
+                        cfg.entityVectorWeight + cfg.pathTreeWeight + cfg.kgWeight + cfg.tagWeight +
+                        cfg.metadataWeight;
+    CHECK((total == Approx(1.0f).margin(1e-4)));
+    CHECK((cfg.textWeight > 0.0f));
+    CHECK((cfg.vectorWeight > 0.0f));
+
+    SECTION("seedRuntimeConfig cannot resurrect it") {
+        SearchEngineConfig clobber = tuner.getConfig();
+        clobber.entityVectorWeight = 0.25f;
+        tuner.seedRuntimeConfig(clobber);
+        CHECK((tuner.getConfig().entityVectorWeight == Approx(0.0f)));
+    }
+}
+
+TEST_CASE("SearchTuner: entity_vector weight survives when entity vectors exist or are unknown",
+          "[unit][search_tuner][dead_source]") {
+    for (const int64_t count : {int64_t{-1}, int64_t{42}}) {
+        CAPTURE(count);
+        SearchTuner tuner(codeCorpusStats(count));
+        CHECK((tuner.getConfig().entityVectorWeight > 0.0f));
+    }
+}
+
+TEST_CASE("CorpusStats: entity vector count defaults to unknown and round-trips",
+          "[unit][search_tuner][dead_source]") {
+    CorpusStats stats;
+    CHECK((stats.entityVectorCount == -1));
+    CHECK_FALSE(stats.hasNoEntityVectors());
+    CHECK((CorpusStats::fromJson(stats.toJson()).entityVectorCount == -1));
+
+    stats.entityVectorCount = 0;
+    CHECK(stats.hasNoEntityVectors());
+    CHECK((CorpusStats::fromJson(stats.toJson()).entityVectorCount == 0));
 }

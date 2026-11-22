@@ -645,6 +645,32 @@ public:
                                        std::string_view /*relation*/) {
         return Error{ErrorCode::NotImplemented, "Payload-free edge presence is not implemented"};
     }
+
+    // Blob node key ("blob:<sha256>") of the newest snapshot version recorded for a path:
+    // path:logical:<path> --path_version--> path:<snapshot>:<path> --has_version--> blob.
+    // nullopt when the path has no recorded version. Ingest uses it to skip minting a new
+    // snapshot path node when the content at a path is unchanged.
+    virtual Result<std::optional<std::string>> latestPathVersionBlobKey(std::string_view /*path*/) {
+        return Error{ErrorCode::NotImplemented, "Path version lookup is not implemented"};
+    }
+
+    // Distinct non-empty node types present in the store, without counting nodes. The default
+    // derives them from getNodeTypeCounts(); backends with a type index override it to avoid a
+    // full scan.
+    virtual Result<std::vector<std::string>> listNodeTypes() {
+        auto counts = getNodeTypeCounts();
+        if (!counts) {
+            return counts.error();
+        }
+        std::vector<std::string> types;
+        types.reserve(counts.value().size());
+        for (auto& [type, count] : counts.value()) {
+            if (count > 0 && !type.empty()) {
+                types.push_back(std::move(type));
+            }
+        }
+        return types;
+    }
 };
 
 /**

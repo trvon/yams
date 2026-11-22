@@ -532,6 +532,65 @@ public:
         });
     }
 
+    Result<std::vector<std::string>> listNodeTypes() override {
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<std::string>> {
+            // Loose index scan over idx_kg_nodes_type: one probe per distinct type instead of a
+            // GROUP BY over every node (path nodes alone can number in the millions).
+            auto prepared =
+                db.prepare("WITH RECURSIVE types(type) AS ("
+                           " SELECT MIN(type) FROM kg_nodes WHERE type > ''"
+                           " UNION ALL"
+                           " SELECT (SELECT MIN(type) FROM kg_nodes WHERE type > types.type)"
+                           " FROM types WHERE types.type IS NOT NULL)"
+                           " SELECT type FROM types WHERE type IS NOT NULL");
+            if (!prepared) {
+                return prepared.error();
+            }
+            auto stmt = std::move(prepared).value();
+            std::vector<std::string> types;
+            while (true) {
+                auto row = stmt.step();
+                if (!row) {
+                    return row.error();
+                }
+                if (!row.value()) {
+                    break;
+                }
+                types.push_back(stmt.getString(0));
+            }
+            return types;
+        });
+    }
+
+    Result<std::optional<std::string>> latestPathVersionBlobKey(std::string_view path) override {
+        return readPool()->withConnection([&](Database& db) -> Result<std::optional<std::string>> {
+            // Snapshot path node ids grow with ingest order, so the largest is the newest.
+            auto prepared = db.prepare("SELECT blob.node_key FROM kg_nodes AS logical "
+                                       "JOIN kg_edges AS pv ON pv.src_node_id = logical.id "
+                                       "AND pv.relation = 'path_version' "
+                                       "JOIN kg_edges AS hv ON hv.src_node_id = pv.dst_node_id "
+                                       "AND hv.relation = 'has_version' "
+                                       "JOIN kg_nodes AS blob ON blob.id = hv.dst_node_id "
+                                       "WHERE logical.node_key = ? "
+                                       "ORDER BY pv.dst_node_id DESC, hv.id DESC LIMIT 1");
+            if (!prepared) {
+                return prepared.error();
+            }
+            auto stmt = std::move(prepared).value();
+            if (auto bound = stmt.bind(1, "path:logical:" + std::string(path)); !bound) {
+                return bound.error();
+            }
+            auto row = stmt.step();
+            if (!row) {
+                return row.error();
+            }
+            if (!row.value()) {
+                return std::optional<std::string>{};
+            }
+            return std::optional<std::string>{stmt.getString(0)};
+        });
+    }
+
     Result<std::vector<KGNode>> getNodesByKeys(const std::vector<std::string>& nodeKeys) override {
         if (nodeKeys.empty()) {
             return std::vector<KGNode>{};

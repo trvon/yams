@@ -724,6 +724,69 @@ TEST_CASE("DocumentService graph versions remain navigable after content reversi
     }
 }
 
+TEST_CASE("DocumentService re-ingest of unchanged content adds no graph versions",
+          "[document][service][versioning][graph-history]") {
+    DocumentFixture fixture;
+    auto kg = makeSqliteKnowledgeGraphStore(*fixture.pool_);
+    REQUIRE(kg);
+    fixture.documentService_.reset();
+    fixture.appContext_.kgStore = std::shared_ptr<KnowledgeGraphStore>(std::move(kg).value());
+    fixture.metadataRepo_->setKnowledgeGraphStore(fixture.appContext_.kgStore);
+    fixture.documentService_ = makeDocumentService(fixture.appContext_);
+    auto& kgStore = *fixture.appContext_.kgStore;
+    const auto path = fixture.testDir_ / "stable.txt";
+
+    const auto storeRevision = [&](const std::string& content, const std::string& snapshot) {
+        std::ofstream(path) << content;
+        StoreDocumentRequest request;
+        request.path = path.string();
+        request.snapshotId = snapshot;
+        auto stored = fixture.documentService_->store(request);
+        REQUIRE(stored);
+        return stored.value().hash;
+    };
+    const auto pathNodes = [&]() {
+        auto count = kgStore.countNodesByType("path");
+        REQUIRE(count);
+        return count.value();
+    };
+    const auto relationCount = [&](std::string_view relation) {
+        auto counts = kgStore.getRelationTypeCounts();
+        REQUIRE(counts);
+        for (const auto& [name, count] : counts.value()) {
+            if (name == relation) {
+                return count;
+            }
+        }
+        return std::size_t{0};
+    };
+
+    const auto first = storeRevision("stable content\n", "reingest-1");
+    // One logical and one snapshot path node, one version edge pair.
+    CHECK(pathNodes() == 2);
+    CHECK(relationCount("path_version") == 1);
+    CHECK(relationCount("has_version") == 1);
+
+    // Unchanged content under new snapshots: no new path nodes or version edges.
+    CHECK(storeRevision("stable content\n", "reingest-2") == first);
+    CHECK(storeRevision("stable content\n", "reingest-3") == first);
+    CHECK(pathNodes() == 2);
+    CHECK(relationCount("path_version") == 1);
+    CHECK(relationCount("has_version") == 1);
+
+    // Changed content records a new version.
+    CHECK(storeRevision("changed content\n", "reingest-4") != first);
+    CHECK(pathNodes() == 3);
+    CHECK(relationCount("path_version") == 2);
+    CHECK(relationCount("has_version") == 2);
+
+    auto graph = makeGraphQueryService(fixture.appContext_.kgStore, fixture.metadataRepo_);
+    REQUIRE(graph);
+    auto history = graph->getPathHistory({.path = path.string()});
+    REQUIRE(history);
+    CHECK(history.value().history.size() == 2);
+}
+
 TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
     DocumentFixture fixture;
 

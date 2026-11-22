@@ -38,7 +38,6 @@ struct ClientConfig {
     size_t maxRetries = 3;
     std::chrono::milliseconds retryBaseDelay{75};
     bool autoStart = true;
-    bool enableCircuitBreaker = true;
     bool enableChunkedResponses = true;
     size_t maxChunkSize = static_cast<size_t>(512) * static_cast<size_t>(1024);
     size_t maxInflight = 128;

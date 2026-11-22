@@ -165,10 +165,7 @@ search::SearchExecutionContext buildSearchExecutionContext(const AppContext& ctx
 
     const search::QueryRouter router;
     const auto intent = router.classifyIntent(normalizedQuery).label;
-    const auto tokenCount = search::tokenizeLower(std::string(normalizedQuery)).size();
-    const bool shortQueryBudgeted = intent == search::QueryIntent::Code ||
-                                    intent == search::QueryIntent::Path ||
-                                    (intent == search::QueryIntent::Mixed && tokenCount <= 2);
+    const bool shortQueryBudgeted = search::isShortQueryBudgeted(intent, normalizedQuery);
     const auto concurrencyLimit = std::max<std::uint32_t>(1, context.concurrencyLimit);
     const bool pressureBudgeted =
         context.activeRequests >= 2 || (context.activeRequests * 2) >= concurrencyLimit;
@@ -2413,8 +2410,8 @@ private:
                 return resp;
             }
 
-            auto r = ctx_.metadataRepo->search(processedQuery, static_cast<int>(searchReq.limit), 0,
-                                               docIds);
+            auto r = ctx_.metadataRepo->searchKeyword(processedQuery,
+                                                      static_cast<int>(searchReq.limit), 0, docIds);
             if (!r) {
                 return Error{ErrorCode::InternalError,
                              "Full-text search failed: " + r.error().message};
@@ -2426,7 +2423,7 @@ private:
                 searchReq.metadataFilters.empty() && !sessionFilterApplied &&
                 searchReq.scopePathPrefix.empty();
             if (effectiveResults.totalCount == 0 && docIds.has_value() && pathOnlyPrefilter) {
-                auto unfiltered = ctx_.metadataRepo->search(
+                auto unfiltered = ctx_.metadataRepo->searchKeyword(
                     processedQuery, static_cast<int>(searchReq.limit), 0, std::nullopt);
                 if (unfiltered) {
                     effectiveResults = std::move(unfiltered.value());

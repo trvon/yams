@@ -7,22 +7,19 @@
 
 namespace yams::core {
 
-// Minimal, header-only RepairFsm skeleton to enable incremental, non-breaking integration.
-// Coordinates data integrity workflows; implementations can be wired later.
+// Header-only state machine for one repair cycle.
+//
+//   Idle -start-> Scan -> Detect -> Fix -> Reindex -> Complete
+//
+// A cycle only moves forward. advance() may skip stages that have no work this cycle but never
+// re-enters or revisits one. fail() parks an active cycle in Error; retry() restarts it at Scan
+// while the retry budget (Config::max_retries) lasts; reset() returns to Idle for the next
+// cycle. Every rejected transition returns false and leaves the state untouched.
+//
+// Not thread-safe: one owner drives it. Callbacks run inline and must not throw.
 class RepairFsm {
 public:
-    enum class State {
-        Idle,
-        Scan,
-        Detect,
-        Classify,
-        Isolate,
-        Fix,
-        Verify,
-        Reindex,
-        Complete,
-        Error
-    };
+    enum class State { Idle, Scan, Detect, Fix, Reindex, Complete, Error };
 
     struct Config {
         bool enable_online_repair{false};
@@ -49,10 +46,63 @@ public:
     void set_scheduling_hints(SchedulingHints h) noexcept { hints_ = h; }
     SchedulingHints hints() const noexcept { return hints_; }
 
-    // Stage transitions (no-ops for now; enforce basic order with minimal checks)
-    bool start() noexcept { return transition(State::Idle, State::Scan); }
+    // Begins a cycle: Idle -> Scan.
+    bool start() noexcept {
+        if (state_ != State::Idle)
+            return false;
+        return enter(State::Scan);
+    }
 
-    // Retry/backoff hooks (placeholders; actual timing handled by caller)
+    // Moves an active cycle forward to a later stage, or to Complete.
+    bool advance(State next) noexcept {
+        if (!is_active(state_) || !(is_active(next) || next == State::Complete))
+            return false;
+        if (rank(next) <= rank(state_))
+            return false;
+        return enter(next);
+    }
+
+    // Marks the active cycle failed: any stage before Complete -> Error.
+    bool fail() noexcept {
+        if (!is_active(state_))
+            return false;
+        return enter(State::Error);
+    }
+
+    // Restarts a failed cycle: Error -> Scan, while fewer than max_retries retries were spent.
+    // Reports the attempt number and its backoff first; the caller does the waiting.
+    bool retry() noexcept {
+        if (state_ != State::Error || retries_ >= cfg_.max_retries)
+            return false;
+        ++retries_;
+        if (on_backoff_)
+            on_backoff_(retries_, backoff_ms(retries_));
+        return enter(State::Scan);
+    }
+
+    // Ends the cycle, finished, failed or abandoned: any state but Idle -> Idle. Restores the
+    // retry budget.
+    bool reset() noexcept {
+        if (state_ == State::Idle)
+            return false;
+        retries_ = 0;
+        return enter(State::Idle);
+    }
+
+    // Retries spent in the current cycle.
+    std::uint32_t retries() const noexcept { return retries_; }
+
+    // Backoff for the given retry attempt (1-based): repair_backoff_ms doubled per earlier
+    // attempt, saturating.
+    std::uint32_t backoff_ms(std::uint32_t attempt) const noexcept {
+        std::uint64_t ms = cfg_.repair_backoff_ms;
+        for (std::uint32_t i = 1; i < attempt && ms < kMaxBackoffMs; ++i)
+            ms *= 2;
+        return ms > kMaxBackoffMs ? kMaxBackoffMs : static_cast<std::uint32_t>(ms);
+    }
+
+    using BackoffCallback = std::function<void(std::uint32_t attempt, std::uint32_t backoff_ms)>;
+    void set_on_backoff(BackoffCallback cb) { on_backoff_ = std::move(cb); }
     void set_on_state_change(Callback cb) { on_state_change_ = std::move(cb); }
 
     static const char* to_string(State s) noexcept {
@@ -63,14 +113,8 @@ public:
                 return "Scan";
             case State::Detect:
                 return "Detect";
-            case State::Classify:
-                return "Classify";
-            case State::Isolate:
-                return "Isolate";
             case State::Fix:
                 return "Fix";
-            case State::Verify:
-                return "Verify";
             case State::Reindex:
                 return "Reindex";
             case State::Complete:
@@ -82,25 +126,27 @@ public:
     }
 
 private:
-    bool transition(State expect, State next) noexcept {
-        if (state_ != expect)
-            return false;
+    static constexpr std::uint32_t kMaxBackoffMs = 0xFFFFFFFFU;
+
+    // Position in the cycle; the enum order is the stage order.
+    static constexpr std::uint32_t rank(State s) noexcept { return static_cast<std::uint32_t>(s); }
+    // A stage in which work happens: Scan through Reindex.
+    static constexpr bool is_active(State s) noexcept {
+        return rank(s) >= rank(State::Scan) && rank(s) <= rank(State::Reindex);
+    }
+
+    bool enter(State next) noexcept {
         state_ = next;
         if (on_state_change_)
             on_state_change_(state_);
         return true;
     }
-    bool fail() noexcept {
-        state_ = State::Error;
-        if (on_state_change_)
-            on_state_change_(state_);
-        return false;
-    }
 
     State state_{State::Idle};
     Config cfg_{};
     SchedulingHints hints_{};
-    std::function<void(std::uint32_t, std::uint32_t)> on_backoff_{};
+    std::uint32_t retries_{0};
+    BackoffCallback on_backoff_{};
     Callback on_state_change_{};
 };
 

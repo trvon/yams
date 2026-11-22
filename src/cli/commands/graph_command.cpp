@@ -143,15 +143,19 @@ public:
             ->check(CLI::Range(1, 5));
         cmd->add_option(
             "--explore", exploreQuery_,
-            "Build agent-oriented graph context for a symbol, file, or natural-language query");
+            "Build graph context for a symbol, file, or natural-language query; a file expands "
+            "to files in its directory, sharing its tags, or semantically near it");
         cmd->add_option("--max-files", exploreMaxFiles_, "Maximum files to include for --explore")
             ->default_val(8);
 
         // Agent-oriented navigation ops (share --depth where relevant)
-        cmd->add_option("--lookup", lookupSymbol_,
-                        "Resolve a symbol definition (go-to-definition)");
+        cmd->add_option(
+            "--lookup", lookupSymbol_,
+            "Resolve a named node (symbol or ingested); fails on stores with only file nodes");
         cmd->add_option("--at-file", lookupAtFile_, "Disambiguate --lookup by file path substring");
-        cmd->add_option("--trace", traceFrom_, "Trace a path from this symbol (use with --to)");
+        cmd->add_option(
+            "--trace", traceFrom_,
+            "Trace a path from this node (use with --to); needs symbol or ingested nodes");
         cmd->add_option("--to", traceTo_, "Target symbol for --trace");
 
         // Relation filtering for traversal

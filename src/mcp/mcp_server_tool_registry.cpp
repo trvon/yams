@@ -805,7 +805,8 @@ void MCPServer::initializeToolRegistry() {
                      "Operation: 'query' (default) to traverse/explore the graph, 'ingest' to "
                      "upsert nodes/edges/aliases, 'lookup' to resolve a graph node by label or "
                      "alias, 'trace' for a path between two nodes. Removal is the separate "
-                     "'graph_remove' tool"},
+                     "'graph_remove' tool. lookup and trace fail on stores with only file nodes "
+                     "(no ingested nodes and no pre-v0.20 code symbols)"},
                     {"enum", json::array({"query", "ingest", "lookup", "trace"})},
                     {"default", "query"}}},
                   // ── Navigation parameters (lookup/trace) ──

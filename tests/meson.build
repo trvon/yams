@@ -1169,6 +1169,14 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'repair_fsm_wiring',
+    'sources': files('unit/daemon/repair_fsm_wiring_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'repair'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'repair_stalled_processing',
     'sources': files('unit/daemon/repair_stalled_processing_catch2_test.cpp'),
     'deps': test_deps,
@@ -1979,6 +1987,15 @@ if catch2_dep.found()
     'timeout': 30,
   }]
 
+  # Hypotheses the Lean search contracts (formal/topology) take about the C++ search path.
+  catch2_test_table += [{
+    'name': 'search_lean_assumptions',
+    'sources': files('unit/search/search_lean_assumptions_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'lean-contract'],
+    'timeout': 60,
+  }]
+
 #TuningSlot tests(provenance - tracking primitives for restructured tuning pipeline)
 #TuningSlot provenance tests
   catch2_test_table += [{
@@ -2655,6 +2672,15 @@ if catch2_dep.found()
     'timeout': 60,
   }]
 
+  # Hypotheses the Lean topology contracts (formal/topology) take about the C++ engines.
+  catch2_test_table += [{
+    'name': 'topology_lean_assumptions',
+    'sources': files('unit/topology/topology_lean_assumptions_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology', 'lean-contract'],
+    'timeout': 60,
+  }]
+
   catch2_test_table += [{
     'name': 'topology_identity',
     'sources': files('unit/topology/protected_relation_identity_catch2_test.cpp'),
@@ -2930,6 +2956,15 @@ if catch2_dep.found()
     'sources': files('unit/core/uuid_test.cpp'),
     'deps': core_test_deps,
     'suite': ['catch2', 'unit', 'core', 'uuid'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
+    'name': 'core_repair_fsm',
+    'target': 'core_repair_fsm',
+    'sources': files('unit/core/repair_fsm_catch2_test.cpp'),
+    'deps': core_test_deps,
+    'suite': ['catch2', 'unit', 'core', 'repair'],
     'timeout': 60,
   }]
 

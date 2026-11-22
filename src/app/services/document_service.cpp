@@ -1910,6 +1910,35 @@ public:
         recordDocumentStorePhase("path_tree", pathTreeStart);
     }
 
+    // True when the newest snapshot version recorded for this path already points at this
+    // content. Re-ingesting unchanged files used to mint a new path:<snapshot>:<path> node plus
+    // path_version and has_version edges on every store, so the graph grew without bound.
+    bool pathVersionUnchanged(const metadata::DocumentInfo& info) {
+        auto latest = ctx_.kgStore->latestPathVersionBlobKey(info.filePath);
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked in the same expression
+        return latest && latest.value() && *latest.value() == "blob:" + info.sha256Hash;
+    }
+
+    void linkSnapshotPathVersion(const metadata::DocumentInfo& info, const std::string& snapshotId,
+                                 std::int64_t blobNodeId) {
+        metadata::PathNodeDescriptor pathDesc;
+        pathDesc.snapshotId = snapshotId;
+        pathDesc.path = info.filePath;
+        pathDesc.isDirectory = false;
+
+        auto pathNodeResult = ctx_.kgStore->ensurePathNode(pathDesc);
+        if (!pathNodeResult) {
+            spdlog::debug("Failed to ensure KG path node for {}: {}", info.filePath,
+                          pathNodeResult.error().message);
+            return;
+        }
+        auto linkResult = ctx_.kgStore->linkPathVersion(pathNodeResult.value(), blobNodeId, 0);
+        if (!linkResult) {
+            spdlog::debug("Failed to link KG path version for {}: {}", info.filePath,
+                          linkResult.error().message);
+        }
+    }
+
     void syncStoreKnowledgeGraph(const metadata::DocumentInfo& info,
                                  const std::string& snapshotId) {
         // Keep the lightweight corpus graph in sync for single-document stores so
@@ -1918,6 +1947,7 @@ public:
         if (ctx_.kgStore) {
             try {
                 auto* writeCoord = getWriteCoordinator();
+                const bool versionUnchanged = pathVersionUnchanged(info);
                 if (writeCoord) {
                     std::string blobNodeKey = std::string("blob:") + info.sha256Hash;
                     std::string docNodeKey = std::string("doc:") + info.sha256Hash;
@@ -1951,25 +1981,33 @@ public:
                                                  "\",\"is_directory\":false,\"logical\":true}";
 
                     auto& kc = getKgSyncCoalescer();
-                    kc.addOp(daemon::UpsertNodesOp{{std::move(blobNode), std::move(docNode),
-                                                    std::move(snapshotPathNode),
-                                                    std::move(logicalPathNode)}},
-                             *writeCoord);
+                    // Unchanged content at this path keeps its existing version: no new
+                    // snapshot path node or version edges.
+                    std::vector<metadata::KGNode> nodes;
+                    nodes.push_back(std::move(blobNode));
+                    nodes.push_back(std::move(docNode));
+                    if (!versionUnchanged) {
+                        nodes.push_back(std::move(snapshotPathNode));
+                    }
+                    nodes.push_back(std::move(logicalPathNode));
+                    kc.addOp(daemon::UpsertNodesOp{std::move(nodes)}, *writeCoord);
 
-                    daemon::DeferredEdgeOp pathVerEdge;
-                    pathVerEdge.srcNodeKey = logicalPathKey;
-                    pathVerEdge.dstNodeKey = snapshotPathKey;
-                    pathVerEdge.relation = "path_version";
+                    if (!versionUnchanged) {
+                        daemon::DeferredEdgeOp pathVerEdge;
+                        pathVerEdge.srcNodeKey = logicalPathKey;
+                        pathVerEdge.dstNodeKey = snapshotPathKey;
+                        pathVerEdge.relation = "path_version";
 
-                    daemon::DeferredEdgeOp hasVerEdge;
-                    hasVerEdge.srcNodeKey = snapshotPathKey;
-                    hasVerEdge.dstNodeKey = blobNodeKey;
-                    hasVerEdge.relation = "has_version";
-                    hasVerEdge.properties = "{\"diff_id\":0}";
+                        daemon::DeferredEdgeOp hasVerEdge;
+                        hasVerEdge.srcNodeKey = snapshotPathKey;
+                        hasVerEdge.dstNodeKey = blobNodeKey;
+                        hasVerEdge.relation = "has_version";
+                        hasVerEdge.properties = "{\"diff_id\":0}";
 
-                    kc.addOp(
-                        daemon::AddDeferredEdgesOp{{std::move(pathVerEdge), std::move(hasVerEdge)}},
-                        *writeCoord);
+                        kc.addOp(daemon::AddDeferredEdgesOp{{std::move(pathVerEdge),
+                                                             std::move(hasVerEdge)}},
+                                 *writeCoord);
+                    }
                 } else {
                     auto blobNodeResult = ctx_.kgStore->ensureBlobNode(info.sha256Hash);
                     if (!blobNodeResult) {
@@ -1986,23 +2024,9 @@ public:
                                           info.sha256Hash.substr(0, 8), docNodeIds.error().message);
                         }
 
-                        metadata::PathNodeDescriptor pathDesc;
-                        pathDesc.snapshotId = snapshotId;
-                        pathDesc.path = info.filePath;
-                        pathDesc.isDirectory = false;
-
-                        auto pathNodeResult = ctx_.kgStore->ensurePathNode(pathDesc);
-                        if (!pathNodeResult) {
-                            spdlog::debug("Failed to ensure KG path node for {}: {}", info.filePath,
-                                          pathNodeResult.error().message);
-                        } else {
-                            auto linkResult = ctx_.kgStore->linkPathVersion(
-                                pathNodeResult.value(), blobNodeResult.value(), 0);
-                            if (!linkResult) {
-                                spdlog::debug("Failed to link KG path version for "
-                                              "{}: {}",
-                                              info.filePath, linkResult.error().message);
-                            }
+                        // Unchanged content at this path keeps its existing version.
+                        if (!versionUnchanged) {
+                            linkSnapshotPathVersion(info, snapshotId, blobNodeResult.value());
                         }
                     }
                 }
