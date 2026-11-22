@@ -185,6 +185,11 @@ def listing_env(reg: Registration, base: dict[str, str], windows: bool) -> dict[
     env.update(reg.env)
     if windows and reg.extra_paths:
         env["PATH"] = os.pathsep.join([*reg.extra_paths, env.get("PATH", "")])
+    # Listing writes std::string through Catch2's XML writer. Where Catch2 was built without
+    # ASan's container annotations and the test was built with them, that is reported as a
+    # container-overflow and the listing aborts. Only the listing runs here, never a test.
+    asan = env.get("ASAN_OPTIONS", "")
+    env["ASAN_OPTIONS"] = (asan + ":" if asan else "") + "detect_container_overflow=0"
     return env
 
 
