@@ -559,8 +559,10 @@ TEST_CASE("ProtoSerializer carries graph ingest over the socket transport",
     request.documentHash = "doc-hash";
     request.skipExistingNodes = true;
     request.skipExistingEdges = false;
+    request.ns = "pb";
 
     const auto decoded = roundTripRequest(request);
+    CHECK(decoded.ns == "pb");
     REQUIRE(decoded.nodes.size() == 1);
     CHECK(decoded.nodes[0].nodeKey == "paper:1");
     CHECK(decoded.nodes[0].label == "One");

@@ -841,6 +841,7 @@ message KgIngestRequest {
   string document_hash = 4;
   bool skip_existing_nodes = 5;  // false = upsert (default)
   bool skip_existing_edges = 6;  // false = upsert (default)
+  string ns = 7;  // namespace the request acts for (governs aliases)
 }
 
 message KgIngestUnresolvedEdge {

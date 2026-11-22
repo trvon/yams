@@ -203,11 +203,13 @@ template <typename T> struct GraphCompletionWait {
     bool settledByWriter = false;
 };
 
-template <typename T> GraphCompletionWait<T> awaitGraphCompletion(std::future<Result<T>>& settled) {
-    constexpr auto kGraphOpTimeout = std::chrono::seconds(60);
-    if (settled.wait_for(kGraphOpTimeout) != std::future_status::ready) {
-        return {Error{ErrorCode::Timeout,
-                      "graph write did not finish within 60 s; its outcome is unknown"},
+template <typename T>
+GraphCompletionWait<T> awaitGraphCompletion(std::future<Result<T>>& settled,
+                                            std::chrono::milliseconds timeout) {
+    if (settled.wait_for(timeout) != std::future_status::ready) {
+        return {Error{ErrorCode::Timeout, "graph write did not finish within " +
+                                              std::to_string(timeout.count()) +
+                                              " ms; its outcome is unknown"},
                 false};
     }
     try {
@@ -718,6 +720,7 @@ RequestDispatcher::handleKgIngestRequest(const KgIngestRequest& req) {
     IngestGraphOp op;
     op.skipExistingNodes = req.skipExistingNodes;
     op.skipExistingEdges = req.skipExistingEdges;
+    op.ns = req.ns;
     op.nodes.reserve(req.nodes.size());
     for (const auto& n : req.nodes) {
         KGNode node;
@@ -752,7 +755,7 @@ RequestDispatcher::handleKgIngestRequest(const KgIngestRequest& req) {
     coord->enqueue(std::move(wb));
     // The writer settles this op only after its transaction committed (or failed): no shared
     // flush state, no reading a result the writer is still producing.
-    auto waited = awaitGraphCompletion(settled);
+    auto waited = awaitGraphCompletion(settled, coord->graphOpResultTimeout());
     auto& result = waited.result;
     if (!result) {
         // Nothing from this request is durable; report no rows.
@@ -851,7 +854,7 @@ RequestDispatcher::handleKgRemoveRequest(const KgRemoveRequest& req) {
     wb->source = "RPC::removeGraphNamespace";
     wb->ops.emplace_back(std::move(op));
     coord->enqueue(std::move(wb));
-    auto waited = awaitGraphCompletion(settled);
+    auto waited = awaitGraphCompletion(settled, coord->graphOpResultTimeout());
     auto& result = waited.result;
     if (!result) {
         co_return dispatch::makeErrorResponse(result.error().code,

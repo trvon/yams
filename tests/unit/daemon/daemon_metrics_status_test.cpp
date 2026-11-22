@@ -6068,6 +6068,107 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         CHECK(r.aliasesUpdated == 1);
     }
 
+    SECTION("kg ingest keeps the owner on label-only updates and guards aliases") {
+        fixture.initMetadata();
+        auto a = fixture.upsertNode("paper:own", "old", "paper", R"({"ns":"pb","doi":"x"})");
+        auto b = fixture.upsertNode("paper:own2", "b", "paper", R"({"ns":"pb"})");
+        fixture.addEdge(a, b, "cites", 1.0f, R"({"ns":"pb","k":1})");
+        fixture.upsertNode("note:plain", "plain", "note");
+
+        KgIngestRequest req;
+        req.ns = "pb";
+        req.nodes.push_back(KgIngestNode{"paper:own", "new label", "paper", ""}); // no properties
+        req.edges.push_back(KgIngestEdge{"paper:own", "paper:own2", "cites", 0.4f, ""});
+        req.aliases.push_back(KgIngestAlias{"paper:own", "own-alias", "unit", 1.0f});
+        req.aliases.push_back(KgIngestAlias{"note:plain", "plain-alias", "unit", 1.0f});
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& r = std::get<KgIngestResponse>(resp);
+        CHECK(r.success);
+        CHECK(r.nodesUpdated == 1);
+        CHECK(r.edgesUpdated == 1);
+        CHECK(r.aliasesInserted == 1);
+        CHECK(r.aliasesSkipped == 1);
+        REQUIRE(r.nsConflicts.size() == 1);
+        CHECK(r.nsConflicts[0].kind == "alias");
+        CHECK(r.nsConflicts[0].nodeKey == "note:plain");
+        CHECK(r.nsConflicts[0].requestedNs == "pb");
+
+        auto node = fixture.kgStore->getNodeByKey("paper:own");
+        REQUIRE(node.has_value());
+        REQUIRE(node.value().has_value());
+        CHECK(node.value()->label.value_or("") == "new label");
+        CHECK(node.value()->properties.value_or("") == R"({"ns":"pb","doi":"x"})");
+        auto edges = fixture.kgStore->getEdgesFrom(a, std::string_view("cites"), 10, 0);
+        REQUIRE(edges.has_value());
+        REQUIRE(edges.value().size() == 1);
+        CHECK(edges.value()[0].properties.value_or("") == R"({"ns":"pb","k":1})");
+        CHECK(edges.value()[0].weight == Catch::Approx(0.4f));
+
+        // Without a request namespace, aliases may only go on un-namespaced nodes.
+        KgIngestRequest unscoped;
+        unscoped.aliases.push_back(KgIngestAlias{"paper:own", "x-alias", "unit", 1.0f});
+        unscoped.aliases.push_back(KgIngestAlias{"note:plain", "y-alias", "unit", 1.0f});
+        auto unscopedResp = dispatchRequest(*fixture.dispatcher, Request{unscoped});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(unscopedResp));
+        const auto& u = std::get<KgIngestResponse>(unscopedResp);
+        CHECK(u.aliasesInserted == 1);
+        REQUIRE(u.nsConflicts.size() == 1);
+        CHECK(u.nsConflicts[0].nodeKey == "paper:own");
+        CHECK(u.nsConflicts[0].existingNs == "pb");
+    }
+
+    SECTION("kg ingest refuses namespaced writes to every YAMS-generated key form") {
+        fixture.initMetadata();
+        KgIngestRequest req;
+        for (const auto* key :
+             {"doc:h", "blob:h", "path:file:/a", "path:dir:/a", "path:logical:/a", "tag:x",
+              "nl_entity:person:x", "topology:cluster:1", "segment:title:x", "sym:f@snap:s1"}) {
+            req.nodes.push_back(KgIngestNode{key, "k", "t", R"({"ns":"pb"})"});
+        }
+        req.nodes.push_back(KgIngestNode{"paper:fine", "k", "t", R"({"ns":"pb"})"});
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& r = std::get<KgIngestResponse>(resp);
+        CHECK(r.nodesInserted == 1);
+        REQUIRE(r.nsConflicts.size() == 10);
+        for (const auto& c : r.nsConflicts) {
+            INFO(c.nodeKey);
+            CHECK(c.reason == "reserved_key");
+        }
+    }
+
+    SECTION("kg ingest reports an unknown outcome when the writer is too slow") {
+        fixture.initMetadata();
+        fixture.svc->getWriteCoordinator()->shutdown();
+        WriteCoordinator::Config cfg;
+        cfg.graphOpResultTimeout = std::chrono::milliseconds{50};
+        auto slow =
+            std::make_unique<WriteCoordinator>(fixture.writeIo, fixture.kgStore, fixture.repo, cfg);
+        slow->testing_setBeforeKgCommitHook([]() -> Result<void> {
+            std::this_thread::sleep_for(std::chrono::milliseconds{400});
+            return Result<void>();
+        });
+        slow->start();
+        fixture.svc->__test_setWriteCoordinator(std::move(slow));
+
+        KgIngestRequest req;
+        req.nodes.push_back(KgIngestNode{"paper:slow", "S", "paper", R"({"ns":"pb"})"});
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& r = std::get<KgIngestResponse>(resp);
+        CHECK_FALSE(r.success);
+        CHECK(r.nodesInserted == 0);
+        REQUIRE(r.errors.size() == 1);
+        CHECK(r.errors[0].find("outcome is unknown") != std::string::npos);
+
+        // The write itself still lands; only this response could not say so.
+        REQUIRE(fixture.svc->getWriteCoordinator()->flush(std::chrono::seconds{10}).has_value());
+        auto node = fixture.kgStore->getNodeByKey("paper:slow");
+        REQUIRE(node.has_value());
+        CHECK(node.value().has_value());
+    }
+
     SECTION("kg ingest reports nothing written when the transaction does not commit") {
         fixture.initMetadata();
         fixture.svc->getWriteCoordinator()->testing_setBeforeKgCommitHook(

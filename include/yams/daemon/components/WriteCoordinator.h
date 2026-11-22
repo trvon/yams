@@ -245,6 +245,8 @@ struct IngestGraphOp {
     std::vector<GraphIngestAlias> aliases;
     bool skipExistingNodes = false;
     bool skipExistingEdges = false;
+    // Namespace the request acts for; governs which nodes it may alias. Empty: no namespace.
+    std::string ns;
     std::shared_ptr<GraphIngestCompletion> completion;
 };
 // Scoped removal by properties.ns. There is deliberately no relation-only form.
@@ -325,6 +327,9 @@ public:
         bool kgDedupEnabled = true;
         std::size_t kgDedupMaxEdges = 50000;
         std::chrono::milliseconds shutdownTimeout{std::chrono::seconds{30}};
+        // How long a graph ingest/remove request waits for its op to be settled before it
+        // reports the outcome as unknown.
+        std::chrono::milliseconds graphOpResultTimeout{std::chrono::seconds{60}};
     };
 
     struct Stats {
@@ -404,6 +409,9 @@ public:
 
     std::size_t queuedBatches() const;
     [[nodiscard]] std::size_t channelCapacity() const noexcept { return config_.channelCapacity; }
+    [[nodiscard]] std::chrono::milliseconds graphOpResultTimeout() const noexcept {
+        return config_.graphOpResultTimeout;
+    }
     std::size_t inFlight() const { return inFlight_.load(); }
     Stats getStats() const;
 
@@ -416,9 +424,14 @@ public:
 #endif
 
 private:
+    // Always present so YAMS_TESTING does not change WriteCoordinator's object layout: test
+    // binaries define YAMS_TESTING, the daemon library does not (same rule as ConnectionPool's
+    // beforeCreateForTesting_). Only the setter is test-gated; in production it stays empty.
     std::function<Result<void>()> beforeKgCommitForTesting_;
     boost::asio::awaitable<void, boost::asio::any_io_executor> writerLoop();
     Result<void> applyBatches(std::vector<std::unique_ptr<WriteBatch>>& batches);
+    Result<std::optional<metadata::KGNode>>
+    lookupNodeForApply(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, const std::string& key);
     void prefetchDeferredNodeKeys(const std::vector<std::unique_ptr<WriteBatch>>& batches,
                                   std::unordered_map<std::string, std::int64_t>& nodeKeyToId);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, UpsertNodesOp& op,

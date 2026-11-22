@@ -156,6 +156,24 @@ struct DocumentGraphCleanupResult {
 // namespace removal does.
 inline constexpr std::string_view kExternalNamespaceProperty = "ns";
 
+// Node-key forms YAMS itself creates (document, blob, path/version, tag, natural-language entity,
+// topology and segment nodes, and snapshot-versioned "<key>@snap:<id>" copies). An external
+// caller cannot create or adopt such a key under a namespace, so it cannot pre-empt or later
+// remove a node YAMS will write. Keys emitted by entity-extractor plugins are plugin-defined and
+// are not covered.
+inline constexpr std::string_view kYamsReservedNodeKeyPrefixes[] = {
+    "doc:", "blob:", "path:", "tag:", "nl_entity:", "topology:", "segment:"};
+inline constexpr std::string_view kYamsSnapshotKeyMarker = "@snap:";
+
+inline bool isYamsReservedNodeKey(std::string_view key) {
+    for (const auto prefix : kYamsReservedNodeKeyPrefixes) {
+        if (key.starts_with(prefix)) {
+            return true;
+        }
+    }
+    return key.find(kYamsSnapshotKeyMarker) != std::string_view::npos;
+}
+
 struct NamespaceRemovalResult {
     std::int64_t nodesDeleted{0};
     // Every edge removed (or, on a dry run or refusal, that would be removed).

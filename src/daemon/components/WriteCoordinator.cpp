@@ -687,6 +687,11 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                     [&](auto& concrete) -> void {
                         using T = std::decay_t<decltype(concrete)>;
                         Result<void> r;
+                        if (abortApply) {
+                            // The transaction is gone; running more ops would autocommit them.
+                            sourceError = true;
+                            return;
+                        }
                         if constexpr (std::is_same_v<T, UpdateRepairStatusOp> ||
                                       std::is_same_v<T, UpsertTreeSnapshotOp> ||
                                       std::is_same_v<T, SetMetadataBatchOp> ||
@@ -744,6 +749,12 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                     containedGraphFailure = concrete.completion->contained;
                                 }
                             }
+                        }
+                        // Node ids cached for this apply may now name deleted rows.
+                        if constexpr (std::is_same_v<T, DeleteGraphNamespaceOp> ||
+                                      std::is_same_v<T, DeleteNodeByIdOp> ||
+                                      std::is_same_v<T, DeleteNodesForDocumentHashOp>) {
+                            nodeKeyToId.clear();
                         }
                         if (!r) {
                             if (!containedGraphFailure && !firstOpError) {
@@ -806,6 +817,11 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
         if (firstOpError) {
             return *firstOpError;
         }
+    }
+
+    if (hasKgOps && !kg_) {
+        const Error unavailable{ErrorCode::NotInitialized, "Knowledge graph store unavailable"};
+        settleGraphCompletions(batches, &unavailable);
     }
 
     // Release the KG write lease before acquiring a metadata connection (including size-one pools).
@@ -1348,6 +1364,18 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
     return r;
 }
 
+// Resolve a key on the apply's own transaction so a node deleted (or created) earlier in the same
+// apply is seen as such; a committed-state read could return a deleted node's id.
+Result<std::optional<metadata::KGNode>>
+WriteCoordinator::lookupNodeForApply(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
+                                     const std::string& key) {
+    auto node = kgBatch.getNodeByKey(key);
+    if (!node && node.error().code == ErrorCode::NotImplemented && kg_) {
+        return kg_->getNodeByKey(key);
+    }
+    return node;
+}
+
 Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
                                        AddDeferredEdgesOp& op,
                                        std::unordered_map<std::string, std::int64_t>& nodeKeyToId,
@@ -1362,7 +1390,7 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
             return it->second;
         if (!kg_)
             return std::nullopt;
-        auto nodeRes = kg_->getNodeByKey(key);
+        auto nodeRes = lookupNodeForApply(kgBatch, key);
         if (nodeRes && nodeRes.value().has_value()) {
             nodeKeyToId[key] = nodeRes.value()->id;
             return nodeRes.value()->id;
@@ -1414,7 +1442,7 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
                 if (it != nodeKeyToId.end()) {
                     nodeId = it->second;
                 } else if (kg_) {
-                    auto nodeRes = kg_->getNodeByKey(nodeKey);
+                    auto nodeRes = lookupNodeForApply(kgBatch, nodeKey);
                     if (nodeRes && nodeRes.value().has_value()) {
                         // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                         nodeId = nodeRes.value()->id;
@@ -1481,7 +1509,7 @@ RowNamespace storedNamespaceOf(const std::optional<std::string>& properties) {
 }
 
 bool isReservedNodeKey(std::string_view key) {
-    return key.starts_with("doc:") || key.starts_with("blob:");
+    return metadata::isYamsReservedNodeKey(key);
 }
 
 } // namespace
@@ -1508,6 +1536,9 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
     }
     GraphIngestOutcome outcome;
     Stage stage = Stage::Nodes;
+    std::uint64_t nodesWritten = 0;
+    std::uint64_t edgesWritten = 0;
+    std::uint64_t aliasesWritten = 0;
     const auto fail = [&](Error error) -> Result<void> {
         // All or nothing: nothing from this op survives, so nothing is reported as written.
         if (auto undone = kgBatch.rollbackToSavepoint(); !undone) {
@@ -1560,7 +1591,7 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
                 ++outcome.nodesSkipped;
                 continue;
             }
-            const auto requested = namespaceOf(node.properties);
+            auto requested = namespaceOf(node.properties);
             const auto conflict = [&](std::string existing, std::string reason) {
                 ++outcome.nodesSkipped;
                 outcome.nsConflicts.push_back(GraphIngestNsConflict{"node",
@@ -1584,6 +1615,11 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
             if (!existing) {
                 return fail(existing.error());
             }
+            // Omitted properties keep the stored ones (COALESCE upsert), so they keep the
+            // stored owner too: a label- or type-only update is not an ownership change.
+            if (existing.value() && !node.properties) {
+                requested = existing.value()->ns;
+            }
             if (existing.value() && !(existing.value()->ns == requested)) {
                 conflict(nsText(existing.value()->ns), "ns_change");
                 continue;
@@ -1606,8 +1642,7 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
             for (std::size_t i = 0; i < toUpsert.size() && i < ids.value().size(); ++i) {
                 nodes[toUpsert[i].nodeKey] = NodeInfo{ids.value()[i], upsertNs[i]};
             }
-            std::lock_guard<std::mutex> lock(statsMutex_);
-            stats_.nodesUpserted += toUpsert.size();
+            nodesWritten = toUpsert.size();
         }
     }
 
@@ -1617,9 +1652,9 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
         struct EdgeState {
             float weight = 0.0f;
             RowNamespace ns;
+            std::optional<std::string> properties;
         };
         std::unordered_map<std::string, std::optional<EdgeState>> edges;
-        std::uint64_t written = 0;
         for (const auto& deferred : op.edges) {
             auto src = lookup(deferred.srcNodeKey);
             if (!src) {
@@ -1636,7 +1671,7 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
                     !src.value().has_value(), !dst.value().has_value()});
                 continue;
             }
-            const auto requested = namespaceOf(deferred.properties);
+            auto requested = namespaceOf(deferred.properties);
             const auto conflict = [&](std::string existing, std::string reason) {
                 ++outcome.edgesSkipped;
                 outcome.nsConflicts.push_back(GraphIngestNsConflict{"edge",
@@ -1665,11 +1700,17 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
                 std::optional<EdgeState> state;
                 if (stored.value()) {
                     state = EdgeState{stored.value()->weight,
-                                      storedNamespaceOf(stored.value()->properties)};
+                                      storedNamespaceOf(stored.value()->properties),
+                                      stored.value()->properties};
                 }
                 known = edges.emplace(edgeKey, state).first;
             }
             const auto& existing = known->second;
+            // Omitted properties keep the stored owner, as for nodes.
+            const bool inheritProperties = existing && !deferred.properties;
+            if (inheritProperties) {
+                requested = existing->ns;
+            }
             if (existing && !(existing->ns == requested)) {
                 conflict(nsText(existing->ns), "ns_change");
                 continue;
@@ -1683,14 +1724,14 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
             edge.dstNodeId = dstId;
             edge.relation = deferred.relation;
             edge.weight = deferred.weight;
-            edge.properties = deferred.properties;
+            edge.properties = inheritProperties ? existing->properties : deferred.properties;
             if (requested.kind == RowNamespace::Kind::Valid) {
                 // The owner's latest write is the row: weight and properties are replaced.
                 if (auto r = kgBatch.upsertEdgeExact(edge, existing.has_value()); !r) {
                     return fail(r.error());
                 }
                 ++(existing ? outcome.edgesUpdated : outcome.edgesInserted);
-                known->second = EdgeState{edge.weight, requested};
+                known->second = EdgeState{edge.weight, requested, edge.properties};
             } else {
                 // Un-namespaced edges keep the shared merge rule: weight = MAX, properties only
                 // replaced when the new weight is not lower. A lower-weight write changes
@@ -1703,20 +1744,24 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
                     return fail(r.error());
                 }
                 ++(existing ? outcome.edgesUpdated : outcome.edgesInserted);
-                known->second = EdgeState{edge.weight, requested};
+                known->second = EdgeState{edge.weight, requested,
+                                          edge.properties ? edge.properties
+                                          : existing      ? existing->properties
+                                                          : std::nullopt};
             }
-            ++written;
-        }
-        if (written > 0) {
-            std::lock_guard<std::mutex> lock(statsMutex_);
-            stats_.edgesAdded += written;
+            ++edgesWritten;
         }
     }
 
     // ---- aliases ----
     stage = Stage::Aliases;
     {
-        std::uint64_t written = 0;
+        // An alias belongs to its node's owner: the request may only alias nodes owned by the
+        // request's namespace (or, without one, un-namespaced nodes).
+        RowNamespace requestNs;
+        if (!op.ns.empty()) {
+            requestNs = RowNamespace{RowNamespace::Kind::Valid, op.ns};
+        }
         for (auto& intent : op.aliases) {
             auto node = lookup(intent.nodeKey);
             if (!node) {
@@ -1725,6 +1770,18 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
             if (!node.value()) {
                 ++outcome.aliasesSkipped;
                 outcome.unresolvedAliasKeys.push_back(intent.nodeKey);
+                continue;
+            }
+            if (!(node.value()->ns == requestNs)) {
+                ++outcome.aliasesSkipped;
+                outcome.nsConflicts.push_back(GraphIngestNsConflict{"alias",
+                                                                    intent.nodeKey,
+                                                                    {},
+                                                                    {},
+                                                                    {},
+                                                                    nsText(node.value()->ns),
+                                                                    nsText(requestNs),
+                                                                    "ns_change"});
                 continue;
             }
             metadata::KGAlias alias;
@@ -1737,16 +1794,19 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
                 return fail(inserted.error());
             }
             ++(inserted.value() ? outcome.aliasesInserted : outcome.aliasesUpdated);
-            ++written;
-        }
-        if (written > 0) {
-            std::lock_guard<std::mutex> lock(statsMutex_);
-            stats_.aliasesAdded += written;
+            ++aliasesWritten;
         }
     }
 
     if (auto released = kgBatch.releaseSavepoint(); !released) {
         return fail(released.error());
+    }
+    // Only now are the writes part of the transaction; a rolled-back op adds nothing.
+    {
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        stats_.nodesUpserted += nodesWritten;
+        stats_.edgesAdded += edgesWritten;
+        stats_.aliasesAdded += aliasesWritten;
     }
     for (const auto& [key, info] : nodes) {
         if (info) {
@@ -1838,7 +1898,7 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
         if (it != nodeKeyToId.end()) {
             nodeId = it->second;
         } else if (kg_) {
-            auto nodeRes = kg_->getNodeByKey(deferred.nodeKey);
+            auto nodeRes = lookupNodeForApply(kgBatch, deferred.nodeKey);
             if (nodeRes && nodeRes.value().has_value()) {
                 // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
                 nodeId = nodeRes.value()->id;

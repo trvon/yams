@@ -2797,6 +2797,7 @@ template <> struct ProtoBinding<KgIngestRequest> {
         o->set_document_hash(r.documentHash);
         o->set_skip_existing_nodes(r.skipExistingNodes);
         o->set_skip_existing_edges(r.skipExistingEdges);
+        o->set_ns(r.ns);
     }
     static KgIngestRequest get(const Envelope& env) {
         const auto& i = env.kg_ingest_request();
@@ -2817,6 +2818,7 @@ template <> struct ProtoBinding<KgIngestRequest> {
         r.documentHash = i.document_hash();
         r.skipExistingNodes = i.skip_existing_nodes();
         r.skipExistingEdges = i.skip_existing_edges();
+        r.ns = i.ns();
         return r;
     }
 };

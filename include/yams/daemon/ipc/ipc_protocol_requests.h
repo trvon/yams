@@ -2835,6 +2835,9 @@ struct KgIngestRequest {
     // Options. Default is upsert: existing nodes/edges are refreshed and counted as updated.
     bool skipExistingNodes{false}; // Leave nodes that already exist (by nodeKey) untouched
     bool skipExistingEdges{false}; // Leave edges that already exist (src/dst/relation) untouched
+    // Namespace the request acts for (appended; older peers omit it). Aliases may only be added
+    // to nodes owned by this namespace, or to un-namespaced nodes when it is empty.
+    std::string ns;
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -2854,7 +2857,7 @@ struct KgIngestRequest {
         for (const auto& alias : aliases) {
             alias.serialize(ser);
         }
-        ser << documentHash << skipExistingNodes << skipExistingEdges;
+        ser << documentHash << skipExistingNodes << skipExistingEdges << ns;
     }
 
     template <typename Deserializer>
@@ -2912,6 +2915,9 @@ struct KgIngestRequest {
             req.skipExistingEdges = r.value();
         else
             return r.error();
+
+        if (auto r = deser.readString(); r)
+            req.ns = std::move(r.value());
 
         return req;
     }
