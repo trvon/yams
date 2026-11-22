@@ -61,6 +61,18 @@ void populateRuntimeTelemetrySignals(RuntimeTelemetry& telemetry,
 
 namespace {
 
+/// "no_kg" detail: the KG gate reads entity density only, so name the edges it ignores.
+/// Non-relational edges are mostly semantic_neighbor kNN links written by EmbeddingService.
+std::string noKgDetail(const storage::CorpusStats& stats) {
+    const int64_t nonRelational =
+        std::max<int64_t>(0, stats.kgEdgeCount - stats.kgRelationalEdgeCount);
+    std::ostringstream oss;
+    oss << "no_kg(entity_density=" << std::fixed << std::setprecision(2) << stats.symbolDensity
+        << ", relational_edges=" << stats.kgRelationalEdgeCount
+        << ", non_relational_edges=" << nonRelational << ")";
+    return oss.str();
+}
+
 constexpr std::uint64_t kAdaptiveWarmupObservations = 5;
 constexpr std::uint64_t kAdaptiveCooldownObservations = 4;
 constexpr std::uint64_t kAdaptivePersistInterval = 20;
@@ -1304,7 +1316,7 @@ TuningState SearchTuner::computeState(const storage::CorpusStats& stats, std::st
         reason << ", no_embeddings";
     }
     if (!hasKG) {
-        reason << ", no_kg";
+        reason << ", " << noKgDetail(stats);
     }
     if (stats.usedOnlineOverlay) {
         reason << ", overlay_stats";

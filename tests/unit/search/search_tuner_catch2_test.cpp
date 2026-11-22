@@ -567,6 +567,24 @@ TEST_CASE("SearchTuner: handles missing KG", "[unit][search_tuner][edge]") {
     CHECK((reason.find("no_kg") != std::string::npos));
 }
 
+TEST_CASE("SearchTuner: no_kg reason reports the edges the gate ignores",
+          "[unit][search_tuner][edge]") {
+    CorpusStats stats;
+    stats.docCount = 500;
+    stats.codeRatio = 0.8f;
+    stats.symbolDensity = 0.0f;
+    // A fresh code store: no kg_doc_entities, ~8 semantic_neighbor edges per doc.
+    stats.kgEdgeCount = 4000;
+    stats.kgEdgeDensity = 8.0;
+    stats.kgRelationalEdgeCount = 12;
+    stats.kgRelationalEdgeDensity = 0.024;
+
+    std::string reason;
+    (void)SearchTuner::computeState(stats, reason);
+    CHECK((reason.find("no_kg(entity_density=0.00, relational_edges=12, "
+                       "non_relational_edges=3988)") != std::string::npos));
+}
+
 TEST_CASE("SearchTuner: seedRuntimeConfig preserves explicit graph overrides without KG",
           "[unit][search_tuner][edge]") {
     CorpusStats stats;
