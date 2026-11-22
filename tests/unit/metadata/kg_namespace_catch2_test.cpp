@@ -13,6 +13,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/metadata/connection_pool.h>
+#include <yams/metadata/database.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 
@@ -87,6 +88,22 @@ struct NamespaceFixture {
         auto edges = store->getEdgesFrom(src, std::string_view(relation), 100, 0);
         REQUIRE(edges.has_value());
         return edges.value().size();
+    }
+
+    std::string planFor(const std::string& sql) {
+        Database db;
+        REQUIRE(db.open(dbPath.string(), ConnectionMode::ReadOnly).has_value());
+        auto stmt = db.prepare("EXPLAIN QUERY PLAN " + sql);
+        REQUIRE(stmt.has_value());
+        std::string plan;
+        while (true) {
+            auto row = stmt.value().step();
+            REQUIRE(row.has_value());
+            if (!row.value())
+                break;
+            plan += stmt.value().getString(3) + "\n";
+        }
+        return plan;
     }
 
     std::filesystem::path dbPath;
@@ -179,10 +196,10 @@ TEST_CASE("KG namespace: write batch removes only the named namespace",
     fix.edge(other, doc, "cites", R"({"ns":"other"})"); // unrelated
 
     const auto removeWith = [&](std::string_view ns, std::optional<std::string_view> relation,
-                                bool dryRun) {
+                                bool dryRun, bool includeForeign = false) {
         auto batch = fix.store->beginWriteBatch();
         REQUIRE(batch.has_value());
-        auto removed = batch.value()->deleteByNamespace(ns, relation, dryRun);
+        auto removed = batch.value()->deleteByNamespace(ns, relation, dryRun, includeForeign);
         if (removed) {
             REQUIRE(batch.value()->commit().has_value());
         }
@@ -216,15 +233,29 @@ TEST_CASE("KG namespace: write batch removes only the named namespace",
         CHECK(fix.exists("paper:1"));
     }
 
-    SECTION("namespace scope removes its nodes, its edges and edges incident to them") {
+    SECTION("namespace scope refuses to drop other owners' incident edges by default") {
         auto dry = removeWith("paperbridge", std::nullopt, true);
         REQUIRE(dry.has_value());
         CHECK(dry.value().nodesDeleted == 2);
         CHECK(dry.value().edgesDeleted == 4);
+        CHECK(dry.value().foreignEdges == 2); // other:1 -cites-> and doc:keep -mentions->
+        CHECK_FALSE(dry.value().refused);
         CHECK(fix.exists("paper:1"));
 
-        auto removed = removeWith("paperbridge", std::nullopt, false);
+        auto refused = removeWith("paperbridge", std::nullopt, false);
+        REQUIRE(refused.has_value());
+        CHECK(refused.value().refused);
+        CHECK(refused.value().foreignEdges == 2);
+        CHECK(fix.exists("paper:1"));
+        CHECK(fix.edgeCount(p1, "cites") == 1);
+        CHECK(fix.edgeCount(doc, "mentions") == 1);
+    }
+
+    SECTION("namespace scope with foreign edges allowed removes nodes and incident edges") {
+        auto removed = removeWith("paperbridge", std::nullopt, false, true);
         REQUIRE(removed.has_value());
+        CHECK_FALSE(removed.value().refused);
+        CHECK(removed.value().foreignEdges == 2);
         CHECK(removed.value().nodesDeleted == 2);
         CHECK(removed.value().edgesDeleted == 4);
         CHECK_FALSE(fix.exists("paper:1"));
@@ -242,4 +273,110 @@ TEST_CASE("KG namespace: write batch removes only the named namespace",
         CHECK(removed.value().edgesDeleted == 0);
         CHECK(fix.edgeCount(p1, "cites") == 1);
     }
+}
+
+TEST_CASE("KG namespace: only a non-empty string namespace is exempt from cleanup",
+          "[unit][metadata][kg][namespace]") {
+    NamespaceFixture fix;
+    // Malformed owners must not pin a row: they are treated as un-namespaced.
+    for (const auto* props :
+         {R"({"ns":"","document_hash":"h-bad"})", R"({"ns":5,"document_hash":"h-bad"})",
+          R"({"ns":true,"document_hash":"h-bad"})", R"({"ns":{},"document_hash":"h-bad"})",
+          R"({"ns":null,"document_hash":"h-bad"})"}) {
+        fix.node(std::string("sym:bad:") + props, props);
+    }
+    fix.node("paper:good", R"({"ns":"pb","document_hash":"h-bad"})");
+
+    auto deleted = fix.store->deleteNodesForDocumentHash("h-bad");
+    REQUIRE(deleted.has_value());
+    CHECK(deleted.value() == 5);
+    CHECK(fix.exists("paper:good"));
+}
+
+TEST_CASE("KG namespace: relation-wide resets and snapshot pruning keep namespaced edges",
+          "[unit][metadata][kg][namespace]") {
+    NamespaceFixture fix;
+    auto a = fix.node("paper:a", R"({"ns":"pb"})");
+    auto b = fix.node("paper:b", R"({"ns":"pb"})");
+    auto c = fix.node("sym:c", "");
+    fix.edge(a, b, "semantic_neighbor", R"({"ns":"pb"})");
+    fix.edge(c, b, "semantic_neighbor", "");
+
+    auto deleted = fix.store->deleteEdgesByRelation("semantic_neighbor");
+    REQUIRE(deleted.has_value());
+    CHECK(deleted.value() == 1);
+    CHECK(fix.edgeCount(a, "semantic_neighbor") == 1);
+    CHECK(fix.edgeCount(c, "semantic_neighbor") == 0);
+
+    auto batch = fix.store->beginWriteBatch();
+    REQUIRE(batch.has_value());
+    auto batchDeleted = batch.value()->deleteEdgesByRelation("semantic_neighbor");
+    REQUIRE(batchDeleted.has_value());
+    CHECK(batchDeleted.value() == 0);
+    REQUIRE(batch.value()->commit().has_value());
+}
+
+TEST_CASE("KG namespace: removal lookups use the namespace indexes",
+          "[unit][metadata][kg][namespace]") {
+    NamespaceFixture fix;
+    for (const auto* table : {"kg_nodes", "kg_edges"}) {
+        auto plan = fix.planFor(std::string("SELECT id FROM ") + table +
+                                " WHERE CASE WHEN json_valid(properties) THEN "
+                                "json_extract(properties, '$.ns') END = 'pb'");
+        INFO(table << " plan: " << plan);
+        CHECK(plan.find(std::string("idx_") + table + "_ns") != std::string::npos);
+    }
+}
+
+TEST_CASE("KG namespace: write batch savepoints undo writes and keep the transaction",
+          "[unit][metadata][kg][namespace]") {
+    NamespaceFixture fix;
+    auto a = fix.node("n:a", "");
+    auto b = fix.node("n:b", "");
+
+    auto batch = fix.store->beginWriteBatch();
+    REQUIRE(batch.has_value());
+    auto& wb = *batch.value();
+    REQUIRE(wb.beginSavepoint().has_value());
+    REQUIRE(wb.upsertEdgeExact(
+                  KGEdge{.srcNodeId = a, .dstNodeId = b, .relation = "r", .weight = 0.5F}, false)
+                .has_value());
+    auto seen = wb.getEdgeByEndpoints(a, b, "r");
+    REQUIRE(seen.has_value());
+    CHECK(seen.value().has_value());
+    REQUIRE(wb.rollbackToSavepoint().has_value());
+    auto gone = wb.getEdgeByEndpoints(a, b, "r");
+    REQUIRE(gone.has_value());
+    CHECK_FALSE(gone.value().has_value());
+
+    REQUIRE(wb.beginSavepoint().has_value());
+    REQUIRE(wb.upsertEdgeExact(KGEdge{.srcNodeId = a,
+                                      .dstNodeId = b,
+                                      .relation = "r",
+                                      .weight = 0.9F,
+                                      .properties = std::string(R"({"v":1})")},
+                               false)
+                .has_value());
+    // Exact upsert replaces a higher weight too (no MAX merge).
+    REQUIRE(wb.upsertEdgeExact(KGEdge{.srcNodeId = a,
+                                      .dstNodeId = b,
+                                      .relation = "r",
+                                      .weight = 0.1F,
+                                      .properties = std::string(R"({"v":2})")},
+                               true)
+                .has_value());
+    auto first = wb.upsertAliasCounted(KGAlias{.nodeId = a, .alias = "alias-a"});
+    auto second = wb.upsertAliasCounted(KGAlias{.nodeId = a, .alias = "alias-a"});
+    REQUIRE(first.has_value());
+    REQUIRE(second.has_value());
+    CHECK(first.value());
+    CHECK_FALSE(second.value());
+    REQUIRE(wb.releaseSavepoint().has_value());
+    REQUIRE(wb.commit().has_value());
+
+    auto edges = fix.store->getEdgesFrom(a, std::string_view("r"), 10, 0);
+    REQUIRE(edges.has_value());
+    REQUIRE(edges.value().size() == 1);
+    CHECK(edges.value()[0].weight == 0.1F);
+    CHECK(edges.value()[0].properties.value_or("") == R"({"v":2})");
 }

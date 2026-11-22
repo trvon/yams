@@ -6,6 +6,8 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
 
+#include <nlohmann/json.hpp>
+
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -68,6 +70,43 @@ void acknowledgeEmbeddingCompletion(CompleteDocumentEmbeddingsByHashesOp& op,
     }
 }
 
+// Settle graph op completions of one batch. With batchError every op fails (rolled back or
+// never applied); otherwise each op reports its own staged value or op error. Idempotent.
+void settleGraphCompletions(WriteBatch& batch, const Error* batchError) noexcept {
+    const auto settle = [&](auto& completion) {
+        if (!completion || completion->settled) {
+            return;
+        }
+        try {
+            if (batchError) {
+                completion->settle(*batchError);
+            } else if (completion->opError) {
+                completion->settle(*completion->opError);
+            } else {
+                completion->settle(completion->staged);
+            }
+        } catch (...) {
+            spdlog::error("[WriteCoordinator] settling a graph op completion threw");
+        }
+    };
+    for (auto& op : batch.ops) {
+        if (auto* ingest = std::get_if<IngestGraphOp>(&op)) {
+            settle(ingest->completion);
+        } else if (auto* removal = std::get_if<DeleteGraphNamespaceOp>(&op)) {
+            settle(removal->completion);
+        }
+    }
+}
+
+void settleGraphCompletions(std::vector<std::unique_ptr<WriteBatch>>& batches,
+                            const Error* batchError) noexcept {
+    for (auto& batch : batches) {
+        if (batch) {
+            settleGraphCompletions(*batch, batchError);
+        }
+    }
+}
+
 void failEmbeddingAcknowledgements(std::vector<std::unique_ptr<WriteBatch>>& batches,
                                    const Error& error) noexcept {
     for (auto& batch : batches) {
@@ -80,6 +119,8 @@ void failEmbeddingAcknowledgements(std::vector<std::unique_ptr<WriteBatch>>& bat
             }
         }
     }
+    // Graph ops still unsettled here were never committed.
+    settleGraphCompletions(batches, &error);
 }
 
 void failEmbeddingAcknowledgements(WriteBatch& batch, const Error& error) noexcept {
@@ -88,6 +129,7 @@ void failEmbeddingAcknowledgements(WriteBatch& batch, const Error& error) noexce
             acknowledgeEmbeddingCompletion(*completion, error);
         }
     }
+    settleGraphCompletions(batch, &error);
 }
 
 } // namespace
@@ -595,6 +637,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
         YAMS_ZONE_SCOPED_N("WriteCoordinator::applyKG");
         auto batchResult = kg_->beginWriteBatch();
         if (!batchResult) {
+            settleGraphCompletions(batches, &batchResult.error());
             spdlog::error("[WriteCoordinator] beginWriteBatch failed: {}",
                           batchResult.error().message);
             std::lock_guard<std::mutex> lock(statsMutex_);
@@ -722,8 +765,16 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
             spdlog::warn("[WriteCoordinator] coalesced edge flush failed: {}",
                          drained.error().message);
         }
-        auto commitResult = kgBatch.commit();
+        Result<void> commitResult;
+        if (beforeKgCommitForTesting_) {
+            commitResult = beforeKgCommitForTesting_();
+        }
+        if (commitResult) {
+            commitResult = kgBatch.commit();
+        }
         if (!commitResult) {
+            // Nothing in this apply is durable: the batch rolls back when it goes out of scope.
+            settleGraphCompletions(batches, &commitResult.error());
             spdlog::error("[WriteCoordinator] KG batch commit failed: {}",
                           commitResult.error().message);
             std::lock_guard<std::mutex> lock(statsMutex_);
@@ -731,6 +782,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
             TuneAdvisor::reportDbLockError();
             return commitResult.error();
         }
+        settleGraphCompletions(batches, nullptr);
         if (firstOpError) {
             return *firstOpError;
         }
@@ -1367,202 +1419,346 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
     return r;
 }
 
+namespace {
+
+// Owner of a stored or requested row. Only a non-empty JSON string is a namespace; this matches
+// the SQL predicate that exempts namespaced rows from cleanup.
+struct RowNamespace {
+    enum class Kind { Absent, Valid, Invalid };
+    Kind kind = Kind::Absent;
+    std::string value;
+
+    bool operator==(const RowNamespace& other) const {
+        return kind == other.kind && (kind != Kind::Valid || value == other.value);
+    }
+};
+
+RowNamespace namespaceOf(const std::optional<std::string>& properties) {
+    if (!properties || properties->empty()) {
+        return {};
+    }
+    auto parsed = nlohmann::json::parse(*properties, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_object()) {
+        return {};
+    }
+    auto it = parsed.find(std::string(metadata::kExternalNamespaceProperty));
+    if (it == parsed.end()) {
+        return {};
+    }
+    if (!it->is_string() || it->get_ref<const std::string&>().empty()) {
+        return {RowNamespace::Kind::Invalid, it->dump()};
+    }
+    return {RowNamespace::Kind::Valid, it->get<std::string>()};
+}
+
+// A stored namespace that is not a non-empty string never made the row namespaced.
+RowNamespace storedNamespaceOf(const std::optional<std::string>& properties) {
+    auto ns = namespaceOf(properties);
+    if (ns.kind == RowNamespace::Kind::Invalid) {
+        return {};
+    }
+    return ns;
+}
+
+bool isReservedNodeKey(std::string_view key) {
+    return key.starts_with("doc:") || key.starts_with("blob:");
+}
+
+} // namespace
+
 Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
                                        IngestGraphOp& op,
                                        std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
-    if (!op.outcome) {
-        op.outcome = std::make_shared<GraphIngestOutcome>();
+    if (!op.completion) {
+        op.completion = std::make_shared<GraphIngestCompletion>();
     }
-    auto& outcome = *op.outcome;
-    outcome = GraphIngestOutcome{};
-    // Resolve against this transaction, not the pre-apply prefetch: earlier ops in the same
-    // apply may have created or removed the node.
-    const auto lookup = [&](const std::string& key) -> Result<std::optional<std::int64_t>> {
+    auto& completion = *op.completion;
+    using Stage = GraphIngestCompletion::Stage;
+    completion.staged = GraphIngestOutcome{};
+    completion.opError.reset();
+    completion.failedStage = Stage::None;
+
+    if (auto opened = kgBatch.beginSavepoint(); !opened) {
+        completion.opError = opened.error();
+        return opened.error();
+    }
+    GraphIngestOutcome outcome;
+    Stage stage = Stage::Nodes;
+    const auto fail = [&](Error error) -> Result<void> {
+        // All or nothing: nothing from this op survives, so nothing is reported as written.
+        if (auto undone = kgBatch.rollbackToSavepoint(); !undone) {
+            spdlog::error("[WriteCoordinator] graph ingest savepoint rollback failed: {}",
+                          undone.error().message);
+        }
+        completion.failedStage = stage;
+        completion.opError = error;
+        return error;
+    };
+
+    struct NodeInfo {
+        std::int64_t id = 0;
+        RowNamespace ns;
+    };
+    // One lookup per key per op, against this transaction (earlier ops in the apply included).
+    std::unordered_map<std::string, std::optional<NodeInfo>> nodes;
+    const auto lookup = [&](const std::string& key) -> Result<std::optional<NodeInfo>> {
         if (key.empty()) {
-            return std::optional<std::int64_t>{};
+            return std::optional<NodeInfo>{};
+        }
+        if (auto it = nodes.find(key); it != nodes.end()) {
+            return it->second;
         }
         auto node = kgBatch.getNodeByKey(key);
         if (!node) {
             return node.error();
         }
-        if (!node.value().has_value()) {
-            return std::optional<std::int64_t>{};
+        std::optional<NodeInfo> info;
+        if (node.value()) {
+            info = NodeInfo{node.value()->id, storedNamespaceOf(node.value()->properties)};
         }
-        nodeKeyToId[key] = node.value()->id;
-        return std::optional<std::int64_t>{node.value()->id};
+        nodes.emplace(key, info);
+        return info;
     };
-    // Counts for a stage are published only once that stage's write succeeded. A failed op
-    // does not roll back earlier stages (applyBatches commits the transaction), so the
-    // published counts describe what was written.
-    const auto failAt = [&](GraphIngestOutcome::Stage stage, Error error) -> Result<void> {
-        outcome.failedStage = stage;
-        return error;
+    const auto nsText = [](const RowNamespace& ns) {
+        return ns.kind == RowNamespace::Kind::Absent ? std::string{} : ns.value;
     };
 
+    // ---- nodes ----
     {
-        std::uint64_t inserted = 0;
-        std::uint64_t updated = 0;
-        std::uint64_t skipped = 0;
         std::vector<metadata::KGNode> toUpsert;
+        std::vector<RowNamespace> upsertNs;
         toUpsert.reserve(op.nodes.size());
-        std::unordered_set<std::string> seenNodeKeys;
         for (auto& node : op.nodes) {
             if (node.nodeKey.empty()) {
-                ++skipped;
+                ++outcome.nodesSkipped;
                 continue;
             }
-            bool exists = !seenNodeKeys.insert(node.nodeKey).second;
-            if (!exists) {
-                auto existing = lookup(node.nodeKey);
-                if (!existing) {
-                    return failAt(GraphIngestOutcome::Stage::Nodes, existing.error());
-                }
-                exists = existing.value().has_value();
-            }
-            if (exists && op.skipExistingNodes) {
-                ++skipped;
+            const auto requested = namespaceOf(node.properties);
+            const auto conflict = [&](std::string existing, std::string reason) {
+                ++outcome.nodesSkipped;
+                outcome.nsConflicts.push_back(GraphIngestNsConflict{"node",
+                                                                    node.nodeKey,
+                                                                    {},
+                                                                    {},
+                                                                    {},
+                                                                    std::move(existing),
+                                                                    nsText(requested),
+                                                                    std::move(reason)});
+            };
+            if (requested.kind == RowNamespace::Kind::Invalid) {
+                conflict({}, "invalid_ns");
                 continue;
             }
-            ++(exists ? updated : inserted);
+            if (requested.kind == RowNamespace::Kind::Valid && isReservedNodeKey(node.nodeKey)) {
+                conflict({}, "reserved_key");
+                continue;
+            }
+            auto existing = lookup(node.nodeKey);
+            if (!existing) {
+                return fail(existing.error());
+            }
+            if (existing.value() && !(existing.value()->ns == requested)) {
+                conflict(nsText(existing.value()->ns), "ns_change");
+                continue;
+            }
+            if (existing.value() && op.skipExistingNodes) {
+                ++outcome.nodesSkipped;
+                continue;
+            }
+            ++(existing.value() ? outcome.nodesUpdated : outcome.nodesInserted);
+            // A repeated key later in this request is an update of this row.
+            nodes[node.nodeKey] = NodeInfo{existing.value() ? existing.value()->id : 0, requested};
+            upsertNs.push_back(requested);
             toUpsert.push_back(std::move(node));
         }
         if (!toUpsert.empty()) {
             auto ids = kgBatch.upsertNodes(toUpsert);
             if (!ids) {
-                return failAt(GraphIngestOutcome::Stage::Nodes, ids.error());
+                return fail(ids.error());
             }
             for (std::size_t i = 0; i < toUpsert.size() && i < ids.value().size(); ++i) {
-                nodeKeyToId[toUpsert[i].nodeKey] = ids.value()[i];
+                nodes[toUpsert[i].nodeKey] = NodeInfo{ids.value()[i], upsertNs[i]};
             }
             std::lock_guard<std::mutex> lock(statsMutex_);
             stats_.nodesUpserted += toUpsert.size();
         }
-        outcome.nodesInserted = inserted;
-        outcome.nodesUpdated = updated;
-        outcome.nodesSkipped = skipped;
     }
 
+    // ---- edges ----
+    stage = Stage::Edges;
     {
-        std::uint64_t inserted = 0;
-        std::uint64_t updated = 0;
-        std::uint64_t skipped = 0;
-        std::vector<GraphIngestUnresolvedEdge> unresolved;
-        std::vector<metadata::KGEdge> resolved;
-        resolved.reserve(op.edges.size());
-        std::unordered_set<std::string> seenEdges;
+        struct EdgeState {
+            float weight = 0.0f;
+            RowNamespace ns;
+        };
+        std::unordered_map<std::string, std::optional<EdgeState>> edges;
+        std::uint64_t written = 0;
         for (const auto& deferred : op.edges) {
             auto src = lookup(deferred.srcNodeKey);
             if (!src) {
-                return failAt(GraphIngestOutcome::Stage::Edges, src.error());
+                return fail(src.error());
             }
             auto dst = lookup(deferred.dstNodeKey);
             if (!dst) {
-                return failAt(GraphIngestOutcome::Stage::Edges, dst.error());
+                return fail(dst.error());
             }
             if (!src.value() || !dst.value()) {
-                ++skipped;
-                unresolved.push_back(GraphIngestUnresolvedEdge{
+                ++outcome.edgesSkipped;
+                outcome.unresolvedEdges.push_back(GraphIngestUnresolvedEdge{
                     deferred.srcNodeKey, deferred.dstNodeKey, deferred.relation,
                     !src.value().has_value(), !dst.value().has_value()});
                 continue;
             }
-            const auto srcId = *src.value();
-            const auto dstId = *dst.value();
-            const auto edgeKey =
-                std::to_string(srcId) + '\x1f' + std::to_string(dstId) + '\x1f' + deferred.relation;
-            bool exists = !seenEdges.insert(edgeKey).second;
-            if (!exists) {
-                auto page = kgBatch.getEdgesBetweenPage(srcId, dstId, deferred.relation);
-                if (!page) {
-                    return failAt(GraphIngestOutcome::Stage::Edges, page.error());
-                }
-                exists = !page.value().empty();
-            }
-            if (exists && op.skipExistingEdges) {
-                ++skipped;
+            const auto requested = namespaceOf(deferred.properties);
+            const auto conflict = [&](std::string existing, std::string reason) {
+                ++outcome.edgesSkipped;
+                outcome.nsConflicts.push_back(GraphIngestNsConflict{"edge",
+                                                                    {},
+                                                                    deferred.srcNodeKey,
+                                                                    deferred.dstNodeKey,
+                                                                    deferred.relation,
+                                                                    std::move(existing),
+                                                                    nsText(requested),
+                                                                    std::move(reason)});
+            };
+            if (requested.kind == RowNamespace::Kind::Invalid) {
+                conflict({}, "invalid_ns");
                 continue;
             }
-            ++(exists ? updated : inserted);
+            const auto srcId = src.value()->id;
+            const auto dstId = dst.value()->id;
+            const auto edgeKey =
+                std::to_string(srcId) + '\x1f' + std::to_string(dstId) + '\x1f' + deferred.relation;
+            auto known = edges.find(edgeKey);
+            if (known == edges.end()) {
+                auto stored = kgBatch.getEdgeByEndpoints(srcId, dstId, deferred.relation);
+                if (!stored) {
+                    return fail(stored.error());
+                }
+                std::optional<EdgeState> state;
+                if (stored.value()) {
+                    state = EdgeState{stored.value()->weight,
+                                      storedNamespaceOf(stored.value()->properties)};
+                }
+                known = edges.emplace(edgeKey, state).first;
+            }
+            const auto& existing = known->second;
+            if (existing && !(existing->ns == requested)) {
+                conflict(nsText(existing->ns), "ns_change");
+                continue;
+            }
+            if (existing && op.skipExistingEdges) {
+                ++outcome.edgesSkipped;
+                continue;
+            }
             metadata::KGEdge edge;
             edge.srcNodeId = srcId;
             edge.dstNodeId = dstId;
             edge.relation = deferred.relation;
             edge.weight = deferred.weight;
             edge.properties = deferred.properties;
-            resolved.push_back(std::move(edge));
-        }
-        // Unresolved edges are reported even when the write below fails.
-        outcome.unresolvedEdges = std::move(unresolved);
-        if (!resolved.empty()) {
-            if (auto added = kgBatch.addEdgesUnique(resolved); !added) {
-                return failAt(GraphIngestOutcome::Stage::Edges, added.error());
+            if (requested.kind == RowNamespace::Kind::Valid) {
+                // The owner's latest write is the row: weight and properties are replaced.
+                if (auto r = kgBatch.upsertEdgeExact(edge, existing.has_value()); !r) {
+                    return fail(r.error());
+                }
+                ++(existing ? outcome.edgesUpdated : outcome.edgesInserted);
+                known->second = EdgeState{edge.weight, requested};
+            } else {
+                // Un-namespaced edges keep the shared merge rule: weight = MAX, properties only
+                // replaced when the new weight is not lower. A lower-weight write changes
+                // nothing and is counted as skipped.
+                if (existing && deferred.weight < existing->weight) {
+                    ++outcome.edgesSkipped;
+                    continue;
+                }
+                if (auto r = kgBatch.addEdgesUnique({edge}); !r) {
+                    return fail(r.error());
+                }
+                ++(existing ? outcome.edgesUpdated : outcome.edgesInserted);
+                known->second = EdgeState{edge.weight, requested};
             }
-            std::lock_guard<std::mutex> lock(statsMutex_);
-            stats_.edgesAdded += resolved.size();
+            ++written;
         }
-        outcome.edgesInserted = inserted;
-        outcome.edgesUpdated = updated;
-        outcome.edgesSkipped = skipped;
+        if (written > 0) {
+            std::lock_guard<std::mutex> lock(statsMutex_);
+            stats_.edgesAdded += written;
+        }
     }
 
+    // ---- aliases ----
+    stage = Stage::Aliases;
     {
-        std::vector<std::string> unresolvedKeys;
-        std::vector<metadata::KGAlias> aliases;
-        aliases.reserve(op.aliases.size());
+        std::uint64_t written = 0;
         for (auto& intent : op.aliases) {
-            auto nodeId = lookup(intent.nodeKey);
-            if (!nodeId) {
-                return failAt(GraphIngestOutcome::Stage::Aliases, nodeId.error());
+            auto node = lookup(intent.nodeKey);
+            if (!node) {
+                return fail(node.error());
             }
-            if (!nodeId.value()) {
-                unresolvedKeys.push_back(intent.nodeKey);
+            if (!node.value()) {
+                ++outcome.aliasesSkipped;
+                outcome.unresolvedAliasKeys.push_back(intent.nodeKey);
                 continue;
             }
             metadata::KGAlias alias;
-            alias.nodeId = *nodeId.value();
+            alias.nodeId = node.value()->id;
             alias.alias = std::move(intent.alias);
             alias.source = std::move(intent.source);
             alias.confidence = intent.confidence;
-            aliases.push_back(std::move(alias));
-        }
-        outcome.aliasesSkipped = unresolvedKeys.size();
-        outcome.unresolvedAliasKeys = std::move(unresolvedKeys);
-        if (!aliases.empty()) {
-            if (auto added = kgBatch.addAliases(aliases); !added) {
-                return failAt(GraphIngestOutcome::Stage::Aliases, added.error());
+            auto inserted = kgBatch.upsertAliasCounted(alias);
+            if (!inserted) {
+                return fail(inserted.error());
             }
-            std::lock_guard<std::mutex> lock(statsMutex_);
-            stats_.aliasesAdded += aliases.size();
+            ++(inserted.value() ? outcome.aliasesInserted : outcome.aliasesUpdated);
+            ++written;
         }
-        outcome.aliasesInserted = aliases.size();
+        if (written > 0) {
+            std::lock_guard<std::mutex> lock(statsMutex_);
+            stats_.aliasesAdded += written;
+        }
     }
 
-    outcome.applied = true;
+    if (auto released = kgBatch.releaseSavepoint(); !released) {
+        return fail(released.error());
+    }
+    for (const auto& [key, info] : nodes) {
+        if (info) {
+            nodeKeyToId[key] = info->id;
+        }
+    }
+    // Staged only; the result is published after the transaction commits.
+    completion.staged = std::move(outcome);
     return Result<void>();
 }
 
 Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
                                        DeleteGraphNamespaceOp& op) {
+    if (!op.completion) {
+        op.completion = std::make_shared<GraphRemoveCompletion>();
+    }
+    auto& completion = *op.completion;
+    completion.staged = metadata::NamespaceRemovalResult{};
+    completion.opError.reset();
     if (op.ns.empty()) {
-        return Error{ErrorCode::InvalidArgument, "Namespace removal requires a namespace"};
+        completion.opError =
+            Error{ErrorCode::InvalidArgument, "Namespace removal requires a namespace"};
+        return *completion.opError;
     }
     std::optional<std::string_view> relation;
     if (op.relation) {
         relation = *op.relation;
     }
-    auto removed = kgBatch.deleteByNamespace(op.ns, relation, op.dryRun);
+    auto removed = kgBatch.deleteByNamespace(op.ns, relation, op.dryRun, op.includeForeignEdges);
     if (!removed) {
+        completion.opError = removed.error();
         return removed.error();
     }
-    if (!op.dryRun) {
+    if (!op.dryRun && !removed.value().refused) {
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.nodesDeleted += static_cast<std::uint64_t>(removed.value().nodesDeleted);
         stats_.edgesDeleted += static_cast<std::uint64_t>(removed.value().edgesDeleted);
     }
-    if (op.outcome) {
-        op.outcome->counts = removed.value();
-        op.outcome->applied = true;
-    }
+    completion.staged = removed.value();
     return Result<void>();
 }
 

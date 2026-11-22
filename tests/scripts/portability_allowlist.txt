@@ -84,7 +84,7 @@ src/metadata/connection_pool.cpp:1000:portability/jthread # feature-test guarded
 src/metadata/database.cpp:29:portability/env-read # reviewed raw environment read
 src/metadata/database.cpp:476:portability/path-cstr # std::string filename, not filesystem::path
 src/metadata/metadata_repository.cpp:1502:portability/env-read # reviewed raw environment read
-src/metadata/migration.cpp:1565:portability/env-read # reviewed raw environment read
+src/metadata/migration.cpp:1566:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:89:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:103:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:120:portability/env-read # reviewed raw environment read
@@ -253,7 +253,7 @@ tests/unit/cli/version_generated_header_catch2_test.cpp:83:portability/env-read 
 tests/unit/daemon/components/vector_system_manager_test.cpp:129:portability/env-read # reviewed raw environment read
 tests/unit/daemon/components/vector_system_manager_test.cpp:130:portability/env-read # reviewed raw environment read
 tests/unit/daemon/daemon_catch2_test.cpp:1433:portability/env-read # reviewed raw environment read
-tests/unit/daemon/daemon_metrics_status_test.cpp:962:portability/env-read # reviewed raw environment read
+tests/unit/daemon/daemon_metrics_status_test.cpp:963:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:36:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:44:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:52:portability/env-read # reviewed raw environment read

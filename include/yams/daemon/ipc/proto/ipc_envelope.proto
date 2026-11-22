@@ -863,6 +863,19 @@ message KgIngestResponse {
   uint64 nodes_updated = 9;
   uint64 edges_updated = 10;
   repeated KgIngestUnresolvedEdge unresolved_edges = 11;
+  uint64 aliases_updated = 12;
+  repeated KgIngestNsConflict ns_conflicts = 13;
+}
+
+message KgIngestNsConflict {
+  string kind = 1;
+  string node_key = 2;
+  string src_node_key = 3;
+  string dst_node_key = 4;
+  string relation = 5;
+  string existing_ns = 6;
+  string requested_ns = 7;
+  string reason = 8;
 }
 
 // Scoped removal is its own payload, not an ignorable KgIngestRequest flag.
@@ -870,12 +883,15 @@ message KgRemoveRequest {
   string ns = 1;        // required: matches properties.ns
   string relation = 2;  // optional: only edges with this relation
   bool dry_run = 3;
+  bool include_foreign_edges = 4;
 }
 
 message KgRemoveResponse {
   uint64 nodes_removed = 1;
   uint64 edges_removed = 2;
   bool dry_run = 3;
+  uint64 foreign_edges_removed = 4;
+  bool refused = 5;
 }
 
 // Generic metadata value counts query (MCP client mode)

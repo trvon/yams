@@ -586,7 +586,15 @@ TEST_CASE("ProtoSerializer carries graph ingest over the socket transport",
     response.errors = {"Edge destination node not found: paper:9"};
     response.unresolvedEdges.push_back(
         KgIngestUnresolvedEdge{"paper:1", "paper:9", "cites", false, true});
+    response.aliasesUpdated = 7;
+    response.nsConflicts.push_back(
+        KgIngestNsConflict{"node", "sym:x", "", "", "", "", "pb", "ns_change"});
     const auto decodedResponse = roundTripResponse(response);
+    CHECK(decodedResponse.aliasesUpdated == 7);
+    REQUIRE(decodedResponse.nsConflicts.size() == 1);
+    CHECK(decodedResponse.nsConflicts[0].nodeKey == "sym:x");
+    CHECK(decodedResponse.nsConflicts[0].requestedNs == "pb");
+    CHECK(decodedResponse.nsConflicts[0].reason == "ns_change");
     CHECK(decodedResponse.nodesInserted == 3);
     CHECK(decodedResponse.nodesUpdated == 4);
     CHECK(decodedResponse.nodesSkipped == 1);
@@ -609,15 +617,18 @@ TEST_CASE("Graph removal is a distinct, admitted write operation",
     CHECK(getRequestName(request) == "KgRemove");
     CHECK(getMessageType(Response{KgRemoveResponse{}}) == MessageType::KgRemoveResponse);
 
-    const auto decoded = roundTripRequest(KgRemoveRequest{"pb", "cites", true});
+    const auto decoded = roundTripRequest(KgRemoveRequest{"pb", "cites", true, true});
     CHECK(decoded.ns == "pb");
     CHECK(decoded.relation == "cites");
     CHECK(decoded.dryRun);
+    CHECK(decoded.includeForeignEdges);
 
-    const auto decodedResponse = roundTripResponse(KgRemoveResponse{2, 7, true});
+    const auto decodedResponse = roundTripResponse(KgRemoveResponse{2, 7, true, 3, true});
     CHECK(decodedResponse.nodesRemoved == 2);
     CHECK(decodedResponse.edgesRemoved == 7);
     CHECK(decodedResponse.dryRun);
+    CHECK(decodedResponse.foreignEdgesRemoved == 3);
+    CHECK(decodedResponse.refused);
 
     // An older daemon only knows kg_ingest_request (54); it must not see removal as ingest.
     google::protobuf::FileDescriptorProto schema;
@@ -698,8 +709,9 @@ TEST_CASE("KgIngestResponse binary tail is optional for older peers",
     SECTION("pre-tail layout still parses") {
         KgRecordedFields fields;
         current.serialize(fields);
-        // Drop nodesUpdated, edgesUpdated, count and one 5-field unresolved edge.
-        fields.values.resize(fields.values.size() - 8);
+        // Drop the whole tail: nodesUpdated, edgesUpdated, unresolved count and one 5-field
+        // unresolved edge, aliasesUpdated, conflict count.
+        fields.values.resize(fields.values.size() - 10);
         auto parsed = KgIngestResponse::deserialize(fields);
         REQUIRE(parsed.has_value());
         CHECK(parsed.value().nodesInserted == 1);

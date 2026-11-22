@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -164,8 +165,9 @@ struct AddSymSpellTermsOp {
     std::vector<std::string> terms;
 };
 // Caller-facing graph ingest (KgIngestRequest). Unlike UpsertNodesOp/AddDeferredEdgesOp it
-// classifies every row against this transaction's state and reports the outcome, including
-// edges whose endpoints do not resolve, instead of dropping them silently.
+// classifies every row against this transaction's state, enforces namespace ownership, runs in
+// its own savepoint (all or nothing), and reports its outcome only after the KG transaction
+// that holds it committed.
 struct GraphIngestAlias {
     std::string nodeKey;
     std::string alias;
@@ -179,8 +181,21 @@ struct GraphIngestUnresolvedEdge {
     bool srcMissing = false;
     bool dstMissing = false;
 };
+// A row refused because writing it would change who owns it (or would create an invalid owner).
+struct GraphIngestNsConflict {
+    std::string kind; // "node" or "edge"
+    std::string nodeKey;
+    std::string srcNodeKey;
+    std::string dstNodeKey;
+    std::string relation;
+    std::string existingNs; // empty when the stored row has no namespace
+    std::string requestedNs;
+    // "ns_change": the stored row is owned by a different (or no) namespace.
+    // "invalid_ns": properties.ns is present but not a non-empty string.
+    // "reserved_key": doc:/blob: nodes belong to YAMS and cannot take a namespace.
+    std::string reason;
+};
 struct GraphIngestOutcome {
-    enum class Stage { None, Nodes, Edges, Aliases };
     std::uint64_t nodesInserted = 0;
     std::uint64_t nodesUpdated = 0;
     std::uint64_t nodesSkipped = 0;
@@ -188,30 +203,50 @@ struct GraphIngestOutcome {
     std::uint64_t edgesUpdated = 0;
     std::uint64_t edgesSkipped = 0;
     std::uint64_t aliasesInserted = 0;
+    std::uint64_t aliasesUpdated = 0;
     std::uint64_t aliasesSkipped = 0;
     std::vector<GraphIngestUnresolvedEdge> unresolvedEdges;
     std::vector<std::string> unresolvedAliasKeys;
-    Stage failedStage = Stage::None;
-    bool applied = false;
+    std::vector<GraphIngestNsConflict> nsConflicts;
 };
+
+// One-shot result channel for a graph op. The writer settles it exactly once: with the staged
+// value after the KG transaction committed, or with an error when the op failed, the
+// transaction was rolled back, or the writer could not apply it. Destroying an unsettled
+// completion breaks the promise, which waiters observe as an error.
+template <typename T> struct GraphOpCompletion {
+    enum class Stage { None, Nodes, Edges, Aliases };
+    std::promise<Result<T>> promise;
+    T staged{};
+    std::optional<Error> opError;
+    Stage failedStage = Stage::None;
+    bool settled = false;
+
+    void settle(Result<T> result) {
+        if (settled)
+            return;
+        settled = true;
+        promise.set_value(std::move(result));
+    }
+};
+using GraphIngestCompletion = GraphOpCompletion<GraphIngestOutcome>;
+using GraphRemoveCompletion = GraphOpCompletion<metadata::NamespaceRemovalResult>;
+
 struct IngestGraphOp {
     std::vector<metadata::KGNode> nodes;
     std::vector<DeferredEdgeOp> edges;
     std::vector<GraphIngestAlias> aliases;
     bool skipExistingNodes = false;
     bool skipExistingEdges = false;
-    std::shared_ptr<GraphIngestOutcome> outcome;
-};
-struct GraphNamespaceRemovalOutcome {
-    metadata::NamespaceRemovalResult counts;
-    bool applied = false;
+    std::shared_ptr<GraphIngestCompletion> completion;
 };
 // Scoped removal by properties.ns. There is deliberately no relation-only form.
 struct DeleteGraphNamespaceOp {
     std::string ns;
     std::optional<std::string> relation;
     bool dryRun = false;
-    std::shared_ptr<GraphNamespaceRemovalOutcome> outcome;
+    bool includeForeignEdges = false;
+    std::shared_ptr<GraphRemoveCompletion> completion;
 };
 struct AcknowledgeKnowledgeGraphOp {
     std::int64_t documentId{0};
@@ -365,7 +400,16 @@ public:
     std::size_t inFlight() const { return inFlight_.load(); }
     Stats getStats() const;
 
+#if defined(YAMS_TESTING)
+    // Runs on the writer right before the KG batch commits; an error is treated exactly like a
+    // failed commit (the batch rolls back). Install before work is enqueued.
+    void testing_setBeforeKgCommitHook(std::function<Result<void>()> hook) {
+        beforeKgCommitForTesting_ = std::move(hook);
+    }
+#endif
+
 private:
+    std::function<Result<void>()> beforeKgCommitForTesting_;
     boost::asio::awaitable<void, boost::asio::any_io_executor> writerLoop();
     Result<void> applyBatches(std::vector<std::unique_ptr<WriteBatch>>& batches);
     void prefetchDeferredNodeKeys(const std::vector<std::unique_ptr<WriteBatch>>& batches,

@@ -4067,6 +4067,17 @@ struct KgIngestUnresolvedEdge {
     bool dstMissing{false};
 };
 
+struct KgIngestNsConflict {
+    std::string kind; // "node" | "edge"
+    std::string nodeKey;
+    std::string srcNodeKey;
+    std::string dstNodeKey;
+    std::string relation;
+    std::string existingNs;
+    std::string requestedNs;
+    std::string reason; // "ns_change" | "invalid_ns" | "reserved_key"
+};
+
 struct KgIngestResponse {
     uint64_t nodesInserted{0}; // New rows
     uint64_t nodesSkipped{0};  // Existing rows left untouched (skip_existing) or invalid keys
@@ -4080,6 +4091,8 @@ struct KgIngestResponse {
     uint64_t nodesUpdated{0}; // Existing rows refreshed in place
     uint64_t edgesUpdated{0};
     std::vector<KgIngestUnresolvedEdge> unresolvedEdges; // Edges dropped for a missing endpoint
+    uint64_t aliasesUpdated{0};
+    std::vector<KgIngestNsConflict> nsConflicts; // Rows refused to protect row ownership
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -4095,6 +4108,11 @@ struct KgIngestResponse {
         for (const auto& edge : unresolvedEdges) {
             ser << edge.srcNodeKey << edge.dstNodeKey << edge.relation << edge.srcMissing
                 << edge.dstMissing;
+        }
+        ser << aliasesUpdated << static_cast<uint32_t>(nsConflicts.size());
+        for (const auto& c : nsConflicts) {
+            ser << c.kind << c.nodeKey << c.srcNodeKey << c.dstNodeKey << c.relation << c.existingNs
+                << c.requestedNs << c.reason;
         }
     }
 
@@ -4174,6 +4192,21 @@ struct KgIngestResponse {
                 return r.error();
             res.unresolvedEdges.push_back(std::move(edge));
         }
+        if (auto r = ipc_detail::readField(deser, res.aliasesUpdated); !r)
+            return r.error();
+        uint32_t conflictCount = 0;
+        if (auto r = ipc_detail::readField(deser, conflictCount); !r)
+            return r.error();
+        res.nsConflicts.reserve(conflictCount);
+        for (uint32_t i = 0; i < conflictCount; ++i) {
+            KgIngestNsConflict c;
+            for (auto* field : {&c.kind, &c.nodeKey, &c.srcNodeKey, &c.dstNodeKey, &c.relation,
+                                &c.existingNs, &c.requestedNs, &c.reason}) {
+                if (auto r = ipc_detail::readField(deser, *field); !r)
+                    return r.error();
+            }
+            res.nsConflicts.push_back(std::move(c));
+        }
         return res;
     }
 };
@@ -4183,13 +4216,18 @@ struct KgIngestResponse {
  */
 struct KgRemoveResponse {
     uint64_t nodesRemoved{0};
-    uint64_t edgesRemoved{0};
+    uint64_t edgesRemoved{0}; // Includes foreignEdgesRemoved
     bool dryRun{false};
+    // Edges not owned by the namespace (other owners or none) incident to its nodes.
+    uint64_t foreignEdgesRemoved{0};
+    // True when foreign edges exist and the request did not include them: nothing was removed
+    // and the counts say what would have been.
+    bool refused{false};
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << nodesRemoved << edgesRemoved << dryRun;
+        ser << nodesRemoved << edgesRemoved << dryRun << foreignEdgesRemoved << refused;
     }
 
     template <typename Deserializer>
@@ -4201,6 +4239,10 @@ struct KgRemoveResponse {
         if (auto r = ipc_detail::readField(deser, res.edgesRemoved); !r)
             return r.error();
         if (auto r = ipc_detail::readField(deser, res.dryRun); !r)
+            return r.error();
+        if (auto r = ipc_detail::readField(deser, res.foreignEdgesRemoved); !r)
+            return r.error();
+        if (auto r = ipc_detail::readField(deser, res.refused); !r)
             return r.error();
         return res;
     }

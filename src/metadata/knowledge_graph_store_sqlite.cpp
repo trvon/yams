@@ -109,6 +109,13 @@ constexpr auto kKgNodeReplaceExactSql = R"(
       properties = excluded.properties
 )";
 
+// A row is namespaced (owned by an external graph-ingest caller) only when properties.ns is a
+// non-empty JSON string. Anything else (absent, "", 5, true, {}, invalid JSON) is not namespaced,
+// so it stays subject to document cleanup and can never be pinned out of reach.
+constexpr const char* kNotNamespacedSql =
+    "NOT COALESCE(CASE WHEN json_valid(properties) THEN json_type(properties, '$.ns') = 'text' "
+    "AND json_extract(properties, '$.ns') <> '' END, 0)";
+
 constexpr auto kKgAliasUpsertSql = R"(
     INSERT INTO kg_aliases (node_id, alias, source, confidence) VALUES (?, ?, ?, ?)
     ON CONFLICT(node_id, alias) DO UPDATE SET
@@ -1880,7 +1887,7 @@ public:
                 DELETE FROM kg_nodes
                 WHERE CASE WHEN json_valid(properties)
                            THEN json_extract(properties, '$.document_hash') END = ?
-                  AND CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
+                  AND NOT COALESCE(CASE WHEN json_valid(properties) THEN json_type(properties, '$.ns') = 'text' AND json_extract(properties, '$.ns') <> '' END, 0)
             )");
             if (!symStmtR)
                 return symStmtR.error();
@@ -1928,7 +1935,7 @@ public:
                            THEN json_extract(properties, '$.file_path') END = ?
                    OR CASE WHEN json_valid(properties)
                            THEN json_extract(properties, '$.source_file') END = ?)
-                  AND CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
+                  AND NOT COALESCE(CASE WHEN json_valid(properties) THEN json_type(properties, '$.ns') = 'text' AND json_extract(properties, '$.ns') <> '' END, 0)
             )");
             if (!stmtR)
                 return stmtR.error();
@@ -1958,7 +1965,7 @@ public:
                      (SELECT sha256_hash FROM documents WHERE sha256_hash IS NOT NULL))
                   OR (node_key LIKE 'blob:%' AND substr(node_key, 6) NOT IN
                      (SELECT sha256_hash FROM documents WHERE sha256_hash IS NOT NULL))
-                  OR (CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
+                  OR (NOT COALESCE(CASE WHEN json_valid(properties) THEN json_type(properties, '$.ns') = 'text' AND json_extract(properties, '$.ns') <> '' END, 0)
                       AND ((CASE WHEN json_valid(properties)
                            THEN json_extract(properties, '$.document_hash') END IS NOT NULL
                       AND CASE WHEN json_valid(properties)
@@ -1993,7 +2000,7 @@ public:
                 DELETE FROM kg_edges
                 WHERE CASE WHEN json_valid(properties)
                            THEN json_extract(properties, '$.source_file') END = ?
-                  AND CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
+                  AND NOT COALESCE(CASE WHEN json_valid(properties) THEN json_type(properties, '$.ns') = 'text' AND json_extract(properties, '$.ns') <> '' END, 0)
             )");
             if (!stmtR)
                 return stmtR.error();
@@ -2013,7 +2020,8 @@ public:
 
     Result<std::int64_t> deleteEdgesByRelation(std::string_view relation) override {
         return withWriteConnection([&](Database& db) -> Result<std::int64_t> {
-            auto stmtR = db.prepare("DELETE FROM kg_edges WHERE relation = ?");
+            auto stmtR = db.prepare(std::string("DELETE FROM kg_edges WHERE relation = ? AND ") +
+                                    kNotNamespacedSql);
             if (!stmtR)
                 return stmtR.error();
             auto stmt = std::move(stmtR).value();
@@ -2738,6 +2746,7 @@ public:
                     FROM kg_nodes
                     WHERE json_extract(properties, '$.snapshot_id') IS NOT NULL
                       AND json_extract(properties, '$.canonical_key') IS NOT NULL
+                      AND NOT COALESCE(CASE WHEN json_valid(properties) THEN json_type(properties, '$.ns') = 'text' AND json_extract(properties, '$.ns') <> '' END, 0)
                 )
                 DELETE FROM kg_nodes
                 WHERE id IN (SELECT id FROM ranked WHERE rn > ?)
@@ -2991,12 +3000,12 @@ public:
             return Error{ErrorCode::InvalidState, "Transaction is not active"};
         }
         Database& db = **conn_;
-        auto stmtResult = db.prepare(std::string("SELECT ") + kKgNodeSelectProjection +
-                                     " FROM kg_nodes WHERE node_key = ? LIMIT 1");
+        auto stmtResult = db.prepareCached(std::string("SELECT ") + kKgNodeSelectProjection +
+                                           " FROM kg_nodes WHERE node_key = ? LIMIT 1");
         if (!stmtResult) {
             return stmtResult.error();
         }
-        auto stmt = std::move(stmtResult).value();
+        auto& stmt = *stmtResult.value();
         if (auto bound = stmt.bind(1, nodeKey); !bound) {
             return bound.error();
         }
@@ -3004,10 +3013,14 @@ public:
         if (!stepped) {
             return stepped.error();
         }
-        if (!stepped.value()) {
-            return std::optional<KGNode>{};
+        std::optional<KGNode> found;
+        if (stepped.value()) {
+            found = hydrateKgNodeRow(stmt);
         }
-        return std::optional<KGNode>{hydrateKgNodeRow(stmt)};
+        if (auto reset = stmt.reset(); !reset) {
+            return reset.error();
+        }
+        return found;
     }
 
     Result<std::vector<KGEdge>> getEdgesBetweenPage(std::int64_t srcNodeId, std::int64_t dstNodeId,
@@ -3365,7 +3378,7 @@ public:
             DELETE FROM kg_nodes
             WHERE CASE WHEN json_valid(properties)
                        THEN json_extract(properties, '$.document_hash') END = ?
-              AND CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
+              AND NOT COALESCE(CASE WHEN json_valid(properties) THEN json_type(properties, '$.ns') = 'text' AND json_extract(properties, '$.ns') <> '' END, 0)
         )");
         if (!symStmtR)
             return symStmtR.error();
@@ -3398,7 +3411,7 @@ public:
             DELETE FROM kg_edges
             WHERE CASE WHEN json_valid(properties)
                        THEN json_extract(properties, '$.source_file') END = ?
-              AND CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
+              AND NOT COALESCE(CASE WHEN json_valid(properties) THEN json_type(properties, '$.ns') = 'text' AND json_extract(properties, '$.ns') <> '' END, 0)
         )");
         if (!edgeStmtResult) {
             return edgeStmtResult.error();
@@ -3415,7 +3428,7 @@ public:
             DELETE FROM kg_nodes
             WHERE CASE WHEN json_valid(properties)
                        THEN json_extract(properties, '$.document_hash') END = ?
-              AND CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
+              AND NOT COALESCE(CASE WHEN json_valid(properties) THEN json_type(properties, '$.ns') = 'text' AND json_extract(properties, '$.ns') <> '' END, 0)
         )");
         if (!hashNodeStmtResult) {
             return hashNodeStmtResult.error();
@@ -3428,7 +3441,7 @@ public:
                        THEN json_extract(properties, '$.file_path') END = ?
                OR CASE WHEN json_valid(properties)
                        THEN json_extract(properties, '$.source_file') END = ?)
-              AND CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
+              AND NOT COALESCE(CASE WHEN json_valid(properties) THEN json_type(properties, '$.ns') = 'text' AND json_extract(properties, '$.ns') <> '' END, 0)
         )");
         if (!pathNodeStmtResult) {
             return pathNodeStmtResult.error();
@@ -3571,7 +3584,7 @@ public:
             DELETE FROM kg_edges
             WHERE CASE WHEN json_valid(properties)
                        THEN json_extract(properties, '$.source_file') END = ?
-              AND CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END IS NULL
+              AND NOT COALESCE(CASE WHEN json_valid(properties) THEN json_type(properties, '$.ns') = 'text' AND json_extract(properties, '$.ns') <> '' END, 0)
         )");
         if (!stmtR)
             return stmtR.error();
@@ -3594,7 +3607,8 @@ public:
         }
         Database& db = **conn_;
 
-        auto stmtR = db.prepareCached("DELETE FROM kg_edges WHERE relation = ?");
+        auto stmtR = db.prepareCached(std::string("DELETE FROM kg_edges WHERE relation = ? AND ") +
+                                      kNotNamespacedSql);
         if (!stmtR)
             return stmtR.error();
         auto& stmt = *stmtR.value();
@@ -3612,7 +3626,8 @@ public:
 
     Result<NamespaceRemovalResult> deleteByNamespace(std::string_view ns,
                                                      std::optional<std::string_view> relation,
-                                                     bool dryRun) override {
+                                                     bool dryRun,
+                                                     bool includeForeignEdges) override {
         if (!transactionStarted_) {
             return Error{ErrorCode::InvalidState, "Transaction not started"};
         }
@@ -3625,21 +3640,23 @@ public:
         }
         Database& db = **conn_;
 
-        static constexpr const char* kEdgeNs =
-            "CASE WHEN json_valid(kg_edges.properties) "
-            "THEN json_extract(kg_edges.properties, '$.ns') END = ?1";
-        static constexpr const char* kNodeNs =
-            "SELECT id FROM kg_nodes WHERE CASE WHEN json_valid(properties) "
-            "THEN json_extract(properties, '$.ns') END = ?1";
+        // Same guarded expression as idx_kg_{nodes,edges}_ns (migration v48), so the
+        // namespace lookups use the index instead of scanning.
+        static constexpr const char* kOwned =
+            "CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END = ?1";
+        const std::string nodeIds = std::string("SELECT id FROM kg_nodes WHERE ") + kOwned;
+        const std::string incident =
+            "(src_node_id IN (" + nodeIds + ") OR dst_node_id IN (" + nodeIds + "))";
 
-        std::string edgeWhere = std::string(kEdgeNs);
+        std::string edgeWhere;
+        std::string foreignWhere;
         if (relation) {
-            edgeWhere += " AND relation = ?2";
+            edgeWhere = std::string(kOwned) + " AND relation = ?2";
         } else {
-            edgeWhere += std::string(" OR src_node_id IN (") + kNodeNs + ") OR dst_node_id IN (" +
-                         kNodeNs + ")";
+            edgeWhere = std::string("(") + kOwned + ") OR " + incident;
+            foreignWhere = incident + " AND NOT COALESCE(" + kOwned + ", 0)";
         }
-        const std::string nodeWhere = std::string("id IN (") + kNodeNs + ")";
+        const std::string nodeWhere = std::string("id IN (") + nodeIds + ")";
 
         const auto run = [&](const std::string& sql, bool counting) -> Result<std::int64_t> {
             auto stmtR = db.prepare(sql);
@@ -3664,17 +3681,25 @@ public:
         };
 
         NamespaceRemovalResult result;
+        auto edgeCount = run("SELECT COUNT(*) FROM kg_edges WHERE " + edgeWhere, true);
+        if (!edgeCount)
+            return edgeCount.error();
+        result.edgesDeleted = edgeCount.value();
+        if (!relation) {
+            auto nodes = run("SELECT COUNT(*) FROM kg_nodes WHERE " + nodeWhere, true);
+            if (!nodes)
+                return nodes.error();
+            result.nodesDeleted = nodes.value();
+            auto foreign = run("SELECT COUNT(*) FROM kg_edges WHERE " + foreignWhere, true);
+            if (!foreign)
+                return foreign.error();
+            result.foreignEdges = foreign.value();
+        }
         if (dryRun) {
-            auto edges = run("SELECT COUNT(*) FROM kg_edges WHERE " + edgeWhere, true);
-            if (!edges)
-                return edges.error();
-            result.edgesDeleted = edges.value();
-            if (!relation) {
-                auto nodes = run("SELECT COUNT(*) FROM kg_nodes WHERE " + nodeWhere, true);
-                if (!nodes)
-                    return nodes.error();
-                result.nodesDeleted = nodes.value();
-            }
+            return result;
+        }
+        if (result.foreignEdges > 0 && !includeForeignEdges) {
+            result.refused = true;
             return result;
         }
 
@@ -3691,10 +3716,152 @@ public:
                 return nodes.error();
             result.nodesDeleted = nodes.value();
         }
-        spdlog::debug("WriteBatch::deleteByNamespace: ns={} relation={} nodes={} edges={}", ns,
-                      relation ? *relation : std::string_view{"*"}, result.nodesDeleted,
-                      result.edgesDeleted);
+        spdlog::debug(
+            "WriteBatch::deleteByNamespace: ns={} relation={} nodes={} edges={} foreign={}", ns,
+            relation ? *relation : std::string_view{"*"}, result.nodesDeleted, result.edgesDeleted,
+            result.foreignEdges);
         return result;
+    }
+
+    Result<std::optional<KGEdge>> getEdgeByEndpoints(std::int64_t srcNodeId, std::int64_t dstNodeId,
+                                                     std::string_view relation) override {
+        if (!transactionStarted_ || committed_) {
+            return Error{ErrorCode::InvalidState, "Transaction is not active"};
+        }
+        Database& db = **conn_;
+        auto stmtR = db.prepareCached("SELECT " + std::string(kKgEdgeColumns) +
+                                      " FROM kg_edges WHERE src_node_id = ? AND dst_node_id = ? "
+                                      "AND relation = ? LIMIT 1");
+        if (!stmtR)
+            return stmtR.error();
+        auto& stmt = *stmtR.value();
+        if (auto bound = stmt.bind(1, srcNodeId); !bound)
+            return bound.error();
+        if (auto bound = stmt.bind(2, dstNodeId); !bound)
+            return bound.error();
+        if (auto bound = stmt.bind(3, relation); !bound)
+            return bound.error();
+        auto stepped = stmt.step();
+        if (!stepped)
+            return stepped.error();
+        std::optional<KGEdge> found;
+        if (stepped.value())
+            found = hydrateKgEdgeRow(stmt);
+        // Leave no read pending: a savepoint rollback must not race an open cursor.
+        if (auto r = stmt.reset(); !r)
+            return r.error();
+        return found;
+    }
+
+    Result<void> upsertEdgeExact(const KGEdge& edge, bool existed) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+        auto stmtR = db.prepareCached(
+            "INSERT INTO kg_edges (src_node_id, dst_node_id, relation, weight, created_time, "
+            "properties) VALUES (?, ?, ?, ?, COALESCE(?, unixepoch()), ?) "
+            "ON CONFLICT(src_node_id, dst_node_id, relation) DO UPDATE SET "
+            "weight = excluded.weight, properties = excluded.properties");
+        if (!stmtR)
+            return stmtR.error();
+        auto& stmt = *stmtR.value();
+        if (auto r = stmt.bind(1, edge.srcNodeId); !r)
+            return r.error();
+        if (auto r = stmt.bind(2, edge.dstNodeId); !r)
+            return r.error();
+        if (auto r = stmt.bind(3, edge.relation); !r)
+            return r.error();
+        if (auto r = stmt.bind(4, static_cast<double>(edge.weight)); !r)
+            return r.error();
+        if (auto r = edge.createdTime ? stmt.bind(5, *edge.createdTime) : stmt.bind(5, nullptr); !r)
+            return r.error();
+        if (auto r = edge.properties ? stmt.bind(6, *edge.properties) : stmt.bind(6, nullptr); !r)
+            return r.error();
+        if (auto r = stmt.execute(); !r)
+            return r.error();
+        if (!existed) {
+            ++edgeCountDelta_;
+        }
+        return {};
+    }
+
+    Result<bool> upsertAliasCounted(const KGAlias& alias) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+        bool existed = false;
+        {
+            auto probeR = db.prepareCached(
+                "SELECT 1 FROM kg_aliases WHERE node_id = ? AND alias = ? LIMIT 1");
+            if (!probeR)
+                return probeR.error();
+            auto& probe = *probeR.value();
+            if (auto r = probe.bind(1, alias.nodeId); !r)
+                return r.error();
+            if (auto r = probe.bind(2, alias.alias); !r)
+                return r.error();
+            auto stepped = probe.step();
+            if (!stepped)
+                return stepped.error();
+            existed = stepped.value();
+            if (auto r = probe.reset(); !r)
+                return r.error();
+        }
+        auto stmtR = db.prepareCached(kKgAliasUpsertSql);
+        if (!stmtR)
+            return stmtR.error();
+        auto& stmt = *stmtR.value();
+        if (auto r = bindKGAliasUpsertParameters(stmt, alias); !r)
+            return r.error();
+        if (auto r = stmt.execute(); !r)
+            return r.error();
+        if (!existed) {
+            ++aliasCountDelta_;
+        }
+        return !existed;
+    }
+
+    Result<void> beginSavepoint() override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        if (auto r = (*conn_)->execute("SAVEPOINT yams_kg_op"); !r)
+            return r.error();
+        savepoints_.push_back(DeltaSnapshot{entityCountDelta_, nativeEntityCountDelta_,
+                                            nerEntityCountDelta_, edgeCountDelta_,
+                                            aliasCountDelta_});
+        return {};
+    }
+
+    Result<void> releaseSavepoint() override {
+        if (savepoints_.empty()) {
+            return Error{ErrorCode::InvalidState, "No savepoint to release"};
+        }
+        if (auto r = (*conn_)->execute("RELEASE SAVEPOINT yams_kg_op"); !r)
+            return r.error();
+        savepoints_.pop_back();
+        return {};
+    }
+
+    Result<void> rollbackToSavepoint() override {
+        if (savepoints_.empty()) {
+            return Error{ErrorCode::InvalidState, "No savepoint to roll back"};
+        }
+        // ROLLBACK TO keeps the savepoint open; RELEASE closes it with nothing left in it.
+        if (auto r = (*conn_)->execute("ROLLBACK TO SAVEPOINT yams_kg_op; "
+                                       "RELEASE SAVEPOINT yams_kg_op");
+            !r)
+            return r.error();
+        const auto snapshot = savepoints_.back();
+        savepoints_.pop_back();
+        entityCountDelta_ = snapshot.entity;
+        nativeEntityCountDelta_ = snapshot.nativeEntity;
+        nerEntityCountDelta_ = snapshot.nerEntity;
+        edgeCountDelta_ = snapshot.edge;
+        aliasCountDelta_ = snapshot.alias;
+        return {};
     }
 
     Result<std::int64_t> deleteOrphanedEdges() override {
@@ -3847,6 +4014,14 @@ private:
     std::int64_t nerEntityCountDelta_{0};
     std::int64_t edgeCountDelta_{0};
     std::int64_t aliasCountDelta_{0};
+    struct DeltaSnapshot {
+        std::int64_t entity;
+        std::int64_t nativeEntity;
+        std::int64_t nerEntity;
+        std::int64_t edge;
+        std::int64_t alias;
+    };
+    std::vector<DeltaSnapshot> savepoints_;
 };
 
 // Out-of-line implementation of beginWriteBatch (requires SqliteWriteBatch to be defined)

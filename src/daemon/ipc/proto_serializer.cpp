@@ -2843,6 +2843,18 @@ template <> struct ProtoBinding<KgIngestResponse> {
             wire->set_src_missing(edge.srcMissing);
             wire->set_dst_missing(edge.dstMissing);
         }
+        o->set_aliases_updated(r.aliasesUpdated);
+        for (const auto& c : r.nsConflicts) {
+            auto* wire = o->add_ns_conflicts();
+            wire->set_kind(c.kind);
+            wire->set_node_key(c.nodeKey);
+            wire->set_src_node_key(c.srcNodeKey);
+            wire->set_dst_node_key(c.dstNodeKey);
+            wire->set_relation(c.relation);
+            wire->set_existing_ns(c.existingNs);
+            wire->set_requested_ns(c.requestedNs);
+            wire->set_reason(c.reason);
+        }
     }
     static KgIngestResponse get(const Envelope& env) {
         const auto& i = env.kg_ingest_response();
@@ -2863,6 +2875,13 @@ template <> struct ProtoBinding<KgIngestResponse> {
                 KgIngestUnresolvedEdge{edge.src_node_key(), edge.dst_node_key(), edge.relation(),
                                        edge.src_missing(), edge.dst_missing()});
         }
+        r.aliasesUpdated = i.aliases_updated();
+        r.nsConflicts.reserve(static_cast<std::size_t>(i.ns_conflicts_size()));
+        for (const auto& c : i.ns_conflicts()) {
+            r.nsConflicts.push_back(
+                KgIngestNsConflict{c.kind(), c.node_key(), c.src_node_key(), c.dst_node_key(),
+                                   c.relation(), c.existing_ns(), c.requested_ns(), c.reason()});
+        }
         return r;
     }
 };
@@ -2874,6 +2893,7 @@ template <> struct ProtoBinding<KgRemoveRequest> {
         o->set_ns(r.ns);
         o->set_relation(r.relation);
         o->set_dry_run(r.dryRun);
+        o->set_include_foreign_edges(r.includeForeignEdges);
     }
     static KgRemoveRequest get(const Envelope& env) {
         const auto& i = env.kg_remove_request();
@@ -2881,6 +2901,7 @@ template <> struct ProtoBinding<KgRemoveRequest> {
         r.ns = i.ns();
         r.relation = i.relation();
         r.dryRun = i.dry_run();
+        r.includeForeignEdges = i.include_foreign_edges();
         return r;
     }
 };
@@ -2892,6 +2913,8 @@ template <> struct ProtoBinding<KgRemoveResponse> {
         o->set_nodes_removed(r.nodesRemoved);
         o->set_edges_removed(r.edgesRemoved);
         o->set_dry_run(r.dryRun);
+        o->set_foreign_edges_removed(r.foreignEdgesRemoved);
+        o->set_refused(r.refused);
     }
     static KgRemoveResponse get(const Envelope& env) {
         const auto& i = env.kg_remove_response();
@@ -2899,6 +2922,8 @@ template <> struct ProtoBinding<KgRemoveResponse> {
         r.nodesRemoved = i.nodes_removed();
         r.edgesRemoved = i.edges_removed();
         r.dryRun = i.dry_run();
+        r.foreignEdgesRemoved = i.foreign_edges_removed();
+        r.refused = i.refused();
         return r;
     }
 };

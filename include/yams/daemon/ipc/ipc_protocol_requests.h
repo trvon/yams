@@ -3199,11 +3199,14 @@ struct KgRemoveRequest {
     std::string ns;       // Matches properties.ns on nodes and edges. Must not be empty.
     std::string relation; // Optional: only edges with this relation (nodes are kept).
     bool dryRun{false};
+    // Also remove other owners' edges incident to the namespace's nodes. Without it a removal
+    // that would touch any such edge is refused and deletes nothing.
+    bool includeForeignEdges{false};
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << ns << relation << dryRun;
+        ser << ns << relation << dryRun << includeForeignEdges;
     }
 
     template <typename Deserializer>
@@ -3213,6 +3216,7 @@ struct KgRemoveRequest {
         YAMS_TRY(ipc_detail::readField(deser, request.ns));
         YAMS_TRY(ipc_detail::readField(deser, request.relation));
         YAMS_TRY(ipc_detail::readField(deser, request.dryRun));
+        YAMS_TRY(ipc_detail::readField(deser, request.includeForeignEdges));
         return request;
     }
 };
