@@ -525,6 +525,36 @@ public:
         });
     }
 
+    Result<std::vector<std::string>> listNodeTypes() override {
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<std::string>> {
+            // Loose index scan over idx_kg_nodes_type: one probe per distinct type instead of a
+            // GROUP BY over every node (path nodes alone can number in the millions).
+            auto prepared =
+                db.prepare("WITH RECURSIVE types(type) AS ("
+                           " SELECT MIN(type) FROM kg_nodes WHERE type > ''"
+                           " UNION ALL"
+                           " SELECT (SELECT MIN(type) FROM kg_nodes WHERE type > types.type)"
+                           " FROM types WHERE types.type IS NOT NULL)"
+                           " SELECT type FROM types WHERE type IS NOT NULL");
+            if (!prepared) {
+                return prepared.error();
+            }
+            auto stmt = std::move(prepared).value();
+            std::vector<std::string> types;
+            while (true) {
+                auto row = stmt.step();
+                if (!row) {
+                    return row.error();
+                }
+                if (!row.value()) {
+                    break;
+                }
+                types.push_back(stmt.getString(0));
+            }
+            return types;
+        });
+    }
+
     Result<std::optional<std::string>> latestPathVersionBlobKey(std::string_view path) override {
         return readPool()->withConnection([&](Database& db) -> Result<std::optional<std::string>> {
             // Snapshot path node ids grow with ingest order, so the largest is the newest.

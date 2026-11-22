@@ -805,7 +805,8 @@ void MCPServer::initializeToolRegistry() {
                      "Operation: 'query' (default) to traverse/explore the graph, 'ingest' to "
                      "insert nodes/edges/aliases, 'lookup' to resolve a code symbol by label or "
                      "alias, 'trace' for a path between two symbols. lookup and trace need "
-                     "code-symbol nodes, which only pre-v0.20 stores have; elsewhere they fail"},
+                     "named nodes (pre-v0.20 code symbols or ingested nodes); on stores with only "
+                     "file nodes they fail"},
                     {"enum", json::array({"query", "ingest", "lookup", "trace"})},
                     {"default", "query"}}},
                   // ── Navigation parameters (lookup/trace) ──

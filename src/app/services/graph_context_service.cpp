@@ -500,32 +500,38 @@ bool isWholeFileContext(const GraphContextSymbol& symbol) {
            !symbol.startLine.has_value() && !symbol.endLine.has_value();
 }
 
-// Node types the code-symbol extractor wrote before v0.20 (migration 40 lists the same set),
-// plus generic symbol kinds that graph ingest may still carry.
-constexpr std::array<std::string_view, 22> kSymbolNodeTypes{
-    "function", "function_version", "method",    "method_version", "class",     "class_version",
-    "struct",   "struct_version",   "enum",      "enum_version",   "interface", "interface_version",
-    "trait",    "trait_version",    "field",     "field_version",  "variable",  "variable_version",
-    "symbol",   "symbol_reference", "namespace", "macro"};
+// Node types every store gets from ingest, versioning and topology. A label match on one of
+// these is a file or bookkeeping node, never a definition.
+constexpr std::array<std::string_view, 9> kStructuralNodeTypes{"path",
+                                                               "blob",
+                                                               "document",
+                                                               "file",
+                                                               "directory",
+                                                               "text_segment",
+                                                               "topology_cluster",
+                                                               "topology_snapshot",
+                                                               "topology_snapshot_pointer"};
 
 const std::string& symbolNavigationUnavailableMessage() {
     static const std::string kMessage =
-        "This store has no code-symbol nodes: symbol extraction was removed in v0.20, so "
-        "graph lookup and trace have nothing to resolve. Use `yams graph --explore <file>` for "
-        "files related by directory, tag and semantic similarity, or `yams grep`/`yams search` "
-        "to find a definition.";
+        "This store has only file and version nodes: code-symbol extraction was removed in "
+        "v0.20, so graph lookup and trace have nothing to resolve. Ingest nodes through the MCP "
+        "`graph` tool, use `yams graph --explore <file>` for files related by directory, tag and "
+        "semantic similarity, or `yams grep`/`yams search` to find a definition.";
     return kMessage;
 }
 
-// Lookup and trace resolve code-symbol nodes. Stores written since v0.20 have none; label
-// matches on path nodes would then pass for definitions, so callers fail instead.
-Result<bool> storeHasSymbolNodes(metadata::KnowledgeGraphStore& kgStore) {
-    for (const auto type : kSymbolNodeTypes) {
-        auto nodes = kgStore.findNodesByType(type, 1, 0);
-        if (!nodes) {
-            return nodes.error();
-        }
-        if (!nodes.value().empty()) {
+// Lookup and trace resolve named nodes: pre-v0.20 code symbols, or nodes added by graph ingest
+// or entity extraction. A store written since v0.20 with neither holds only structural nodes,
+// whose label matches would pass for definitions, so callers fail instead.
+Result<bool> storeHasNavigableNodes(metadata::KnowledgeGraphStore& kgStore) {
+    auto types = kgStore.listNodeTypes();
+    if (!types) {
+        return types.error();
+    }
+    for (const auto& type : types.value()) {
+        if (std::find(kStructuralNodeTypes.begin(), kStructuralNodeTypes.end(), type) ==
+            kStructuralNodeTypes.end()) {
             return true;
         }
     }
@@ -869,7 +875,7 @@ public:
         if (req.symbol.empty()) {
             return Error{ErrorCode::InvalidArgument, "graph symbol lookup requires a symbol"};
         }
-        if (auto hasSymbols = storeHasSymbolNodes(*kgStore_); !hasSymbols) {
+        if (auto hasSymbols = storeHasNavigableNodes(*kgStore_); !hasSymbols) {
             return hasSymbols.error();
         } else if (!hasSymbols.value()) {
             return Error{ErrorCode::NotSupported, symbolNavigationUnavailableMessage()};
@@ -966,7 +972,7 @@ public:
             return Error{ErrorCode::InvalidArgument,
                          "graph trace requires both from and to symbols"};
         }
-        if (auto hasSymbols = storeHasSymbolNodes(*kgStore_); !hasSymbols) {
+        if (auto hasSymbols = storeHasNavigableNodes(*kgStore_); !hasSymbols) {
             return hasSymbols.error();
         } else if (!hasSymbols.value()) {
             return Error{ErrorCode::NotSupported, symbolNavigationUnavailableMessage()};

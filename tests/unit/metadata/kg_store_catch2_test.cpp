@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright 2025 YAMS Contributors
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <future>
@@ -611,6 +612,35 @@ TEST_CASE("KG Store: latestPathVersionBlobKey returns the newest version's blob"
     auto other = fix.store_->latestPathVersionBlobKey("/repo/latest.cpp.bak");
     REQUIRE((other.has_value()));
     CHECK_FALSE(other.value().has_value());
+}
+
+TEST_CASE_METHOD(KGStoreFixture, "KG Store lists distinct node types without counting",
+                 "[unit][metadata][kg]") {
+    auto empty = store_->listNodeTypes();
+    REQUIRE((empty.has_value()));
+    CHECK(empty.value().empty());
+
+    const std::vector<KGNode> nodes{
+        {.nodeKey = "path:a", .label = "a", .type = "path"},
+        {.nodeKey = "path:b", .label = "b", .type = "path"},
+        {.nodeKey = "paper:x", .label = "x", .type = "paper"},
+        {.nodeKey = "author:y", .label = "y", .type = "author"},
+        {.nodeKey = "untyped:z", .label = "z", .type = ""},
+    };
+    REQUIRE((store_->upsertNodes(nodes).has_value()));
+
+    auto types = store_->listNodeTypes();
+    REQUIRE((types.has_value()));
+    CHECK((types.value() == std::vector<std::string>{"author", "paper", "path"}));
+
+    auto counts = store_->getNodeTypeCounts();
+    REQUIRE((counts.has_value()));
+    std::vector<std::string> fromCounts;
+    for (const auto& [type, count] : counts.value()) {
+        fromCounts.push_back(type);
+    }
+    std::sort(fromCounts.begin(), fromCounts.end());
+    CHECK((fromCounts == types.value()));
 }
 
 TEST_CASE("KG Store: fetchPathHistory follows rename chains and returns blob hashes",

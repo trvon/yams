@@ -1150,6 +1150,26 @@ std::string relatedVia(const GraphExploreResponse& response, const std::filesyst
 
 } // namespace
 
+TEST_CASE("GraphContextService lookup resolves ingested non-symbol nodes",
+          "[services][graph][context][symbols]") {
+    GraphContextServiceFixture fixture;
+    storeDocument(fixture, "src/alpha.cpp");
+    // An externally ingested node (e.g. a paper from `yams graph ingest`) is not a code symbol,
+    // but lookup must still resolve it.
+    const auto paperPath = fixture.writeSource("papers/attention.md", {"Attention notes"});
+    fixture.upsertSymbols(
+        {fixture.symbol(paperPath, "attentionPaper", "paper:attention", 1, 1, "paper")});
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphSymbolLookupRequest lookup;
+    lookup.symbol = "attentionPaper";
+    const auto result = service->lookupSymbol(lookup);
+    REQUIRE((result.has_value()));
+    REQUIRE_FALSE(result.value().matches.empty());
+    CHECK(result.value().matches.front().filePath == paperPath.string());
+}
+
 TEST_CASE("GraphContextService lookup and trace fail clearly without symbol nodes",
           "[services][graph][context][symbols]") {
     GraphContextServiceFixture fixture;

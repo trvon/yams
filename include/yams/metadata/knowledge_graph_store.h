@@ -581,6 +581,24 @@ public:
     virtual Result<std::optional<std::string>> latestPathVersionBlobKey(std::string_view /*path*/) {
         return Error{ErrorCode::NotImplemented, "Path version lookup is not implemented"};
     }
+
+    // Distinct non-empty node types present in the store, without counting nodes. The default
+    // derives them from getNodeTypeCounts(); backends with a type index override it to avoid a
+    // full scan.
+    virtual Result<std::vector<std::string>> listNodeTypes() {
+        auto counts = getNodeTypeCounts();
+        if (!counts) {
+            return counts.error();
+        }
+        std::vector<std::string> types;
+        types.reserve(counts.value().size());
+        for (auto& [type, count] : counts.value()) {
+            if (count > 0 && !type.empty()) {
+                types.push_back(std::move(type));
+            }
+        }
+        return types;
+    }
 };
 
 /**
