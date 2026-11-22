@@ -84,6 +84,14 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
         // (path/entity/tag still weighted despite zero stage contribution).
         auto statsResult = metadataRepo_->getCorpusStats();
         if (statsResult.has_value()) {
+            // Entity vectors live in the vector DB, which getCorpusStats() does not read.
+            // Leave the count unknown (-1) when the vector DB cannot answer.
+            if (vectorDatabase_) {
+                if (auto entityCount = vectorDatabase_->getEntityVectorCountChecked()) {
+                    statsResult.value().entityVectorCount =
+                        static_cast<int64_t>(entityCount.value());
+                }
+            }
             runtimeTuner = std::make_shared<SearchTuner>(statsResult.value());
             // Prefer tuner config (dead-source gates already applied) over the
             // raw BuildOptions defaults sitting in options.config.

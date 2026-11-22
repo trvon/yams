@@ -594,6 +594,11 @@ void applyDeadSourceGates(const storage::CorpusStats& stats, TuningState state, 
     if (!stats.hasTags()) {
         pinWeightZero(params.weights.tag);
     }
+    // No in-tree writer fills entity_vectors (PostIngestQueue skips entity embeddings), so on
+    // most stores the leg always returns 0 hits. Zero it when the vector DB reports none.
+    if (stats.hasNoEntityVectors()) {
+        pinWeightZero(params.weights.entityVector);
+    }
     if (scientific) {
         pinWeightZero(params.weights.metadata);
         pinWeightZero(params.weights.entityVector);
