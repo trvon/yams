@@ -293,8 +293,6 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
     // Create builder and configure
     auto builder = std::make_shared<yams::search::SearchEngineBuilder>();
     builder->withMetadataRepo(std::move(metadataRepo));
-    // Capture kgStore for the entity-export callback before it moves into the builder.
-    auto entityExportKg = kgStore;
     if (kgStore)
         builder->withKGStore(std::move(kgStore));
     if (vectorEnabled && vectorDatabase)
@@ -406,48 +404,8 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             // Test env: YAMS_SIMEON_STRATEGY_ROUTER_ENABLED=1
             lexicalCfg.strategy_router_enabled = bm25Policy.strategyRouterEnabled.value_or(false);
 
-            // Enable concept mining and wire its entity export to the KG
-            // store so the graph reranker can match query concepts against
-            // per-document concept bigrams.
+            // Concept mining blends corpus bigram concepts into BM25 scores at query time.
             lexicalCfg.concept_mining_enabled = true;
-            // TODO: concept mining currently invokes mine_concepts() in bulk
-            // without a per-document hook.  The callback is wired here but
-            // not yet called during build; reconnect when concept mining
-            // supports per-document export.
-            if (entityExportKg) {
-                auto capturedKg = entityExportKg;
-                lexicalCfg.entity_callback =
-                    [capturedKg](std::int64_t docId, std::string entityText, float confidence) {
-                        thread_local std::int64_t tlsCurrentDoc = -1;
-                        thread_local std::vector<metadata::DocEntity> tlsBuffer;
-                        constexpr size_t kFlushThreshold = 128;
-                        if (tlsCurrentDoc != docId && !tlsBuffer.empty()) {
-                            auto br = capturedKg->beginWriteBatch();
-                            if (br) {
-                                auto& batch = *br.value();
-                                batch.addDocEntities(std::move(tlsBuffer));
-                                batch.commit();
-                            }
-                            tlsBuffer.clear();
-                        }
-                        tlsCurrentDoc = docId;
-                        metadata::DocEntity docEnt;
-                        docEnt.documentId = docId;
-                        docEnt.entityText = std::move(entityText);
-                        docEnt.confidence = confidence;
-                        docEnt.extractor = "simeon_concept";
-                        tlsBuffer.push_back(std::move(docEnt));
-                        if (tlsBuffer.size() >= kFlushThreshold) {
-                            auto br = capturedKg->beginWriteBatch();
-                            if (br) {
-                                auto& batch = *br.value();
-                                batch.addDocEntities(std::move(tlsBuffer));
-                                batch.commit();
-                            }
-                            tlsBuffer.clear();
-                        }
-                    };
-            }
 
             opts.simeonLexicalConfig = lexicalCfg;
         }
