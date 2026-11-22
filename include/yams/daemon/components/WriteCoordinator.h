@@ -220,6 +220,13 @@ template <typename T> struct GraphOpCompletion {
     T staged{};
     std::optional<Error> opError;
     Stage failedStage = Stage::None;
+    // Set by the writer: the op finished its writes (staged is the result).
+    bool applied = false;
+    // The op failed and its savepoint rollback undid everything it wrote, so the failure is
+    // reported here only and does not fail the rest of the apply.
+    bool contained = false;
+    // The savepoint rollback itself failed; the writer must not commit this apply.
+    bool rollbackFailed = false;
     bool settled = false;
 
     void settle(Result<T> result) {

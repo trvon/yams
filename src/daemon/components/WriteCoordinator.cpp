@@ -82,6 +82,8 @@ void settleGraphCompletions(WriteBatch& batch, const Error* batchError) noexcept
                 completion->settle(*batchError);
             } else if (completion->opError) {
                 completion->settle(*completion->opError);
+            } else if (!completion->applied) {
+                completion->settle(Error{ErrorCode::InternalError, "graph op was not applied"});
             } else {
                 completion->settle(completion->staged);
             }
@@ -632,6 +634,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
 
     std::unordered_map<std::string, std::int64_t> nodeKeyToId;
     std::optional<Error> firstOpError;
+    bool abortApply = false;
 
     if (hasKgOps && kg_) {
         YAMS_ZONE_SCOPED_N("WriteCoordinator::applyKG");
@@ -728,8 +731,22 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                         if (r && bufferPtr && bufferPtr->edgeCount() >= config_.kgDedupMaxEdges) {
                             r = drainEdgeBuffer();
                         }
+                        // Graph ops report their own failure through their completion; a failure
+                        // their savepoint fully undid must not fail unrelated coalesced work or
+                        // surface in another caller's flush().
+                        bool containedGraphFailure = false;
+                        if constexpr (std::is_same_v<T, IngestGraphOp> ||
+                                      std::is_same_v<T, DeleteGraphNamespaceOp>) {
+                            if (concrete.completion) {
+                                if (concrete.completion->rollbackFailed) {
+                                    abortApply = true;
+                                } else {
+                                    containedGraphFailure = concrete.completion->contained;
+                                }
+                            }
+                        }
                         if (!r) {
-                            if (!firstOpError) {
+                            if (!containedGraphFailure && !firstOpError) {
                                 firstOpError = r.error();
                             }
                             sourceError = true;
@@ -766,7 +783,10 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                          drained.error().message);
         }
         Result<void> commitResult;
-        if (beforeKgCommitForTesting_) {
+        if (abortApply) {
+            commitResult = Error{ErrorCode::TransactionFailed,
+                                 "a graph op could not roll back its savepoint; apply aborted"};
+        } else if (beforeKgCommitForTesting_) {
             commitResult = beforeKgCommitForTesting_();
         }
         if (commitResult) {
@@ -1477,9 +1497,13 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
     completion.staged = GraphIngestOutcome{};
     completion.opError.reset();
     completion.failedStage = Stage::None;
+    completion.applied = false;
+    completion.contained = false;
+    completion.rollbackFailed = false;
 
     if (auto opened = kgBatch.beginSavepoint(); !opened) {
         completion.opError = opened.error();
+        completion.contained = true; // nothing was written
         return opened.error();
     }
     GraphIngestOutcome outcome;
@@ -1489,6 +1513,9 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
         if (auto undone = kgBatch.rollbackToSavepoint(); !undone) {
             spdlog::error("[WriteCoordinator] graph ingest savepoint rollback failed: {}",
                           undone.error().message);
+            completion.rollbackFailed = true;
+        } else {
+            completion.contained = true;
         }
         completion.failedStage = stage;
         completion.opError = error;
@@ -1728,6 +1755,7 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
     }
     // Staged only; the result is published after the transaction commits.
     completion.staged = std::move(outcome);
+    completion.applied = true;
     return Result<void>();
 }
 
@@ -1739,10 +1767,19 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
     auto& completion = *op.completion;
     completion.staged = metadata::NamespaceRemovalResult{};
     completion.opError.reset();
+    completion.applied = false;
+    completion.contained = false;
+    completion.rollbackFailed = false;
     if (op.ns.empty()) {
         completion.opError =
             Error{ErrorCode::InvalidArgument, "Namespace removal requires a namespace"};
+        completion.contained = true;
         return *completion.opError;
+    }
+    if (auto opened = kgBatch.beginSavepoint(); !opened) {
+        completion.opError = opened.error();
+        completion.contained = true;
+        return opened.error();
     }
     std::optional<std::string_view> relation;
     if (op.relation) {
@@ -1750,8 +1787,21 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
     }
     auto removed = kgBatch.deleteByNamespace(op.ns, relation, op.dryRun, op.includeForeignEdges);
     if (!removed) {
+        // Edges may already be gone when the node delete fails: undo both.
+        if (auto undone = kgBatch.rollbackToSavepoint(); !undone) {
+            spdlog::error("[WriteCoordinator] graph removal savepoint rollback failed: {}",
+                          undone.error().message);
+            completion.rollbackFailed = true;
+        } else {
+            completion.contained = true;
+        }
         completion.opError = removed.error();
         return removed.error();
+    }
+    if (auto released = kgBatch.releaseSavepoint(); !released) {
+        completion.opError = released.error();
+        completion.rollbackFailed = true;
+        return released.error();
     }
     if (!op.dryRun && !removed.value().refused) {
         std::lock_guard<std::mutex> lock(statsMutex_);
@@ -1759,6 +1809,7 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
         stats_.edgesDeleted += static_cast<std::uint64_t>(removed.value().edgesDeleted);
     }
     completion.staged = removed.value();
+    completion.applied = true;
     return Result<void>();
 }
 

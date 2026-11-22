@@ -196,16 +196,25 @@ namespace {
 
 // Wait for the writer to settle a graph op. A broken promise (op dropped unapplied) and a
 // timeout both mean the outcome is unknown to this request and are reported as errors.
-template <typename T> Result<T> awaitGraphCompletion(std::future<Result<T>>& settled) {
+// `settledByWriter` is true only when the writer published the result, i.e. when it is safe to
+// read the completion's other fields (the promise orders those writes before the read).
+template <typename T> struct GraphCompletionWait {
+    Result<T> result;
+    bool settledByWriter = false;
+};
+
+template <typename T> GraphCompletionWait<T> awaitGraphCompletion(std::future<Result<T>>& settled) {
     constexpr auto kGraphOpTimeout = std::chrono::seconds(60);
     if (settled.wait_for(kGraphOpTimeout) != std::future_status::ready) {
-        return Error{ErrorCode::Timeout,
-                     "graph write did not finish within 60 s; its outcome is unknown"};
+        return {Error{ErrorCode::Timeout,
+                      "graph write did not finish within 60 s; its outcome is unknown"},
+                false};
     }
     try {
-        return settled.get();
+        return {settled.get(), true};
     } catch (const std::future_error&) {
-        return Error{ErrorCode::InternalError, "graph write was dropped before it was applied"};
+        return {Error{ErrorCode::InternalError, "graph write was dropped before it was applied"},
+                false};
     }
 }
 
@@ -743,12 +752,16 @@ RequestDispatcher::handleKgIngestRequest(const KgIngestRequest& req) {
     coord->enqueue(std::move(wb));
     // The writer settles this op only after its transaction committed (or failed): no shared
     // flush state, no reading a result the writer is still producing.
-    auto result = awaitGraphCompletion(settled);
+    auto waited = awaitGraphCompletion(settled);
+    auto& result = waited.result;
     if (!result) {
         // Nothing from this request is durable; report no rows.
         resp.success = false;
         const auto& message = result.error().message;
-        switch (completion->failedStage) {
+        // The stage is only meaningful (and only safe to read) once the writer settled the op.
+        const auto stage =
+            waited.settledByWriter ? completion->failedStage : GraphIngestCompletion::Stage::None;
+        switch (stage) {
             case GraphIngestCompletion::Stage::Nodes:
                 resp.errors.push_back("Node upsert failed: " + message);
                 break;
@@ -838,7 +851,8 @@ RequestDispatcher::handleKgRemoveRequest(const KgRemoveRequest& req) {
     wb->source = "RPC::removeGraphNamespace";
     wb->ops.emplace_back(std::move(op));
     coord->enqueue(std::move(wb));
-    auto result = awaitGraphCompletion(settled);
+    auto waited = awaitGraphCompletion(settled);
+    auto& result = waited.result;
     if (!result) {
         co_return dispatch::makeErrorResponse(result.error().code,
                                               "Graph removal failed: " + result.error().message);

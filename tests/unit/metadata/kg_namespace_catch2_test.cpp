@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -316,15 +317,30 @@ TEST_CASE("KG namespace: relation-wide resets and snapshot pruning keep namespac
     REQUIRE(batch.value()->commit().has_value());
 }
 
-TEST_CASE("KG namespace: removal lookups use the namespace indexes",
+TEST_CASE("KG namespace: removal statements use indexes, never a table scan",
           "[unit][metadata][kg][namespace]") {
     NamespaceFixture fix;
-    for (const auto* table : {"kg_nodes", "kg_edges"}) {
-        auto plan = fix.planFor(std::string("SELECT id FROM ") + table +
-                                " WHERE CASE WHEN json_valid(properties) THEN "
-                                "json_extract(properties, '$.ns') END = 'pb'");
-        INFO(table << " plan: " << plan);
-        CHECK(plan.find(std::string("idx_") + table + "_ns") != std::string::npos);
+    // Mirrors the statements deleteByNamespace builds (knowledge_graph_store_sqlite.cpp).
+    const std::string owned =
+        "CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END = 'pb'";
+    const std::string nodeIds = "SELECT id FROM kg_nodes WHERE " + owned;
+    const std::string incident =
+        "(src_node_id IN (" + nodeIds + ") OR dst_node_id IN (" + nodeIds + "))";
+    const std::vector<std::string> statements = {
+        "SELECT COUNT(*) FROM kg_edges WHERE " + owned + " AND relation = 'cites'",
+        "DELETE FROM kg_edges WHERE " + owned + " AND relation = 'cites'",
+        "SELECT COUNT(*) FROM kg_edges WHERE (" + owned + ") OR " + incident,
+        "DELETE FROM kg_edges WHERE (" + owned + ") OR " + incident,
+        "SELECT COUNT(*) FROM kg_edges WHERE " + incident + " AND NOT COALESCE(" + owned + ", 0)",
+        "SELECT COUNT(*) FROM kg_nodes WHERE id IN (" + nodeIds + ")",
+        "DELETE FROM kg_nodes WHERE id IN (" + nodeIds + ")",
+    };
+    for (const auto& sql : statements) {
+        const auto plan = fix.planFor(sql);
+        INFO(sql << "\nplan:\n" << plan);
+        CHECK(plan.find("SCAN kg_edges") == std::string::npos);
+        CHECK(plan.find("SCAN kg_nodes") == std::string::npos);
+        CHECK(plan.find("_ns") != std::string::npos);
     }
 }
 

@@ -1455,3 +1455,90 @@ TEST_CASE("WriteCoordinator: derivation completions publish only current tokens"
     }
     repo.reset();
 }
+
+TEST_CASE("WriteCoordinator: a contained graph op failure fails only its own completion",
+          "[unit][daemon][write-coordinator][kg][graph-ingest]") {
+    KgCoordinatorFixture fix("wc_kg_graph_contained_");
+    boost::asio::io_context io;
+    WriteCoordinator::Config config;
+    config.maxBatchDelayMs = std::chrono::milliseconds{1};
+    WriteCoordinator coordinator(io, fix.kg, {}, config);
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+
+    // One batch, so both ops share one apply and one transaction.
+    auto removal = std::make_shared<yams::daemon::GraphRemoveCompletion>();
+    auto removalResult = removal->promise.get_future();
+    auto ingest = std::make_shared<yams::daemon::GraphIngestCompletion>();
+    auto ingestResult = ingest->promise.get_future();
+    auto batch = std::make_unique<WriteBatch>();
+    batch->source = "test/graph_contained";
+    yams::daemon::DeleteGraphNamespaceOp badRemoval;
+    badRemoval.completion = removal; // empty ns: fails before writing anything
+    batch->ops.emplace_back(std::move(badRemoval));
+    batch->ops.emplace_back(yams::daemon::UpsertNodesOp{{makeNode("plain:after")}});
+    yams::daemon::IngestGraphOp goodIngest;
+    goodIngest.nodes.push_back(makeNode("paper:ok"));
+    goodIngest.completion = ingest;
+    batch->ops.emplace_back(std::move(goodIngest));
+    coordinator.enqueue(std::move(batch));
+
+    // The failure belongs to the removal's caller, not to whoever flushes next.
+    REQUIRE(coordinator.flush(std::chrono::seconds{10}).has_value());
+    REQUIRE(removalResult.wait_for(std::chrono::seconds{10}) == std::future_status::ready);
+    auto removed = removalResult.get();
+    REQUIRE_FALSE(removed.has_value());
+    CHECK(removed.error().code == yams::ErrorCode::InvalidArgument);
+    auto ingested = ingestResult.get();
+    REQUIRE(ingested.has_value());
+    CHECK(ingested.value().nodesInserted == 1);
+
+    for (const auto* key : {"plain:after", "paper:ok"}) {
+        auto node = fix.kg->getNodeByKey(key);
+        REQUIRE(node.has_value());
+        CHECK(node.value().has_value());
+    }
+
+    coordinator.shutdown();
+    io.stop();
+    if (writerLoop.joinable()) {
+        writerLoop.join();
+    }
+}
+
+TEST_CASE("WriteCoordinator: graph op completions fail when the commit fails",
+          "[unit][daemon][write-coordinator][kg][graph-ingest]") {
+    KgCoordinatorFixture fix("wc_kg_graph_commit_");
+    boost::asio::io_context io;
+    WriteCoordinator::Config config;
+    config.maxBatchDelayMs = std::chrono::milliseconds{1};
+    WriteCoordinator coordinator(io, fix.kg, {}, config);
+    coordinator.testing_setBeforeKgCommitHook(
+        []() -> yams::Result<void> { return yams::Error{yams::ErrorCode::DatabaseError, "boom"}; });
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+
+    auto ingest = std::make_shared<yams::daemon::GraphIngestCompletion>();
+    auto ingestResult = ingest->promise.get_future();
+    auto batch = std::make_unique<WriteBatch>();
+    batch->source = "test/graph_commit_failure";
+    yams::daemon::IngestGraphOp op;
+    op.nodes.push_back(makeNode("paper:rolled-back"));
+    op.completion = ingest;
+    batch->ops.emplace_back(std::move(op));
+    coordinator.enqueue(std::move(batch));
+
+    REQUIRE(ingestResult.wait_for(std::chrono::seconds{10}) == std::future_status::ready);
+    auto result = ingestResult.get();
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message == "boom");
+    auto node = fix.kg->getNodeByKey("paper:rolled-back");
+    REQUIRE(node.has_value());
+    CHECK_FALSE(node.value().has_value());
+
+    coordinator.shutdown();
+    io.stop();
+    if (writerLoop.joinable()) {
+        writerLoop.join();
+    }
+}

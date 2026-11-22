@@ -34,9 +34,11 @@ The CLI file and the MCP arguments have the same shape:
   the payload otherwise; the daemon refuses the row (`invalid_ns`).
 - `document_hash` is not supported. The CLI rejects it, MCP does not advertise
   it, and the daemon ignores the IPC field.
-- Nodes upsert by `node_key`. A label, type or properties value that is sent
-  replaces the stored one; an omitted or empty one keeps it. Properties are
-  replaced as a whole, not merged.
+- Nodes upsert by `node_key`. A label or type that is sent replaces the stored
+  one; an omitted one keeps it. Properties are replaced as a whole, not merged.
+  Because ownership is read from the properties sent, an owner must resend
+  `properties.ns` on every upsert: omitting it is an ownership change and is
+  refused (`ns_change`).
 - Namespaced edges (`properties.ns` set) belong to their owner: an upsert
   replaces weight and properties exactly.
 - Un-namespaced edges keep the shared merge rule: weight becomes the max of the
@@ -106,6 +108,9 @@ request counts once as inserted and then as updated.
   `document_hash`, `file_path`, `source_file`, `snapshot_id` or relation say.
 - **Malformed owners:** an `ns` that is not a non-empty string does not exempt
   a row. Such a row stays subject to cleanup.
+- **Reserved relation:** `semantic_neighbor` belongs to YAMS. Topology
+  maintenance prunes self-loop `semantic_neighbor` edges by id, whoever owns
+  them, so external callers should not use that relation.
 - **`doc:` and `blob:` nodes:** these are YAMS-owned. Deleting or re-indexing a
   document removes them and every edge to them, including namespaced edges.
   Link external nodes to documents only if that is acceptable.
