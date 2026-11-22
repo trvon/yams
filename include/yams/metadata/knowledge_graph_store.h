@@ -573,6 +573,14 @@ public:
                                        std::string_view /*relation*/) {
         return Error{ErrorCode::NotImplemented, "Payload-free edge presence is not implemented"};
     }
+
+    // Blob node key ("blob:<sha256>") of the newest snapshot version recorded for a path:
+    // path:logical:<path> --path_version--> path:<snapshot>:<path> --has_version--> blob.
+    // nullopt when the path has no recorded version. Ingest uses it to skip minting a new
+    // snapshot path node when the content at a path is unchanged.
+    virtual Result<std::optional<std::string>> latestPathVersionBlobKey(std::string_view /*path*/) {
+        return Error{ErrorCode::NotImplemented, "Path version lookup is not implemented"};
+    }
 };
 
 /**

@@ -573,6 +573,46 @@ TEST_CASE("KG Store: ensurePathNode links logical path to snapshot path", "[unit
     CHECK((edges.value()[0].dstNodeId == snapshotId.value()));
 }
 
+TEST_CASE("KG Store: latestPathVersionBlobKey returns the newest version's blob",
+          "[unit][metadata][kg]") {
+    KGStoreFixture fix;
+    const std::string path = "/repo/latest.cpp";
+    auto none = fix.store_->latestPathVersionBlobKey(path);
+    REQUIRE((none.has_value()));
+    CHECK_FALSE(none.value().has_value());
+
+    const std::string hashOne(64, 'a');
+    const std::string hashTwo(64, 'b');
+    auto blobOne = fix.store_->ensureBlobNode(hashOne);
+    auto blobTwo = fix.store_->ensureBlobNode(hashTwo);
+    REQUIRE((blobOne.has_value()));
+    REQUIRE((blobTwo.has_value()));
+
+    const auto addVersion = [&](const std::string& snapshot, std::int64_t blobId) {
+        auto pathId = fix.store_->ensurePathNode(
+            PathNodeDescriptor{.snapshotId = snapshot, .path = path, .isDirectory = false});
+        REQUIRE((pathId.has_value()));
+        REQUIRE((fix.store_->linkPathVersion(pathId.value(), blobId, 0).has_value()));
+    };
+    addVersion("snap1", blobOne.value());
+    auto first = fix.store_->latestPathVersionBlobKey(path);
+    REQUIRE((first.has_value()));
+    REQUIRE((first.value().has_value()));
+    CHECK((*first.value() == "blob:" + hashOne));
+
+    addVersion("snap2", blobTwo.value());
+    addVersion("snap3", blobOne.value()); // content reverted
+    auto latest = fix.store_->latestPathVersionBlobKey(path);
+    REQUIRE((latest.has_value()));
+    REQUIRE((latest.value().has_value()));
+    CHECK((*latest.value() == "blob:" + hashOne));
+
+    // Other paths are not affected.
+    auto other = fix.store_->latestPathVersionBlobKey("/repo/latest.cpp.bak");
+    REQUIRE((other.has_value()));
+    CHECK_FALSE(other.value().has_value());
+}
+
 TEST_CASE("KG Store: fetchPathHistory follows rename chains and returns blob hashes",
           "[unit][metadata][kg]") {
     KGStoreFixture fix;
