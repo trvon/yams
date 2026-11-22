@@ -165,10 +165,7 @@ search::SearchExecutionContext buildSearchExecutionContext(const AppContext& ctx
 
     const search::QueryRouter router;
     const auto intent = router.classifyIntent(normalizedQuery).label;
-    const auto tokenCount = search::tokenizeLower(std::string(normalizedQuery)).size();
-    const bool shortQueryBudgeted = intent == search::QueryIntent::Code ||
-                                    intent == search::QueryIntent::Path ||
-                                    (intent == search::QueryIntent::Mixed && tokenCount <= 2);
+    const bool shortQueryBudgeted = search::isShortQueryBudgeted(intent, normalizedQuery);
     const auto concurrencyLimit = std::max<std::uint32_t>(1, context.concurrencyLimit);
     const bool pressureBudgeted =
         context.activeRequests >= 2 || (context.activeRequests * 2) >= concurrencyLimit;
