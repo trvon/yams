@@ -104,3 +104,24 @@ TEST_CASE("graph ingest rejects malformed namespaces and document_hash before wr
     auto none = corpus.run({"graph", "--node-key", "a"});
     CHECK(none.rc != 0);
 }
+
+TEST_CASE("graph ingest --strict fails on refused rows and unresolved edges",
+          "[cli][graph][ingest][e2e]") {
+    EmbeddedCorpus corpus("yams_graph_ingest_cli_strict_");
+    constexpr const char* kUnresolved = R"({"ns":"pb","nodes":[{"node_key":"paper:s",
+        "properties":{"ns":"pb"}}],"edges":[{"src_node_key":"paper:s",
+        "dst_node_key":"paper:none","relation":"cites","properties":{"ns":"pb"}}]})";
+
+    auto lenient = corpus.run({"graph", "ingest", "-f", "-"}, kUnresolved);
+    CHECK(lenient.rc == 0);
+    auto strict = corpus.run({"graph", "ingest", "-f", "-", "--strict", "--json"}, kUnresolved);
+    CHECK(strict.rc != 0);
+    auto j = parseJson(strict);
+    CHECK(j["nodes_updated"] == 1); // the written rows stay written
+    CHECK((strict.out + strict.err).find("strict") != std::string::npos);
+
+    // An alias on a node another namespace owns is refused under the request's ns.
+    auto alias = corpus.run({"graph", "ingest", "-f", "-", "--strict"},
+                            R"({"ns":"other","aliases":[{"node_key":"paper:s","alias":"s"}]})");
+    CHECK(alias.rc != 0);
+}

@@ -207,6 +207,9 @@ public:
                          "Payload file with nodes/edges/aliases, or '-' for stdin")
             ->required();
         ingest->add_flag("--json", jsonOutput_, "Output as JSON");
+        ingest->add_flag("--strict", ingestStrict_,
+                         "Exit non-zero when any row was refused (ns_conflicts) or any edge "
+                         "was unresolved; written rows stay written");
         ingest->callback([this]() {
             mode_ = Mode::Ingest;
             cli_->setPendingCommand(this);
@@ -388,6 +391,12 @@ private:
                             "Graph ingest stopped: " + progress.failure() + " (" +
                                 std::to_string(progress.chunksCommitted()) + "/" +
                                 std::to_string(progress.chunksTotal()) + " chunks committed)"};
+        }
+        if (ingestStrict_ && progress.hasRefusals()) {
+            co_return Error{ErrorCode::ValidationError,
+                            "strict: " + std::to_string(merged.nsConflicts.size()) +
+                                " ns conflicts, " + std::to_string(merged.unresolvedEdges.size()) +
+                                " unresolved edges (committed rows were kept)"};
         }
         co_return Result<void>();
     }
@@ -1293,6 +1302,7 @@ private:
     std::string removeRelation_;
     bool removeDryRun_{false};
     bool removeIncludeForeign_{false};
+    bool ingestStrict_{false};
 };
 
 std::unique_ptr<ICommand> createGraphCommand() {

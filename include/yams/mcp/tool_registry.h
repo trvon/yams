@@ -1330,6 +1330,8 @@ struct MCPGraphRequest {
     std::string ns;
     bool dryRun{false};
     bool includeForeignEdges{false};
+    // action=ingest: report failure when any ns conflict or unresolved edge was returned.
+    bool strict{false};
 
     static MCPGraphRequest fromJson(const json& j);
     json toJson() const;

@@ -177,3 +177,16 @@ TEST_CASE("graph ingest progress stops at the first failed chunk and keeps commi
         CHECK_FALSE(graphIngestProgressToJson(progress).contains("error"));
     }
 }
+
+TEST_CASE("graph ingest payload carries the request namespace into every chunk",
+          "[cli][graph][ingest]") {
+    auto parsed = parseGraphIngestPayloadText(R"({"ns":"pb","nodes":[{"node_key":"a"}],
+        "aliases":[{"node_key":"a","alias":"x"}]})");
+    REQUIRE(parsed.has_value());
+    CHECK(parsed.value().ns == "pb");
+    for (const auto& chunk : chunkGraphIngestRequest(parsed.value(), 1)) {
+        CHECK(chunk.ns == "pb");
+    }
+    CHECK_FALSE(parseGraphIngestPayloadText(R"({"ns":"","nodes":[]})").has_value());
+    CHECK_FALSE(parseGraphIngestPayloadText(R"({"ns":3,"nodes":[]})").has_value());
+}

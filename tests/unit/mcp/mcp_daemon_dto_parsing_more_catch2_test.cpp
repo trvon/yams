@@ -703,6 +703,10 @@ TEST_CASE("MCP DTO parsing - graph ingest upserts by default and remove carries 
         CHECK(r.relation == "cites");
         CHECK(r.dryRun);
         CHECK_FALSE(r.includeForeignEdges);
+        CHECK_FALSE(r.strict);
+        CHECK(MCPGraphRequest::fromJson(json{{"action", "ingest"}, {"strict", true}}).strict);
+        CHECK(MCPGraphRequest::fromJson(MCPGraphRequest::fromJson(json{{"strict", true}}).toJson())
+                  .strict);
         CHECK(MCPGraphRequest::fromJson(json{{"ns", "pb"}, {"include_foreign_edges", true}})
                   .includeForeignEdges);
         const auto again = MCPGraphRequest::fromJson(r.toJson());

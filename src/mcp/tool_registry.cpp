@@ -1667,6 +1667,7 @@ MCPGraphRequest MCPGraphRequest::fromJson(const json& j) {
     req.ns = j.value("ns", std::string{});
     req.dryRun = j.value("dry_run", false);
     req.includeForeignEdges = j.value("include_foreign_edges", false);
+    req.strict = j.value("strict", false);
 
     return req;
 }
@@ -1744,6 +1745,8 @@ json MCPGraphRequest::toJson() const {
         j["dry_run"] = dryRun;
     if (includeForeignEdges)
         j["include_foreign_edges"] = includeForeignEdges;
+    if (strict)
+        j["strict"] = strict;
 
     return j;
 }

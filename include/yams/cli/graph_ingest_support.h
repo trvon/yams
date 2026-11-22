@@ -15,10 +15,11 @@ namespace yams::cli {
 inline constexpr std::size_t kGraphIngestChunkRows = 2000;
 
 // Parse the `yams graph ingest` payload. It is the MCP `graph` action=ingest argument object:
-// {"nodes":[...], "edges":[...], "aliases":[...], "skip_existing_nodes":bool,
-//  "skip_existing_edges":bool}. An "action" key, if present, must be "ingest". `properties` may
-// be a JSON object or a JSON-encoded string; a present properties.ns must be a non-empty
-// string. "document_hash" is rejected: ingest never binds rows to a document.
+// {"ns":str, "nodes":[...], "edges":[...], "aliases":[...], "skip_existing_nodes":bool,
+//  "skip_existing_edges":bool}. Top-level "ns" is the namespace the request acts for; it
+// decides which nodes aliases may be added to. An "action" key, if present, must be "ingest".
+// `properties` may be a JSON object or a JSON-encoded string; a present properties.ns must be a
+// non-empty string. "document_hash" is rejected: ingest never binds rows to a document.
 Result<daemon::KgIngestRequest> parseGraphIngestPayload(const nlohmann::json& payload);
 Result<daemon::KgIngestRequest> parseGraphIngestPayloadText(std::string_view text);
 
@@ -44,6 +45,10 @@ public:
     std::size_t chunksTotal() const { return total_; }
     const std::string& failure() const { return failure_; }
     bool complete() const { return failure_.empty() && committed_ == total_; }
+    // Rows the committed chunks left unwritten for ownership or a missing endpoint.
+    bool hasRefusals() const {
+        return !merged_.nsConflicts.empty() || !merged_.unresolvedEdges.empty();
+    }
 
 private:
     daemon::KgIngestResponse merged_{};

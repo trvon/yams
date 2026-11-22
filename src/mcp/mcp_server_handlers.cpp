@@ -2829,6 +2829,7 @@ MCPServer::handleKgIngest(const MCPGraphRequest& req) {
     dreq.documentHash = req.documentHash;
     dreq.skipExistingNodes = req.skipExistingNodes;
     dreq.skipExistingEdges = req.skipExistingEdges;
+    dreq.ns = req.ns;
 
     dreq.nodes.reserve(req.nodes.size());
     for (const auto& n : req.nodes) {
@@ -2902,6 +2903,14 @@ MCPServer::handleKgIngest(const MCPGraphRequest& req) {
     }
     out.errors = resp.errors;
     out.success = resp.success;
+    // strict: a request that left anything unwritten for ownership or a missing endpoint is a
+    // failure for the caller. The rows that were written stay written.
+    if (req.strict && out.success && (!resp.nsConflicts.empty() || !resp.unresolvedEdges.empty())) {
+        out.success = false;
+        out.errors.push_back("strict: " + std::to_string(resp.nsConflicts.size()) +
+                             " ns conflicts, " + std::to_string(resp.unresolvedEdges.size()) +
+                             " unresolved edges");
+    }
 
     co_return out;
 }

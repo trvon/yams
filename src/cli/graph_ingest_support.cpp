@@ -209,6 +209,12 @@ Result<daemon::KgIngestRequest> parseGraphIngestPayload(const json& payload) {
         return skipEdges.error();
     request.skipExistingNodes = skipNodes.value();
     request.skipExistingEdges = skipEdges.value();
+    if (payload.contains("ns")) {
+        if (!payload["ns"].is_string() || payload["ns"].get<std::string>().empty()) {
+            return invalid("'ns' must be a non-empty string");
+        }
+        request.ns = payload["ns"].get<std::string>();
+    }
     if (payload.contains("document_hash")) {
         return invalid("'document_hash' is not supported: ingest never binds rows to a "
                        "document (use properties instead)");
@@ -233,6 +239,7 @@ std::vector<daemon::KgIngestRequest> chunkGraphIngestRequest(const daemon::KgIng
         chunk.documentHash = request.documentHash;
         chunk.skipExistingNodes = request.skipExistingNodes;
         chunk.skipExistingEdges = request.skipExistingEdges;
+        chunk.ns = request.ns;
         return chunk;
     };
     const auto append = [&](const auto& rows, auto member) {

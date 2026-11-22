@@ -931,6 +931,17 @@ void MCPServer::initializeToolRegistry() {
                     {"description",
                      "Leave edges that already exist by src/dst/relation untouched and count "
                      "them as skipped; default upserts them (action=ingest)"},
+                    {"default", false}}},
+                  {"ns",
+                   {{"type", "string"},
+                    {"description",
+                     "Namespace this ingest acts for (action=ingest). Aliases may only be "
+                     "added to nodes it owns; without it, only to un-namespaced nodes"}}},
+                  {"strict",
+                   {{"type", "boolean"},
+                    {"description",
+                     "Report failure when any row was refused for ownership (ns_conflicts) or "
+                     "any edge was unresolved (action=ingest). Written rows stay written"},
                     {"default", false}}}}}},
             "Query the knowledge graph, or upsert nodes, edges and aliases with "
             "action='ingest'. Rows carrying properties.ns are owned by that namespace: ingest "
