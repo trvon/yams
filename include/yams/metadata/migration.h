@@ -297,6 +297,8 @@ private:
     static Migration createGrepTrigramIndex();
     // Version 46: Empty the grep trigram index built before NUL bytes were handled.
     static Migration resetGrepTrigramIndex();
+    // Version 47: Rebuild v37 graph cleanup indexes left on the unguarded expression.
+    static Migration rebuildUnguardedGraphCleanupIndexes();
 };
 
 /**

@@ -8,6 +8,7 @@
 
 #include "../../../src/daemon/client/transport_disconnect.h"
 
+using yams::daemon::detail::describeReadError;
 using yams::daemon::detail::describeWriteError;
 using yams::daemon::detail::isExpectedDisconnectError;
 
@@ -36,4 +37,23 @@ TEST_CASE("A failed write says the connection closed and keeps the OS detail",
     const auto failed = describeWriteError(denied);
     CHECK(failed.find("Connection write failed") != std::string::npos);
     CHECK(failed.find(denied.message()) != std::string::npos);
+}
+
+TEST_CASE("A failed read says the daemon closed the connection and keeps the OS detail",
+          "[daemon][client][transport]") {
+    // macOS reports a daemon that stops mid-request as EOF or ENOTCONN on the read side; the
+    // read loop passes this text to every waiting request.
+    // eof is a misc_errors value, the others basic_errors, so name the element type.
+    for (const boost::system::error_code code :
+         {boost::system::error_code(boost::asio::error::eof),
+          boost::system::error_code(boost::asio::error::not_connected),
+          boost::system::error_code(boost::asio::error::connection_reset)}) {
+        const auto text = describeReadError(code);
+        INFO(text);
+        CHECK(text.find("Connection closed by the daemon") != std::string::npos);
+        CHECK(text.find(code.message()) != std::string::npos);
+    }
+
+    const boost::system::error_code denied = boost::asio::error::access_denied;
+    CHECK(describeReadError(denied) == denied.message());
 }

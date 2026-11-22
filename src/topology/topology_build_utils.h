@@ -3,9 +3,12 @@
 #include <yams/topology/topology_engine.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -28,6 +31,41 @@ struct PairKeyHash {
         mixed ^= mixed >> 33;
         return static_cast<std::size_t>(mixed);
     }
+};
+
+/// The reciprocalOnly edge rule. A neighbor's `reciprocal` flag says the other endpoint lists it
+/// too, but the engines do not take the flag's word: a pair is an edge only when both endpoints
+/// list each other with an admitted observation (flagged, finite, at or above the floor), and its
+/// weight is the weaker direction. Callers observe each admitted observation, then apply() the
+/// rule to their max-per-pair weight map.
+template <class Key, class Hash = std::hash<Key>> class ReciprocalPairScores {
+public:
+    void observe(const Key& key, bool fromLowerEndpoint, float score) {
+        constexpr float kUnseen = -std::numeric_limits<float>::infinity();
+        auto& scores =
+            scores_.try_emplace(key, std::array<float, 2>{kUnseen, kUnseen}).first->second;
+        auto& slot = scores[fromLowerEndpoint ? 0 : 1];
+        slot = std::max(slot, score);
+    }
+
+    /// Drops pairs observed from one endpoint only and sets the rest to the weaker direction.
+    /// Erasing and updating in place keep `weights`' iteration order, so symmetric input (cosine
+    /// kNN lists both directions with one score) yields the same edges in the same order.
+    template <class WeightMap> void apply(WeightMap& weights) const {
+        for (auto it = weights.begin(); it != weights.end();) {
+            const auto found = scores_.find(it->first);
+            if (found == scores_.end() || !std::isfinite(found->second[0]) ||
+                !std::isfinite(found->second[1])) {
+                it = weights.erase(it);
+                continue;
+            }
+            it->second = std::min(found->second[0], found->second[1]);
+            ++it;
+        }
+    }
+
+private:
+    std::unordered_map<Key, std::array<float, 2>, Hash> scores_;
 };
 
 inline std::vector<float> meanEmbedding(std::span<const TopologyDocumentInput> documents,

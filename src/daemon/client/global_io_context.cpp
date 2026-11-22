@@ -159,16 +159,20 @@ std::shared_lock<std::shared_mutex> GlobalIOContext::acquire_operation_guard() {
 std::shared_lock<std::shared_mutex> GlobalIOContext::try_acquire_operation_guard() {
     // Never block: a shared_mutex may make new readers wait behind a pending writer (libc++,
     // Windows SRW locks), and the writer, reset(), waits for operations that need this thread.
-    std::shared_lock<std::shared_mutex> lock(operation_mutex_, std::try_to_lock);
-    while (!lock.owns_lock()) {
+    // Check the announcement before every try_lock_shared: a reader-preferring shared_mutex
+    // (glibc) lets readers in while a writer waits, so overlapping operations could otherwise
+    // starve reset() (formal/tla/ClientIoReset.tla, _lockfirst_rp_load).
+    for (;;) {
         if (resets_in_progress_.load(std::memory_order_acquire) > 0) {
             return {};
         }
+        std::shared_lock<std::shared_mutex> lock(operation_mutex_, std::try_to_lock);
+        if (lock.owns_lock()) {
+            return lock;
+        }
         // try_lock_shared may fail spuriously; without a reset pending the lock is free.
         std::this_thread::yield();
-        lock = std::shared_lock<std::shared_mutex>(operation_mutex_, std::try_to_lock);
     }
-    return lock;
 }
 
 void GlobalIOContext::restart() {
@@ -374,6 +378,14 @@ void GlobalIOContext::testing_end_reset() noexcept {
     auto& ctx = instance();
     ctx.operation_mutex_.unlock();
     ctx.resets_in_progress_.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+void GlobalIOContext::testing_announce_reset() noexcept {
+    instance().resets_in_progress_.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void GlobalIOContext::testing_withdraw_reset() noexcept {
+    instance().resets_in_progress_.fetch_sub(1, std::memory_order_acq_rel);
 }
 
 void GlobalIOContext::testing_set_destroyed(bool destroyed) noexcept {

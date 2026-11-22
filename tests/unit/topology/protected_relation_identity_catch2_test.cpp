@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -26,9 +27,10 @@ TEST_CASE("Protected relation construction identity is stable across input order
     config.minEdgeScore = 0.25;
     config.reciprocalOnly = true;
 
-    constexpr std::string_view expected =
-        "semantic_neighbor:v1:construction:fnv1a64:c3d98ce69d6e540e";
-    CHECK((protectedRelationConstructionIdentity(documents, config) == expected));
+    // a-b and b-c are observed from both ends and carry the weaker score (0.75, 0.40); a-c has
+    // one observation, below the floor.
+    const std::string expected = "semantic_neighbor:v1:construction:fnv1a64:2b2682d76751210a";
+    CHECK(protectedRelationConstructionIdentity(documents, config) == expected);
     ConnectedComponentTopologyEngine engine;
     const auto artifacts = engine.buildArtifacts(documents, config);
     REQUIRE(artifacts);
@@ -57,6 +59,15 @@ TEST_CASE("Protected relation construction identity preserves float encoding",
         {.documentHash = "e"},
         {.documentHash = "f"},
     };
+    // A reciprocal pair needs both directions; mirror each observation with the same score. The
+    // pinned identity is the one the one-directional input had before that rule: symmetric
+    // input keeps its identity.
+    for (const auto& neighbor : std::vector(documents[0].neighbors)) {
+        auto& target = *std::ranges::find(documents, neighbor.documentHash,
+                                          &TopologyDocumentInput::documentHash);
+        target.neighbors.push_back(
+            {.documentHash = "a", .score = neighbor.score, .reciprocal = true});
+    }
     TopologyBuildConfig config;
     config.minEdgeScore = -std::numeric_limits<double>::infinity();
     config.reciprocalOnly = true;
@@ -70,7 +81,8 @@ TEST_CASE("Protected relation construction ignores non-finite scores",
     std::vector<TopologyDocumentInput> cleanDocuments{
         {.documentHash = "a",
          .neighbors = {{.documentHash = "b", .score = 0.75F, .reciprocal = true}}},
-        {.documentHash = "b"},
+        {.documentHash = "b",
+         .neighbors = {{.documentHash = "a", .score = 0.75F, .reciprocal = true}}},
         {.documentHash = "c"},
         {.documentHash = "d"},
     };

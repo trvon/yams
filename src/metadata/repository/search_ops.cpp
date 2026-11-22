@@ -46,6 +46,19 @@ void appendUniqueExpandedTerm(std::vector<std::string>& expandedTerms, std::stri
 Result<SearchResults>
 MetadataRepository::search(const std::string& query, int limit, int offset,
                            const std::optional<std::vector<int64_t>>& docIds) {
+    return searchFullText(query, limit, offset, docIds, false);
+}
+
+Result<SearchResults>
+MetadataRepository::searchKeyword(const std::string& query, int limit, int offset,
+                                  const std::optional<std::vector<int64_t>>& docIds) {
+    return searchFullText(query, limit, offset, docIds, true);
+}
+
+Result<SearchResults>
+MetadataRepository::searchFullText(const std::string& query, int limit, int offset,
+                                   const std::optional<std::vector<int64_t>>& docIds,
+                                   bool nlOrFallbackByDefault) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::search");
     return executeReadQuery<SearchResults>([&](Database& db) -> Result<SearchResults> {
         YAMS_ZONE_SCOPED_N("MetadataRepo::search::FTS5Query");
@@ -67,6 +80,7 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
             cacheKey.append(std::to_string(limit));
             cacheKey.push_back(':');
             cacheKey.append(std::to_string(offset));
+            cacheKey.append(nlOrFallbackByDefault ? ":kw" : ":fts");
 
             auto snapshot =
                 std::atomic_load_explicit(&queryCacheSnapshot_, std::memory_order_acquire);
@@ -99,12 +113,16 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
 
         const bool nlAutoPhrase = parseEnvFlag("YAMS_FTS_NL_AUTO_PHRASE", true);
         const bool nlAutoPrefix = parseEnvFlag("YAMS_FTS_NL_PREFIX", true);
-        int nlMinResults = 3;
+        // Natural-language queries run as an implicit AND first. A sentence-length query rarely
+        // has every term in one document, so for keyword search a short AND page is rerun as a
+        // BM25-ranked OR over the same terms; strict AND returned nothing for most prose queries.
+        // Candidate generators keep AND, which the hybrid text pipeline expands on its own.
+        int nlMinResults = nlOrFallbackByDefault ? effectiveLimit : 3;
         if (const char* s = std::getenv("YAMS_FTS_NL_MIN_RESULTS"); // NOLINT(concurrency-mt-unsafe)
             s && *s) {
             nlMinResults = std::max(0, std::atoi(s));
         }
-        const bool useNlFallback = parseEnvFlag("YAMS_FTS_NL_OR_FALLBACK", false);
+        const bool useNlFallback = parseEnvFlag("YAMS_FTS_NL_OR_FALLBACK", nlOrFallbackByDefault);
         const bool isAdvancedQuery = hasAdvancedFts5Operators(query);
         bool usedNaturalLanguageQuery = false;
         if (!isAdvancedQuery) {
@@ -343,8 +361,8 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
             static_cast<int>(results.results.size()) < nlMinResults) {
             SearchResults orResults;
             orResults.query = query;
-            std::string orQuery =
-                buildNaturalLanguageFts5Query(query, true, nlAutoPrefix, nlAutoPhrase);
+            // No auto-phrase here: a 3-4 term query would otherwise rerun the same phrase.
+            std::string orQuery = buildNaturalLanguageFts5Query(query, true, nlAutoPrefix, false);
             auto orRun = runFtsQuery(orQuery, orResults);
             if (!orRun) {
                 return orRun.error();

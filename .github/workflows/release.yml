@@ -643,7 +643,7 @@ jobs:
           # Same Conan client and same os/arch suffix only: no cross-arch or
           # cross-version fallback. Compiler upgrades need no key bump because
           # host profiles carry the detected compiler.version (package_id).
-          key: conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/profiles/**') }}
+          key: conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conanfile.py', 'conan/**') }}
           restore-keys: |
             conan2-${{ env.CONAN_VERSION }}-${{ runner.os }}-${{ matrix.suffix }}-
       - name: Conan cache diagnostics
@@ -951,6 +951,28 @@ jobs:
           conan config show core.download:parallel 2>/dev/null || true
           conan --version
 
+      # ONNX Runtime gets its own cache entry. The shared conan2-* entry comes from the warm
+      # job, which runs without ONNX; this job gets an exact-key hit there and actions/cache
+      # does not save on an exact hit, so ONNX Runtime was fetched on every release build.
+      # The entry holds only the onnxruntime package (conan cache save, ~10-60 MB) and is
+      # keyed by recipe, profiles and the package ids it holds; see the helper script.
+      - name: Restore ONNX Runtime Conan package
+        if: github.actor != 'nektos/act' && matrix.arch_container != true
+        id: cache_onnxruntime
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/onnxruntime-conan.tgz
+          key: onnxruntime-conan-${{ env.CONAN_VERSION }}-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan/onnxruntime/**', 'conan/profiles/**') }}-
+          restore-keys: |
+            onnxruntime-conan-${{ env.CONAN_VERSION }}-${{ runner.os }}-${{ matrix.suffix }}-${{ hashFiles('conan/onnxruntime/**', 'conan/profiles/**') }}-
+
+      - name: Load ONNX Runtime Conan package
+        if: github.actor != 'nektos/act' && matrix.arch_container != true
+        continue-on-error: true
+        shell: bash
+        run: bash .github/scripts/onnxruntime-conan-cache.sh restore "$RUNNER_TEMP/onnxruntime-conan.tgz"
+
       - name: Warm key Conan packages (best-effort)
         if: ${{ matrix.hosted }}
         shell: bash
@@ -1134,6 +1156,23 @@ jobs:
             -Dstatic-embedding-table="$PWD/build/static-embedding/yams-static-bge-c4-256.smstat"
           meson compile -C build/release
           echo "BUILD_DIR=build/release" >> "$GITHUB_ENV"
+
+      - name: Archive new ONNX Runtime Conan package
+        if: always() && github.actor != 'nektos/act' && matrix.arch_container != true
+        id: onnxruntime_pkg
+        continue-on-error: true
+        shell: bash
+        run: |
+          bash .github/scripts/onnxruntime-conan-cache.sh save "$RUNNER_TEMP/onnxruntime-conan.tgz" \
+            "onnxruntime-conan-${CONAN_VERSION}-${RUNNER_OS}-${{ matrix.suffix }}-${{ hashFiles('conan/onnxruntime/**', 'conan/profiles/**') }}-"
+
+      - name: Save ONNX Runtime Conan package
+        if: always() && steps.onnxruntime_pkg.outputs.save == 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/onnxruntime-conan.tgz
+          key: ${{ steps.onnxruntime_pkg.outputs.key }}
 
       - name: Upload build logs (artifacts)
         if: failure()

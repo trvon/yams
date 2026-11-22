@@ -2118,8 +2118,8 @@ TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector concurrent collectio
     auto status = collectionStartedFuture.wait_for(std::chrono::seconds(2));
     REQUIRE(status != std::future_status::timeout);
 
-    // Small delay to ensure the async collection is actually running
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // The callback runs inside collect(), so the first collection holds the flag here.
+    CHECK(gc->isCollecting());
 
     // Try to start second collection - should fail immediately
     auto result2 = gc->collect(options);
@@ -2135,6 +2135,7 @@ TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector concurrent collectio
 
     auto result1 = future1.get();
     CHECK(result1.has_value());
+    CHECK_FALSE(gc->isCollecting());
 }
 
 TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector get last stats",
@@ -2156,36 +2157,50 @@ TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector get last stats",
     CHECK(stats.duration.count() >= 0); // Duration can be 0 for very fast operations
 }
 
-TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector isCollecting reflects active state",
-                 "[storage][gc][isCollecting][catch2]") {
+TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector scheduleCollection runs a collection",
+                 "[storage][gc][schedule][catch2]") {
+    std::vector<std::byte> data(1024, std::byte{42});
+    auto hash = generateHash(400);
+    REQUIRE(storageEngine->store(hash, data).has_value());
+    REQUIRE(refCounter->increment(hash, data.size()).has_value());
+    REQUIRE(refCounter->decrement(hash).has_value());
+
+    std::promise<void> ran;
+    auto ranFuture = ran.get_future();
+    std::atomic<bool> signalled{false};
+    GCOptions options{.maxBlocksPerRun = 5,
+                      .minAgeSeconds = 0,
+                      .dryRun = true,
+                      .progressCallback = [&ran, &signalled](const std::string&, size_t) {
+                          if (!signalled.exchange(true)) {
+                              ran.set_value();
+                          }
+                      }};
+
+    // Declared after the callback's captures, so the scheduler stops before they go away.
+    struct StopScheduler {
+        GarbageCollector& gc;
+        ~StopScheduler() { gc.stopScheduledCollection(); }
+    } stopOnExit{*gc};
+
+    gc->scheduleCollection(std::chrono::seconds(1), options);
+    REQUIRE(ranFuture.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+
+    gc->stopScheduledCollection();
     CHECK_FALSE(gc->isCollecting());
-
-    GCOptions options{
-        .maxBlocksPerRun = 10, .minAgeSeconds = 0, .dryRun = true, .progressCallback = nullptr};
-
-    auto future = gc->collectAsync(options);
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    bool wasCollecting = gc->isCollecting();
-
-    future.wait();
-    CHECK_FALSE(gc->isCollecting());
-    (void)wasCollecting;
 }
 
-TEST_CASE_METHOD(GarbageCollectorFixture, "GarbageCollector scheduleCollection starts and stops",
+TEST_CASE_METHOD(GarbageCollectorFixture,
+                 "GarbageCollector stopScheduledCollection does not wait out the interval",
                  "[storage][gc][schedule][catch2]") {
     GCOptions options{
         .maxBlocksPerRun = 5, .minAgeSeconds = 0, .dryRun = true, .progressCallback = nullptr};
 
-    CHECK_FALSE(gc->isCollecting());
-
-    gc->scheduleCollection(std::chrono::seconds(1), options);
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
+    gc->scheduleCollection(std::chrono::seconds(3600), options);
+    const auto started = std::chrono::steady_clock::now();
     gc->stopScheduledCollection();
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK((std::chrono::steady_clock::now() - started < std::chrono::seconds(5)));
     CHECK_FALSE(gc->isCollecting());
 }
 

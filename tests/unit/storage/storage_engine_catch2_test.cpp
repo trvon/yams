@@ -400,11 +400,18 @@ TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine cleanup temp files",
         std::ofstream(tempFile) << "test data";
     }
 
+    auto [hash, data] = generateTestData(512);
+    REQUIRE((storage->store(hash, data).has_value()));
+
     auto result = storage->cleanupTempFiles();
     REQUIRE((result.has_value()));
 
+    // Fresh temp files are kept, and stored objects are untouched.
     CHECK((std::distance(std::filesystem::directory_iterator(tempDir),
                          std::filesystem::directory_iterator{}) == 5));
+    auto stored = storage->retrieve(hash);
+    REQUIRE((stored.has_value()));
+    CHECK((stored.value() == data));
 }
 
 TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine storage size", "[storage][engine][catch2]") {
@@ -763,32 +770,6 @@ TEST_CASE_METHOD(StorageEngineFixture,
     CHECK((result.error().code == ErrorCode::ChunkNotFound));
 }
 
-TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine cleanupTempFiles returns successfully",
-                 "[storage][cleanup][catch2]") {
-    auto [hash, data] = generateTestData(512);
-    REQUIRE((storage->store(hash, data).has_value()));
-
-    auto tempDir = storagePath / "temp";
-    REQUIRE((std::filesystem::exists(tempDir)));
-
-    auto statsExist = storage->getStats();
-    REQUIRE((statsExist.totalObjects >= 1));
-
-    auto cleanupResult = storage->cleanupTempFiles();
-    REQUIRE((cleanupResult.has_value()));
-}
-
-TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine compact returns successfully",
-                 "[storage][compact][catch2]") {
-    auto [hash1, data1] = generateTestData(1024);
-    auto [hash2, data2] = generateTestData(2048);
-    REQUIRE((storage->store(hash1, data1).has_value()));
-    REQUIRE((storage->store(hash2, data2).has_value()));
-
-    auto compactResult = storage->compact();
-    CHECK((compactResult.has_value()));
-}
-
 TEST_CASE_METHOD(StorageEngineFixture,
                  "StorageEngine compact prunes empty shard directories and stale temp files",
                  "[storage][compact][cleanup][catch2]") {
@@ -928,13 +909,21 @@ TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine rejects removal of non-reg
     std::filesystem::remove_all(objectPath, ec);
 }
 
-TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine compact returns success",
+TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine compact keeps stored objects readable",
                  "[storage][compact][smoke][catch2]") {
-    auto [hash, data] = generateTestData(512);
-    REQUIRE((storage->store(hash, data).has_value()));
-    auto result = storage->compact();
-    REQUIRE((result.has_value()));
-    CHECK((storage->exists(hash).value()));
+    auto [hash1, data1] = generateTestData(1024);
+    auto [hash2, data2] = generateTestData(2048);
+    REQUIRE((storage->store(hash1, data1).has_value()));
+    REQUIRE((storage->store(hash2, data2).has_value()));
+
+    REQUIRE((storage->compact().has_value()));
+
+    auto first = storage->retrieve(hash1);
+    REQUIRE((first.has_value()));
+    CHECK((first.value() == data1));
+    auto second = storage->retrieve(hash2);
+    REQUIRE((second.has_value()));
+    CHECK((second.value() == data2));
 }
 
 TEST_CASE_METHOD(StorageEngineFixture, "StorageEngine getBlockSize invalid key",
@@ -1256,26 +1245,70 @@ TEST_CASE("StorageEngine getDeduplicationRatio is deprecated alias",
 }
 
 // ---------------------------------------------------------------------------
-// Benchmark: storeBatch serial vs parallel
+// storeBatch: correctness across writer counts, and a serial vs parallel benchmark
 // ---------------------------------------------------------------------------
 
-TEST_CASE("StorageEngine storeBatch parallel speedup",
-          "[storage][engine][batch][benchmark][catch2]") {
-    auto testDir = std::filesystem::temp_directory_path() /
-                   std::format("yams_batch_bench_{}",
-                               std::chrono::steady_clock::now().time_since_epoch().count());
-    std::filesystem::create_directories(testDir);
-
-    constexpr std::size_t kItemCount = 128;
-    constexpr std::size_t kItemSize = 1024;
+namespace {
+// 128 random 1 KiB items with their SHA-256 keys, and a fresh temp dir for the stores.
+struct BatchItems {
+    std::filesystem::path testDir;
     std::vector<std::pair<std::string, std::vector<std::byte>>> items;
-    items.reserve(kItemCount);
-    auto hasher = crypto::createSHA256Hasher();
-    for (std::size_t i = 0; i < kItemCount; ++i) {
-        auto data = generateRandomBytes(kItemSize);
-        auto hash = hasher->hash(data);
-        items.emplace_back(std::move(hash), std::move(data));
+
+    explicit BatchItems(const char* prefix) {
+        testDir = std::filesystem::temp_directory_path() /
+                  std::format("{}_{}", prefix,
+                              std::chrono::steady_clock::now().time_since_epoch().count());
+        std::filesystem::create_directories(testDir);
+        constexpr std::size_t kItemCount = 128;
+        constexpr std::size_t kItemSize = 1024;
+        items.reserve(kItemCount);
+        auto hasher = crypto::createSHA256Hasher();
+        for (std::size_t i = 0; i < kItemCount; ++i) {
+            auto data = generateRandomBytes(kItemSize);
+            auto hash = hasher->hash(data);
+            items.emplace_back(std::move(hash), std::move(data));
+        }
     }
+    ~BatchItems() {
+        std::error_code ec;
+        std::filesystem::remove_all(testDir, ec);
+    }
+    BatchItems(const BatchItems&) = delete;
+    BatchItems& operator=(const BatchItems&) = delete;
+};
+} // namespace
+
+TEST_CASE("StorageEngine storeBatch stores every item with one or many writers",
+          "[storage][engine][batch][catch2]") {
+    BatchItems batch("yams_batch_verify");
+    const auto& testDir = batch.testDir;
+    const auto& items = batch.items;
+
+    for (const auto& [subdir, maxConcurrentWriters] :
+         {std::pair{"serial_verify", std::size_t{1}},
+          std::pair{"parallel_verify", std::size_t{16}}}) {
+        StorageConfig config{.basePath = testDir / subdir,
+                             .shardDepth = 2,
+                             .mutexPoolSize = 64,
+                             .maxConcurrentWriters = maxConcurrentWriters};
+        auto storage = std::make_unique<StorageEngine>(std::move(config));
+        auto batchResult = storage->storeBatch(items);
+        REQUIRE((std::ranges::all_of(batchResult,
+                                     [](const auto& result) { return result.has_value(); })));
+        for (const auto& [hash, data] : items) {
+            auto retrieved = storage->retrieve(hash);
+            CHECK((retrieved.has_value()));
+            CHECK((retrieved.value() == data));
+        }
+    }
+}
+
+// Benchmark only: hidden, run with '[.benchmark]'.
+TEST_CASE("StorageEngine storeBatch parallel speedup",
+          "[storage][engine][batch][.benchmark][catch2]") {
+    BatchItems batch("yams_batch_bench");
+    const auto& testDir = batch.testDir;
+    const auto& items = batch.items;
 
     BENCHMARK("storeBatch serial (maxConcurrentWriters=1)") {
         static std::atomic<std::uint64_t> serialRunId{0};
@@ -1306,28 +1339,6 @@ TEST_CASE("StorageEngine storeBatch parallel speedup",
         std::filesystem::remove_all(testDir / std::format("parallel_{}", runId), ec);
         return result;
     };
-
-    // Verify all data is retrievable from one explicit serial and parallel run.
-    for (const auto& [subdir, maxConcurrentWriters] :
-         {std::pair{"serial_verify", std::size_t{1}},
-          std::pair{"parallel_verify", std::size_t{16}}}) {
-        StorageConfig config{.basePath = testDir / subdir,
-                             .shardDepth = 2,
-                             .mutexPoolSize = 64,
-                             .maxConcurrentWriters = maxConcurrentWriters};
-        auto storage = std::make_unique<StorageEngine>(std::move(config));
-        auto batchResult = storage->storeBatch(items);
-        REQUIRE((std::ranges::all_of(batchResult,
-                                     [](const auto& result) { return result.has_value(); })));
-        for (const auto& [hash, data] : items) {
-            auto retrieved = storage->retrieve(hash);
-            CHECK((retrieved.has_value()));
-            CHECK((retrieved.value() == data));
-        }
-    }
-
-    std::error_code ec;
-    std::filesystem::remove_all(testDir, ec);
 }
 
 // ---------------------------------------------------------------------------
