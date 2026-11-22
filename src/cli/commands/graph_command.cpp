@@ -145,9 +145,10 @@ public:
 
         // Agent-oriented navigation ops (share --depth where relevant)
         cmd->add_option("--lookup", lookupSymbol_,
-                        "Resolve a symbol definition (go-to-definition)");
+                        "Resolve a symbol definition; needs code-symbol nodes (pre-v0.20 stores)");
         cmd->add_option("--at-file", lookupAtFile_, "Disambiguate --lookup by file path substring");
-        cmd->add_option("--trace", traceFrom_, "Trace a path from this symbol (use with --to)");
+        cmd->add_option("--trace", traceFrom_,
+                        "Trace a path from this symbol (use with --to); needs code-symbol nodes");
         cmd->add_option("--to", traceTo_, "Target symbol for --trace");
 
         // Relation filtering for traversal

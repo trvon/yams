@@ -586,7 +586,10 @@ TEST_CASE("GraphContextService explore finds scoped files despite a saturated gl
     CHECK(result.value().files.front().filePath == target.string());
 
     // The ordinary bounded lookup cannot see this target: direct-key seeding,
-    // not merely reordering the same candidate pool, is what restores it.
+    // not merely reordering the same candidate pool, is what restores it. Lookup only
+    // runs on stores with code-symbol nodes, so give the store one.
+    fixture.upsertNodeFor(
+        fixture.symbol(fixture.testDir / "foreign" / "legacy.cpp", "legacyFn", "legacyFn", 1, 1));
     GraphSymbolLookupRequest bounded;
     bounded.symbol = req.query;
     bounded.file = target.string();
@@ -621,6 +624,9 @@ TEST_CASE("GraphContextService explore budgets distinct file contexts rather tha
     CHECK(result.value().files[1].filePath == second.string());
     CHECK_FALSE(result.value().truncated);
 
+    // Lookup only runs on stores with code-symbol nodes; one unrelated symbol enables it.
+    fixture.upsertNodeFor(
+        fixture.symbol(fixture.testDir / "src" / "legacy.cpp", "legacyFn", "legacyFn", 1, 1));
     GraphSymbolLookupRequest lookup;
     lookup.symbol = "guide";
     lookup.budget.maxSymbols = 64;
@@ -1069,4 +1075,92 @@ TEST_CASE("GraphContextService trace finds a path across a call chain",
     auto missing = service->trace(missingReq);
     REQUIRE((missing.has_value()));
     CHECK_FALSE(missing.value().found);
+}
+
+namespace {
+
+// A stored document as ingest leaves it: a metadata row, its doc:<hash> node, and a
+// path:logical:<path> node.
+struct StoredDocument {
+    std::filesystem::path path;
+    std::int64_t documentId{0};
+    std::int64_t docNodeId{0};
+};
+
+StoredDocument storeDocument(GraphContextServiceFixture& fixture, const std::string& relativePath,
+                             const std::vector<std::string>& tags = {}) {
+    StoredDocument stored;
+    stored.path = fixture.writeSource(relativePath, {"// " + relativePath});
+    DocumentInfo doc;
+    doc.filePath = stored.path.string();
+    const auto derived = computePathDerivedValues(doc.filePath);
+    doc.fileName = stored.path.filename().string();
+    doc.fileExtension = stored.path.extension().string();
+    doc.fileSize = static_cast<std::int64_t>(std::filesystem::file_size(stored.path));
+    doc.sha256Hash = "hash-" + relativePath;
+    doc.mimeType = "text/plain";
+    doc.pathPrefix = derived.pathPrefix;
+    doc.reversePath = derived.reversePath;
+    doc.pathHash = derived.pathHash;
+    doc.parentHash = derived.parentHash;
+    doc.pathDepth = derived.pathDepth;
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.createdTime = now;
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+    auto inserted = fixture.metadataRepo->insertDocument(doc);
+    REQUIRE((inserted.has_value()));
+    stored.documentId = inserted.value();
+    for (const auto& tag : tags) {
+        REQUIRE(
+            (fixture.metadataRepo->setMetadata(stored.documentId, "tag:" + tag, MetadataValue(tag))
+                 .has_value()));
+    }
+
+    KGNode docNode;
+    docNode.nodeKey = "doc:" + doc.sha256Hash;
+    docNode.label = doc.filePath;
+    docNode.type = "document";
+    auto docNodeId = fixture.kgStore->upsertNode(docNode);
+    REQUIRE((docNodeId.has_value()));
+    stored.docNodeId = docNodeId.value();
+    fixture.upsertPathNode(stored.path, "path:logical:" + stored.path.string());
+    return stored;
+}
+
+} // namespace
+
+TEST_CASE("GraphContextService lookup and trace fail clearly without symbol nodes",
+          "[services][graph][context][symbols]") {
+    GraphContextServiceFixture fixture;
+    // A post-v0.20 store: documents and path nodes only.
+    storeDocument(fixture, "src/alpha.cpp");
+    storeDocument(fixture, "src/beta.cpp");
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphSymbolLookupRequest lookup;
+    lookup.symbol = "alpha";
+    const auto lookupResult = service->lookupSymbol(lookup);
+    REQUIRE_FALSE(lookupResult.has_value());
+    CHECK(lookupResult.error().code == yams::ErrorCode::NotSupported);
+    CHECK(lookupResult.error().message.find("v0.20") != std::string::npos);
+    CHECK(lookupResult.error().message.find("--explore") != std::string::npos);
+
+    GraphTraceRequest trace;
+    trace.from = "alpha.cpp";
+    trace.to = "beta.cpp";
+    const auto traceResult = service->trace(trace);
+    REQUIRE_FALSE(traceResult.has_value());
+    CHECK(traceResult.error().code == yams::ErrorCode::NotSupported);
+    CHECK(traceResult.error().message.find("v0.20") != std::string::npos);
+
+    // Stores written before v0.20 keep their symbol nodes, and lookup still resolves them.
+    const auto legacyPath = fixture.writeSource("src/legacy.cpp", {"int legacyEntry() {}"});
+    fixture.upsertSymbols({fixture.symbol(legacyPath, "legacyEntry", "demo::legacyEntry", 1, 1)});
+    lookup.symbol = "legacyEntry";
+    const auto legacy = service->lookupSymbol(lookup);
+    REQUIRE((legacy.has_value()));
+    REQUIRE((legacy.value().matches.size() == 1));
+    CHECK(legacy.value().matches.front().filePath == legacyPath.string());
 }

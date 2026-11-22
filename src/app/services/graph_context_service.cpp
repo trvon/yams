@@ -11,6 +11,7 @@
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cctype>
 #include <chrono>
@@ -499,6 +500,38 @@ bool isWholeFileContext(const GraphContextSymbol& symbol) {
            !symbol.startLine.has_value() && !symbol.endLine.has_value();
 }
 
+// Node types the code-symbol extractor wrote before v0.20 (migration 40 lists the same set),
+// plus generic symbol kinds that graph ingest may still carry.
+constexpr std::array<std::string_view, 22> kSymbolNodeTypes{
+    "function", "function_version", "method",    "method_version", "class",     "class_version",
+    "struct",   "struct_version",   "enum",      "enum_version",   "interface", "interface_version",
+    "trait",    "trait_version",    "field",     "field_version",  "variable",  "variable_version",
+    "symbol",   "symbol_reference", "namespace", "macro"};
+
+const std::string& symbolNavigationUnavailableMessage() {
+    static const std::string kMessage =
+        "This store has no code-symbol nodes: symbol extraction was removed in v0.20, so "
+        "graph lookup and trace have nothing to resolve. Use `yams graph --explore <file>` for "
+        "files related by directory, tag and semantic similarity, or `yams grep`/`yams search` "
+        "to find a definition.";
+    return kMessage;
+}
+
+// Lookup and trace resolve code-symbol nodes. Stores written since v0.20 have none; label
+// matches on path nodes would then pass for definitions, so callers fail instead.
+Result<bool> storeHasSymbolNodes(metadata::KnowledgeGraphStore& kgStore) {
+    for (const auto type : kSymbolNodeTypes) {
+        auto nodes = kgStore.findNodesByType(type, 1, 0);
+        if (!nodes) {
+            return nodes.error();
+        }
+        if (!nodes.value().empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Candidate pool for explore relative to the symbol budget, before coverage ranking.
 constexpr std::size_t kExploreCandidatePoolFactor = 8;
 constexpr std::size_t kExploreMinCandidatePool = 64;
@@ -710,6 +743,11 @@ public:
         if (req.symbol.empty()) {
             return Error{ErrorCode::InvalidArgument, "graph symbol lookup requires a symbol"};
         }
+        if (auto hasSymbols = storeHasSymbolNodes(*kgStore_); !hasSymbols) {
+            return hasSymbols.error();
+        } else if (!hasSymbols.value()) {
+            return Error{ErrorCode::NotSupported, symbolNavigationUnavailableMessage()};
+        }
 
         auto matches = resolveEntrySymbols(req.symbol, req.file, req.line, req.budget.maxSymbols);
         if (!matches) {
@@ -801,6 +839,11 @@ public:
         if (req.from.empty() || req.to.empty()) {
             return Error{ErrorCode::InvalidArgument,
                          "graph trace requires both from and to symbols"};
+        }
+        if (auto hasSymbols = storeHasSymbolNodes(*kgStore_); !hasSymbols) {
+            return hasSymbols.error();
+        } else if (!hasSymbols.value()) {
+            return Error{ErrorCode::NotSupported, symbolNavigationUnavailableMessage()};
         }
 
         auto fromSyms = resolveEntrySymbols(req.from, std::nullopt, std::nullopt, 4);
