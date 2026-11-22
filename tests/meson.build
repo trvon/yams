@@ -2193,6 +2193,7 @@ if catch2_dep.found()
     files(
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/add_command_stdin_catch2_test.cpp',
+      'unit/cli/graph_ingest_cli_catch2_test.cpp',
       'unit/cli/command_registry_catch2_test.cpp',
       'unit/cli/content_roundtrip_catch2_test.cpp',
       'unit/cli/completion_command_catch2_test.cpp',

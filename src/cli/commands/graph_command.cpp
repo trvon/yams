@@ -223,6 +223,8 @@ public:
         remove->add_option("--relation,-r", removeRelation_,
                            "Only remove namespaced edges with this relation; keep nodes");
         remove->add_flag("--dry-run", removeDryRun_, "Report what would be removed");
+        remove->add_flag("--include-foreign-edges", removeIncludeForeign_,
+                         "Also remove other owners' edges that touch the namespace's nodes");
         remove->add_flag("--json", jsonOutput_, "Output as JSON");
         remove->callback([this]() {
             mode_ = Mode::Remove;
@@ -333,18 +335,19 @@ private:
         auto& client = **leaseHandle.lease;
 
         // Chunks run in order (nodes, then edges, then aliases); each one commits on its own.
-        std::vector<yams::daemon::KgIngestResponse> responses;
-        for (const auto& chunk : chunkGraphIngestRequest(request.value(), kGraphIngestChunkRows)) {
+        // Stop at the first chunk that fails, and always report what did commit.
+        const auto chunks = chunkGraphIngestRequest(request.value(), kGraphIngestChunkRows);
+        GraphIngestProgress progress(chunks.size());
+        for (const auto& chunk : chunks) {
             auto r = co_await client.call<yams::daemon::KgIngestRequest>(chunk);
-            if (!r) {
-                co_return Error{r.error().code, "Graph ingest failed: " + r.error().message};
+            if (!progress.record(r)) {
+                break;
             }
-            responses.push_back(std::move(r.value()));
         }
-        const auto merged = mergeGraphIngestResponses(responses);
+        const auto& merged = progress.merged();
 
         if (wantsJsonOutput()) {
-            std::cout << graphIngestResponseToJson(merged).dump(2) << "\n";
+            std::cout << graphIngestProgressToJson(progress).dump(2) << "\n";
         } else {
             std::cout << "nodes: " << merged.nodesInserted << " inserted, " << merged.nodesUpdated
                       << " updated, " << merged.nodesSkipped << " skipped\n";
@@ -352,7 +355,14 @@ private:
                       << " updated, " << merged.edgesSkipped << " skipped ("
                       << merged.unresolvedEdges.size() << " unresolved)\n";
             std::cout << "aliases: " << merged.aliasesInserted << " inserted, "
-                      << merged.aliasesSkipped << " skipped\n";
+                      << merged.aliasesUpdated << " updated, " << merged.aliasesSkipped
+                      << " skipped\n";
+            if (!merged.nsConflicts.empty()) {
+                std::cout << "ns conflicts: " << merged.nsConflicts.size()
+                          << " rows refused (use --json for the list)\n";
+            }
+            std::cout << "chunks: " << progress.chunksCommitted() << "/" << progress.chunksTotal()
+                      << " committed\n";
             constexpr std::size_t kShown = 20;
             for (std::size_t i = 0; i < merged.unresolvedEdges.size() && i < kShown; ++i) {
                 const auto& edge = merged.unresolvedEdges[i];
@@ -368,13 +378,16 @@ private:
                           << " more (use --json for the full list)\n";
             }
             for (const auto& error : merged.errors) {
-                if (error.rfind("Edge ", 0) != 0) {
+                if (error.rfind("Edge ", 0) != 0 && error.rfind("Namespace conflict", 0) != 0) {
                     std::cerr << "warning: " << error << "\n";
                 }
             }
         }
-        if (!merged.success) {
-            co_return Error{ErrorCode::WriteError, "Graph ingest did not complete"};
+        if (!progress.complete()) {
+            co_return Error{ErrorCode::WriteError,
+                            "Graph ingest stopped: " + progress.failure() + " (" +
+                                std::to_string(progress.chunksCommitted()) + "/" +
+                                std::to_string(progress.chunksTotal()) + " chunks committed)"};
         }
         co_return Result<void>();
     }
@@ -384,6 +397,7 @@ private:
         request.ns = removeNs_;
         request.relation = removeRelation_;
         request.dryRun = removeDryRun_;
+        request.includeForeignEdges = removeIncludeForeign_;
 
         auto leaseRes = acquireGraphClientLease();
         if (!leaseRes) {
@@ -401,12 +415,22 @@ private:
             std::cout << graphRemoveResponseToJson(r.value(), removeNs_, removeRelation_).dump(2)
                       << "\n";
         } else {
-            std::cout << (r.value().dryRun ? "would remove " : "removed ") << r.value().nodesRemoved
-                      << " nodes, " << r.value().edgesRemoved << " edges (ns=" << removeNs_;
+            const auto& resp = r.value();
+            std::cout << (resp.dryRun || resp.refused ? "would remove " : "removed ")
+                      << resp.nodesRemoved << " nodes, " << resp.edgesRemoved << " edges ("
+                      << resp.foreignEdgesRemoved
+                      << " not owned by the namespace) (ns=" << removeNs_;
             if (!removeRelation_.empty()) {
                 std::cout << ", relation=" << removeRelation_;
             }
             std::cout << ")\n";
+        }
+        if (r.value().refused) {
+            co_return Error{ErrorCode::InvalidOperation,
+                            "refused: " + std::to_string(r.value().foreignEdgesRemoved) +
+                                " incident edges are not owned by '" + removeNs_ +
+                                "'; nothing was removed. Re-run with --include-foreign-edges to "
+                                "remove them too"};
         }
         co_return Result<void>();
     }
@@ -1268,6 +1292,7 @@ private:
     std::string removeNs_;
     std::string removeRelation_;
     bool removeDryRun_{false};
+    bool removeIncludeForeign_{false};
 };
 
 std::unique_ptr<ICommand> createGraphCommand() {

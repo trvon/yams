@@ -35,17 +35,26 @@ Result<std::string> propertiesField(const json& row, std::string_view where) {
         return std::string{};
     }
     const auto& props = row["properties"];
+    json object;
     if (props.is_object()) {
-        return props.dump();
-    }
-    if (props.is_string()) {
+        object = props;
+    } else if (props.is_string()) {
         auto text = props.get<std::string>();
-        if (!text.empty() && !json::parse(text, nullptr, false).is_object()) {
+        if (text.empty()) {
+            return std::string{};
+        }
+        object = json::parse(text, nullptr, false);
+        if (!object.is_object()) {
             return invalid(std::string(where) + ": 'properties' string is not a JSON object");
         }
-        return text;
+    } else {
+        return invalid(std::string(where) + ": 'properties' must be an object");
     }
-    return invalid(std::string(where) + ": 'properties' must be an object");
+    if (auto ns = object.find("ns");
+        ns != object.end() && (!ns->is_string() || ns->get<std::string>().empty())) {
+        return invalid(std::string(where) + ": properties.ns must be a non-empty string");
+    }
+    return object.dump();
 }
 
 Result<float> numberField(const json& row, const char* key, std::string_view where,
@@ -200,8 +209,9 @@ Result<daemon::KgIngestRequest> parseGraphIngestPayload(const json& payload) {
         return skipEdges.error();
     request.skipExistingNodes = skipNodes.value();
     request.skipExistingEdges = skipEdges.value();
-    if (payload.contains("document_hash") && payload["document_hash"].is_string()) {
-        request.documentHash = payload["document_hash"].get<std::string>();
+    if (payload.contains("document_hash")) {
+        return invalid("'document_hash' is not supported: ingest never binds rows to a "
+                       "document (use properties instead)");
     }
     return request;
 }
@@ -256,6 +266,9 @@ mergeGraphIngestResponses(const std::vector<daemon::KgIngestResponse>& responses
         merged.edgesUpdated += r.edgesUpdated;
         merged.edgesSkipped += r.edgesSkipped;
         merged.aliasesInserted += r.aliasesInserted;
+        merged.aliasesUpdated += r.aliasesUpdated;
+        merged.nsConflicts.insert(merged.nsConflicts.end(), r.nsConflicts.begin(),
+                                  r.nsConflicts.end());
         merged.aliasesSkipped += r.aliasesSkipped;
         merged.errors.insert(merged.errors.end(), r.errors.begin(), r.errors.end());
         merged.unresolvedEdges.insert(merged.unresolvedEdges.end(), r.unresolvedEdges.begin(),
@@ -283,10 +296,56 @@ json graphIngestResponseToJson(const daemon::KgIngestResponse& r) {
              {"edges_updated", r.edgesUpdated},
              {"edges_skipped", r.edgesSkipped},
              {"aliases_inserted", r.aliasesInserted},
+             {"aliases_updated", r.aliasesUpdated},
              {"aliases_skipped", r.aliasesSkipped},
              {"unresolved_edges", std::move(unresolved)}};
+    json conflicts = json::array();
+    for (const auto& c : r.nsConflicts) {
+        conflicts.push_back(json{{"kind", c.kind},
+                                 {"node_key", c.nodeKey},
+                                 {"src_node_key", c.srcNodeKey},
+                                 {"dst_node_key", c.dstNodeKey},
+                                 {"relation", c.relation},
+                                 {"existing_ns", c.existingNs},
+                                 {"requested_ns", c.requestedNs},
+                                 {"reason", c.reason}});
+    }
+    out["ns_conflicts"] = std::move(conflicts);
     if (!r.errors.empty()) {
         out["errors"] = r.errors;
+    }
+    return out;
+}
+
+bool GraphIngestProgress::record(const Result<daemon::KgIngestResponse>& chunk) {
+    if (!failure_.empty()) {
+        return false;
+    }
+    if (!chunk) {
+        failure_ = "chunk " + std::to_string(committed_ + 1) + "/" + std::to_string(total_) +
+                   " failed: " + chunk.error().message;
+        return false;
+    }
+    if (!chunk.value().success) {
+        std::string why = chunk.value().errors.empty() ? std::string("not committed")
+                                                       : chunk.value().errors.back();
+        failure_ = "chunk " + std::to_string(committed_ + 1) + "/" + std::to_string(total_) +
+                   " did not commit: " + why;
+        return false;
+    }
+    committedChunks_.push_back(chunk.value());
+    ++committed_;
+    merged_ = mergeGraphIngestResponses(committedChunks_);
+    return true;
+}
+
+json graphIngestProgressToJson(const GraphIngestProgress& progress) {
+    auto out = graphIngestResponseToJson(progress.merged());
+    out["success"] = progress.complete();
+    out["chunks_committed"] = progress.chunksCommitted();
+    out["chunks_total"] = progress.chunksTotal();
+    if (!progress.failure().empty()) {
+        out["error"] = progress.failure();
     }
     return out;
 }
@@ -294,10 +353,12 @@ json graphIngestResponseToJson(const daemon::KgIngestResponse& r) {
 json graphRemoveResponseToJson(const daemon::KgRemoveResponse& r, std::string_view ns,
                                std::string_view relation) {
     json out{{"action", "remove"},
-             {"success", true},
+             {"success", !r.refused},
              {"ns", std::string(ns)},
              {"nodes_removed", r.nodesRemoved},
              {"edges_removed", r.edgesRemoved},
+             {"foreign_edges_removed", r.foreignEdgesRemoved},
+             {"refused", r.refused},
              {"dry_run", r.dryRun}};
     if (!relation.empty()) {
         out["relation"] = std::string(relation);

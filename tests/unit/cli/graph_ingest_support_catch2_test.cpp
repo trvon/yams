@@ -117,3 +117,63 @@ TEST_CASE("graph ingest merges chunk responses and renders the MCP result keys",
     CHECK(removed["dry_run"] == true);
     CHECK(removed["relation"] == "cites");
 }
+
+TEST_CASE("graph ingest payload validates namespaces and rejects document_hash",
+          "[cli][graph][ingest]") {
+    for (const auto* text : {R"({"nodes":[{"node_key":"a","properties":{"ns":""}}]})",
+                             R"({"nodes":[{"node_key":"a","properties":{"ns":true}}]})",
+                             R"({"edges":[{"src_node_key":"a","dst_node_key":"b","relation":"r",
+                                           "properties":"{\"ns\":7}"}]})",
+                             R"({"nodes":[{"node_key":"a"}],"document_hash":"h"})"}) {
+        auto parsed = parseGraphIngestPayloadText(text);
+        INFO(text);
+        CHECK_FALSE(parsed.has_value());
+    }
+    auto ok =
+        parseGraphIngestPayloadText(R"({"nodes":[{"node_key":"a","properties":{"ns":"pb"}}]})");
+    REQUIRE(ok.has_value());
+}
+
+TEST_CASE("graph ingest progress stops at the first failed chunk and keeps committed counts",
+          "[cli][graph][ingest]") {
+    daemon::KgIngestResponse committed;
+    committed.nodesInserted = 2000;
+    committed.success = true;
+    daemon::KgIngestResponse rolledBack;
+    rolledBack.success = false;
+    rolledBack.errors = {"Node upsert failed: disk I/O error"};
+
+    SECTION("a chunk that did not commit") {
+        GraphIngestProgress progress(4);
+        CHECK(progress.record(committed));
+        CHECK_FALSE(progress.record(rolledBack));
+        CHECK_FALSE(progress.record(committed)); // later chunks are never accepted
+        CHECK_FALSE(progress.complete());
+        CHECK(progress.chunksCommitted() == 1);
+        CHECK(progress.merged().nodesInserted == 2000);
+        const auto j = graphIngestProgressToJson(progress);
+        CHECK(j["success"] == false);
+        CHECK(j["chunks_committed"] == 1);
+        CHECK(j["chunks_total"] == 4);
+        CHECK(j["nodes_inserted"] == 2000);
+        CHECK(j["error"].get<std::string>().find("chunk 2/4") != std::string::npos);
+    }
+
+    SECTION("a transport failure") {
+        GraphIngestProgress progress(2);
+        CHECK(progress.record(committed));
+        CHECK_FALSE(progress.record(Error{ErrorCode::NetworkError, "socket closed"}));
+        CHECK(progress.chunksCommitted() == 1);
+        CHECK(graphIngestProgressToJson(progress)["error"].get<std::string>().find(
+                  "socket closed") != std::string::npos);
+    }
+
+    SECTION("all chunks commit") {
+        GraphIngestProgress progress(2);
+        CHECK(progress.record(committed));
+        CHECK(progress.record(committed));
+        CHECK(progress.complete());
+        CHECK(progress.merged().nodesInserted == 4000);
+        CHECK_FALSE(graphIngestProgressToJson(progress).contains("error"));
+    }
+}
