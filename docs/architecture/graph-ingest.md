@@ -20,6 +20,7 @@ The CLI file and the MCP arguments have the same shape:
 
 ```json
 {
+  "ns":      "paperbridge",
   "nodes":   [{"node_key": "paper:doi:10.1/a", "type": "paper", "label": "A",
                "properties": {"ns": "paperbridge"}}],
   "edges":   [{"src_node_key": "paper:doi:10.1/a", "dst_node_key": "paper:doi:10.1/b",
@@ -30,15 +31,19 @@ The CLI file and the MCP arguments have the same shape:
 }
 ```
 
+- Top-level `ns` is the namespace the request acts for (optional, non-empty
+  string). It decides which nodes aliases may be added to.
 - `properties.ns`, when present, must be a non-empty string. The CLI rejects
   the payload otherwise; the daemon refuses the row (`invalid_ns`).
 - `document_hash` is not supported. The CLI rejects it, MCP does not advertise
   it, and the daemon ignores the IPC field.
-- Nodes upsert by `node_key`. A label or type that is sent replaces the stored
-  one; an omitted one keeps it. Properties are replaced as a whole, not merged.
-  Because ownership is read from the properties sent, an owner must resend
-  `properties.ns` on every upsert: omitting it is an ownership change and is
-  refused (`ns_change`).
+- Nodes upsert by `node_key`. A label, type or properties value that is sent
+  replaces the stored one; an omitted one keeps it. Properties are replaced as
+  a whole, not merged.
+- Omitting `properties` (on a node or an edge) keeps the stored properties and
+  therefore the stored owner, so a label-only update of an owned row is
+  allowed. Sending `properties` without the owner's `ns` is an ownership change
+  and is refused (`ns_change`).
 - Namespaced edges (`properties.ns` set) belong to their owner: an upsert
   replaces weight and properties exactly.
 - Un-namespaced edges keep the shared merge rule: weight becomes the max of the
@@ -53,6 +58,9 @@ The CLI file and the MCP arguments have the same shape:
 - The CLI sends nodes, then edges, then aliases, in requests of at most 2000
   rows. Each request commits on its own. The CLI stops at the first request that
   fails, reports the counts of the requests that committed, and exits non-zero.
+- `--strict` (MCP: `strict: true`) also fails the command when any row was
+  refused (`ns_conflicts`) or any edge was unresolved. Rows that were written
+  stay written. Without it, refusals are only reported.
 
 ## Ownership
 
@@ -62,9 +70,11 @@ row is skipped and listed in `ns_conflicts`, with one of three reasons:
 
 | reason | when |
 |--------|------|
-| `ns_change` | The stored row has a different owner, or none. This covers no owner -> X, X -> Y and X -> no owner. |
+| `ns_change` | The stored row has a different owner, or none. This covers no owner -> X, X -> Y and X -> no owner. For an alias, the target node is not owned by the request's top-level `ns` (or, with no request `ns`, is owned by anyone). |
 | `invalid_ns` | `ns` is present but not a non-empty string (`""`, `5`, `true`, `{}`, `null`). |
-| `reserved_key` | A `doc:` or `blob:` node was sent with an `ns`. |
+| `reserved_key` | A node with a YAMS-generated key form was sent with an `ns`. The forms are `doc:`, `blob:`, `path:` (`path:file:`, `path:dir:`, `path:logical:`), `tag:`, `nl_entity:`, `topology:`, `segment:`, and any key containing `@snap:`. Keys emitted by entity-extractor plugins are plugin-defined and not reserved. |
+
+Conflict entries have `kind` `node`, `edge` or `alias`.
 
 So a caller cannot take over a YAMS node or another tool's node, strip its
 `document_hash` or `file_path`, and later delete it with `remove --ns`.
