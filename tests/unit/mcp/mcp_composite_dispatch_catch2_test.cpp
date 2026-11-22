@@ -1213,14 +1213,40 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "execute - graph_remove without ns fa
     CHECK(isCompositeError(result, "requires 'ns'"));
 }
 
-TEST_CASE_METHOD(CompositeDispatchFixture, "execute - graph_ingest and graph_remove reach handler",
+TEST_CASE_METHOD(CompositeDispatchFixture, "query - graph ingest is rejected as a write",
+                 "[mcp][composite][query][graph]") {
+    auto result = callTool(
+        "query",
+        json{{"steps",
+              json::array({{{"op", "graph"},
+                            {"params",
+                             {{"action", "ingest"},
+                              {"nodes", json::array({{{"node_key", "a"}, {"type", "t"}}})}}}}})}});
+
+    INFO("result: " << result.dump(2));
+    CHECK(isCompositeError(result, "is a write"));
+    CHECK_FALSE(isCompositeError(result, "test harness")); // never reached the daemon
+}
+
+TEST_CASE_METHOD(CompositeDispatchFixture,
+                 "execute - graph_ingest and graph_remove pass validation and call the daemon",
                  "[mcp][composite][execute][graph]") {
-    for (const auto* op : {"graph_ingest", "graph_remove"}) {
-        auto result =
-            callTool("execute",
-                     json{{"operations", json::array({{{"op", op}, {"params", {{"ns", "pb"}}}}})}});
-        INFO(op << " result: " << result.dump(2));
-        CHECK_FALSE(isRoutingError(result));
-        CHECK(reachedHandler(result));
-    }
+    // The harness has no daemon: a write that got past op routing and request validation
+    // fails exactly at the daemon call, with the harness's socket error.
+    auto ingest = callTool(
+        "execute",
+        json{{"operations",
+              json::array({{{"op", "graph_ingest"},
+                            {"params",
+                             {{"nodes", json::array({{{"node_key", "paper:a"},
+                                                      {"type", "paper"},
+                                                      {"properties", {{"ns", "pb"}}}}})}}}}})}});
+    INFO("ingest: " << ingest.dump(2));
+    CHECK(isCompositeError(ingest, "test harness"));
+
+    auto remove = callTool(
+        "execute",
+        json{{"operations", json::array({{{"op", "graph_remove"}, {"params", {{"ns", "pb"}}}}})}});
+    INFO("remove: " << remove.dump(2));
+    CHECK(isCompositeError(remove, "test harness"));
 }

@@ -149,7 +149,13 @@ std::optional<std::string> normalizeQueryParamsForOp(const std::string& op, json
         }
 
         const std::string action = params.value("action", std::string{"query"});
-        if (action != "ingest" && action != "remove") {
+        if (action == "ingest" || action == "remove") {
+            // The query tool is advertised read-only; graph writes go through execute.
+            return "graph action '" + action +
+                   "' is a write; use the execute tool with op 'graph_ingest' or "
+                   "'graph_remove'";
+        }
+        {
             const bool hasTarget =
                 hasNonEmptyStringField(params, "hash") || hasNonEmptyStringField(params, "name") ||
                 hasNonEmptyStringField(params, "node_key") || hasGraphNodeIdField(params);
@@ -415,9 +421,7 @@ json MCPServer::describeOp(const std::string& target) const {
             json{{"type", "object"},
                  {"properties",
                   {{"action",
-                    {{"type", "string"},
-                     {"enum", json::array({"query", "ingest"})},
-                     {"default", "query"}}},
+                    {{"type", "string"}, {"enum", json::array({"query"})}, {"default", "query"}}},
                    {"hash", {{"type", "string"}, {"description", "Document hash"}}},
                    {"name", {{"type", "string"}, {"description", "Document name"}}},
                    {"node_key", {{"type", "string"}, {"description", "Direct node key lookup"}}},
@@ -554,6 +558,12 @@ json MCPServer::describeOp(const std::string& target) const {
                    {"dry_run",
                     {{"type", "boolean"},
                      {"description", "Report counts without deleting"},
+                     {"default", false}}},
+                   {"include_foreign_edges",
+                    {{"type", "boolean"},
+                     {"description",
+                      "Also delete other owners' edges touching the namespace's nodes; "
+                      "otherwise such a removal is refused"},
                      {"default", false}}}}},
                  {"required", json::array({"ns"})}},
             "execute", false};
@@ -765,9 +775,11 @@ MCPServer::dispatchPipelineStep(std::string op, json params, std::size_t stepInd
         } else {
             step.data = result.value().toJson();
         }
-    } else if (op == "graph" && params.value("action", std::string{}) == "remove") {
-        // The query tool is advertised read-only; removal goes through execute.
-        fail("graph action 'remove' is a write; use the execute tool with op 'graph_remove'");
+    } else if (op == "graph" && (params.value("action", std::string{}) == "ingest" ||
+                                 params.value("action", std::string{}) == "remove")) {
+        // The query tool is advertised read-only; graph writes go through execute.
+        fail("graph action '" + params.value("action", std::string{}) +
+             "' is a write; use the execute tool with op 'graph_ingest' or 'graph_remove'");
     } else if (op == "graph") {
         auto req = MCPGraphRequest::fromJson(params);
         auto result = co_await handleGraphQuery(req);
@@ -873,7 +885,7 @@ boost::asio::awaitable<json> MCPServer::handleBatchExecute(const json& args) {
         {"download", "download"},
         {"download_jobs", "download_jobs"},
         {"graph_ingest", "graph"},
-        {"graph_remove", "graph"},
+        {"graph_remove", "graph_remove"},
     };
     cfg.stepProjector = projections::executeStepProjection;
     cfg.finalResultBuilder = projections::executeFinalResult;
@@ -884,11 +896,11 @@ boost::asio::awaitable<json> MCPServer::handleBatchExecute(const json& args) {
             return ModeRouterNormalizeResult{std::move(normalized.params),
                                              std::move(normalized.error)};
         }
-        if (op == "graph_ingest" || op == "graph_remove") {
+        if (op == "graph_ingest") {
             if (!params.is_object()) {
                 params = json::object();
             }
-            params["action"] = op == "graph_ingest" ? "ingest" : "remove";
+            params["action"] = "ingest";
         }
         return ModeRouterNormalizeResult{std::move(params), std::nullopt};
     };

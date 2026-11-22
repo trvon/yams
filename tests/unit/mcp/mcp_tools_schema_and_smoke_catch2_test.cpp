@@ -1,6 +1,7 @@
 // MCP Tools schema and smoke tests
 // Catch2 migration from GTest (yams-3s4 / yams-84g)
 
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/mcp/mcp_server.h>
@@ -14,9 +15,9 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include "../../common/test_helpers_catch2.h"
 #include <yams/api/content_store_builder.h>
 #include <yams/metadata/connection_pool.h>
-#include "../../common/test_helpers_catch2.h"
 
 using nlohmann::json;
 
@@ -271,7 +272,8 @@ TEST_CASE("MCP Schema - Graph tool has CLI parity params", "[mcp][schema][graph]
     CHECK(hasProp(*props, "nodes"));
     CHECK(hasProp(*props, "edges"));
     CHECK(hasProp(*props, "aliases"));
-    CHECK(hasProp(*props, "document_hash"));
+    // document_hash was advertised but never used; it is no longer in the schema.
+    CHECK_FALSE(hasProp(*props, "document_hash"));
     CHECK(hasProp(*props, "skip_existing_nodes"));
     CHECK(hasProp(*props, "skip_existing_edges"));
 }
@@ -447,4 +449,30 @@ TEST_CASE("MCP Schema - Download jobs tool exposes expected params",
     REQUIRE(props.has_value());
     CHECK(hasProp(*props, "action"));
     CHECK(hasProp(*props, "job_id"));
+}
+
+TEST_CASE("MCP Schema - graph removal is a separate destructive tool",
+          "[mcp][schema][graph][catch2]") {
+    auto server = ServerUnderTest::make();
+    json tools = server->testListInternalTools();
+
+    auto graph = findTool(tools, "graph");
+    REQUIRE(graph.has_value());
+    auto graphProps = toolProps(*graph);
+    REQUIRE(graphProps.has_value());
+    const auto& actions = (*graphProps)["action"]["enum"];
+    CHECK(std::find(actions.begin(), actions.end(), "remove") == actions.end());
+    CHECK_FALSE(hasProp(*graphProps, "document_hash"));
+    REQUIRE(graph->contains("annotations"));
+    CHECK((*graph)["annotations"].value("readOnlyHint", true) == false);
+
+    auto remove = findTool(tools, "graph_remove");
+    REQUIRE(remove.has_value());
+    REQUIRE(remove->contains("annotations"));
+    CHECK((*remove)["annotations"].value("destructiveHint", false) == true);
+    CHECK((*remove)["annotations"].value("readOnlyHint", true) == false);
+    auto removeProps = toolProps(*remove);
+    REQUIRE(removeProps.has_value());
+    CHECK(hasProp(*removeProps, "ns"));
+    CHECK(hasProp(*removeProps, "include_foreign_edges"));
 }

@@ -702,6 +702,9 @@ TEST_CASE("MCP DTO parsing - graph ingest upserts by default and remove carries 
         CHECK(r.ns == "paperbridge");
         CHECK(r.relation == "cites");
         CHECK(r.dryRun);
+        CHECK_FALSE(r.includeForeignEdges);
+        CHECK(MCPGraphRequest::fromJson(json{{"ns", "pb"}, {"include_foreign_edges", true}})
+                  .includeForeignEdges);
         const auto again = MCPGraphRequest::fromJson(r.toJson());
         CHECK(again.ns == "paperbridge");
         CHECK(again.dryRun);
@@ -718,7 +721,11 @@ TEST_CASE("MCP DTO parsing - graph ingest upserts by default and remove carries 
                                               {"relation", "cites"},
                                               {"src_missing", false},
                                               {"dst_missing", true}}});
+        r.aliasesUpdated = 5;
+        r.nsConflicts = json::array({json{{"kind", "node"}, {"reason", "ns_change"}}});
         const auto j = r.toJson();
+        CHECK(j["aliases_updated"] == 5);
+        CHECK(j["ns_conflicts"][0]["reason"] == "ns_change");
         CHECK(j["nodes_updated"] == 2);
         CHECK(j["edges_updated"] == 3);
         REQUIRE(j["unresolved_edges"].size() == 1);
@@ -732,7 +739,11 @@ TEST_CASE("MCP DTO parsing - graph ingest upserts by default and remove carries 
         r.nodesRemoved = 4;
         r.edgesRemoved = 9;
         r.dryRun = true;
+        r.foreignEdgesRemoved = 2;
+        r.refused = true;
         const auto j = r.toJson();
+        CHECK(j["foreign_edges_removed"] == 2);
+        CHECK(j["refused"] == true);
         CHECK(j["nodes_removed"] == 4);
         CHECK(j["edges_removed"] == 9);
         CHECK(j["dry_run"] == true);

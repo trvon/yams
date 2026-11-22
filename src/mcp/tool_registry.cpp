@@ -1666,6 +1666,7 @@ MCPGraphRequest MCPGraphRequest::fromJson(const json& j) {
     // Removal fields (only relevant when action == "remove")
     req.ns = j.value("ns", std::string{});
     req.dryRun = j.value("dry_run", false);
+    req.includeForeignEdges = j.value("include_foreign_edges", false);
 
     return req;
 }
@@ -1741,6 +1742,8 @@ json MCPGraphRequest::toJson() const {
         j["ns"] = ns;
     if (dryRun)
         j["dry_run"] = dryRun;
+    if (includeForeignEdges)
+        j["include_foreign_edges"] = includeForeignEdges;
 
     return j;
 }
@@ -1784,6 +1787,11 @@ MCPGraphResponse MCPGraphResponse::fromJson(const json& j) {
     resp.nodesRemoved = j.value("nodes_removed", uint64_t{0});
     resp.edgesRemoved = j.value("edges_removed", uint64_t{0});
     resp.dryRun = j.value("dry_run", false);
+    resp.foreignEdgesRemoved = j.value("foreign_edges_removed", uint64_t{0});
+    resp.refused = j.value("refused", false);
+    resp.aliasesUpdated = j.value("aliases_updated", uint64_t{0});
+    if (j.contains("ns_conflicts") && j["ns_conflicts"].is_array())
+        resp.nsConflicts = j["ns_conflicts"];
 
     return resp;
 }
@@ -1803,12 +1811,16 @@ json MCPGraphResponse::toJson() const {
         j["nodes_updated"] = nodesUpdated;
         j["edges_updated"] = edgesUpdated;
         j["unresolved_edges"] = unresolvedEdges.is_array() ? unresolvedEdges : json::array();
+        j["aliases_updated"] = aliasesUpdated;
+        j["ns_conflicts"] = nsConflicts.is_array() ? nsConflicts : json::array();
         j["success"] = success;
         if (!errors.empty())
             j["errors"] = errors;
     } else if (action == "remove") {
         j["nodes_removed"] = nodesRemoved;
         j["edges_removed"] = edgesRemoved;
+        j["foreign_edges_removed"] = foreignEdgesRemoved;
+        j["refused"] = refused;
         j["dry_run"] = dryRun;
         j["success"] = success;
         if (!errors.empty())

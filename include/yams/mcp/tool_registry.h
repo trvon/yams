@@ -1278,7 +1278,7 @@ struct MCPKgIngestAliasInput {
 struct MCPGraphRequest {
     using RequestType = MCPGraphRequest;
 
-    // Action discriminator: "query" (default) | "ingest" | "remove"
+    // Action discriminator: "query" (default) | "ingest". Removal is the graph_remove tool.
     std::string action{"query"};
 
     // ── Query fields ──────────────────────────────────────────
@@ -1329,6 +1329,7 @@ struct MCPGraphRequest {
     // Required caller namespace (properties.ns). `relation` narrows removal to those edges.
     std::string ns;
     bool dryRun{false};
+    bool includeForeignEdges{false};
 
     static MCPGraphRequest fromJson(const json& j);
     json toJson() const;
@@ -1370,7 +1371,11 @@ struct MCPGraphResponse {
     // ── Removal result fields (populated when action == "remove") ──
     uint64_t nodesRemoved{0};
     uint64_t edgesRemoved{0};
+    uint64_t foreignEdgesRemoved{0};
+    bool refused{false};
     bool dryRun{false};
+    uint64_t aliasesUpdated{0};
+    json nsConflicts = json::array();
 
     static MCPGraphResponse fromJson(const json& j);
     json toJson() const;

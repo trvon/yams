@@ -803,10 +803,10 @@ void MCPServer::initializeToolRegistry() {
                    {{"type", "string"},
                     {"description",
                      "Operation: 'query' (default) to traverse/explore the graph, 'ingest' to "
-                     "upsert nodes/edges/aliases, 'remove' to delete rows of one caller "
-                     "namespace (requires 'ns'), 'lookup' to resolve a graph node by label or "
-                     "alias, 'trace' for a path between two nodes"},
-                    {"enum", json::array({"query", "ingest", "remove", "lookup", "trace"})},
+                     "upsert nodes/edges/aliases, 'lookup' to resolve a graph node by label or "
+                     "alias, 'trace' for a path between two nodes. Removal is the separate "
+                     "'graph_remove' tool"},
+                    {"enum", json::array({"query", "ingest", "lookup", "trace"})},
                     {"default", "query"}}},
                   // ── Navigation parameters (lookup/trace) ──
                   {"symbol",
@@ -920,10 +920,6 @@ void MCPServer::initializeToolRegistry() {
                           {"description", "Confidence [0,1]"},
                           {"default", 1.0}}}}},
                       {"required", json::array({"node_key", "alias"})}}}}},
-                  {"document_hash",
-                   {{"type", "string"},
-                    {"description",
-                     "Associate ingested entities with this document (action=ingest)"}}},
                   {"skip_existing_nodes",
                    {{"type", "boolean"},
                     {"description",
@@ -935,23 +931,39 @@ void MCPServer::initializeToolRegistry() {
                     {"description",
                      "Leave edges that already exist by src/dst/relation untouched and count "
                      "them as skipped; default upserts them (action=ingest)"},
-                    {"default", false}}},
-                  // ── Removal parameters (used when action == "remove") ──
-                  {"ns",
-                   {{"type", "string"},
-                    {"description",
-                     "Caller namespace matched against properties.ns (action=remove, "
-                     "required). With 'relation', only that relation's edges are removed; "
-                     "without it, the namespace's nodes, edges and incident edges are removed"}}},
-                  {"dry_run",
-                   {{"type", "boolean"},
-                    {"description", "Report removal counts without deleting (action=remove)"},
                     {"default", false}}}}}},
-            "Query or mutate the knowledge graph. Use action='query' (default) to explore "
-            "relationships, action='ingest' to bulk-upsert nodes, edges, and aliases "
-            "(e.g., token-to-Strong's/lemma graphs), or action='remove' with 'ns' to delete "
-            "one caller namespace.",
-            "Knowledge Graph", addAnnotation);
+            "Query the knowledge graph, or upsert nodes, edges and aliases with "
+            "action='ingest'. Rows carrying properties.ns are owned by that namespace: ingest "
+            "never changes an existing row's owner (refused rows are listed in ns_conflicts).",
+            "Knowledge Graph", updateAnnotation);
+
+        // Removal is its own tool so hosts see it as destructive; it is never reachable
+        // through the read-only query surface.
+        toolRegistry_->registerTool<MCPGraphRequest, MCPGraphResponse>(
+            "graph_remove", [this](const MCPGraphRequest& req) { return handleKgRemove(req); },
+            json{{"type", "object"},
+                 {"properties",
+                  {{"ns",
+                    {{"type", "string"},
+                     {"description", "Namespace to remove (matches properties.ns); required"}}},
+                   {"relation",
+                    {{"type", "string"},
+                     {"description",
+                      "Only remove the namespace's edges of this relation; nodes are kept"}}},
+                   {"dry_run",
+                    {{"type", "boolean"},
+                     {"description", "Report counts without deleting"},
+                     {"default", false}}},
+                   {"include_foreign_edges",
+                    {{"type", "boolean"},
+                     {"description",
+                      "Also delete edges owned by others (or by nobody) that touch the "
+                      "namespace's nodes. Without it a removal that would do so is refused"},
+                     {"default", false}}}}},
+                 {"required", json::array({"ns"})}},
+            "Delete knowledge-graph rows owned by one namespace (properties.ns). Never removes "
+            "by relation alone.",
+            "Remove Graph Namespace", deleteAnnotation);
     }
 
     // ── Code Mode: composite tool surface ──
