@@ -69,7 +69,7 @@ plugins/ort_runtime/ort_runtime_loader.cpp:137:portability/env-read # reviewed r
 plugins/ort_runtime/ort_runtime_loader.cpp:140:portability/env-read # reviewed raw environment read
 plugins/ort_runtime/ort_runtime_loader.cpp:148:portability/env-read # reviewed raw environment read
 src/app/services/document_service.cpp:1255:portability/env-read # reviewed raw environment read
-src/app/services/search_service.cpp:528:portability/env-read # reviewed raw environment read
+src/app/services/search_service.cpp:525:portability/env-read # reviewed raw environment read
 src/benchmarks/internal_event_bus_benchmark.cpp:15:portability/env-read # reviewed raw environment read
 src/cli/commands/add_command.cpp:267:portability/env-read # reviewed raw environment read
 src/cli/commands/search_command.cpp:1091:portability/env-read # reviewed raw environment read
@@ -78,13 +78,13 @@ src/cli/commands/update_command.cpp:512:portability/env-read # reviewed raw envi
 src/cli/hot_cold_utils.h:13:portability/env-read # reviewed raw environment read
 src/daemon/components/DaemonMetrics.cpp:237:portability/env-read # reviewed raw environment read
 src/daemon/components/DaemonMetrics.cpp:2168:portability/env-read # reviewed raw environment read
-src/daemon/components/RequestDispatcher.cpp:613:portability/env-read # reviewed raw environment read
-src/daemon/components/RequestDispatcher.cpp:616:portability/env-read # reviewed raw environment read
+src/daemon/components/RequestDispatcher.cpp:614:portability/env-read # reviewed raw environment read
+src/daemon/components/RequestDispatcher.cpp:617:portability/env-read # reviewed raw environment read
 src/metadata/connection_pool.cpp:1000:portability/jthread # feature-test guarded std::jthread
 src/metadata/database.cpp:29:portability/env-read # reviewed raw environment read
 src/metadata/database.cpp:476:portability/path-cstr # std::string filename, not filesystem::path
 src/metadata/metadata_repository.cpp:1502:portability/env-read # reviewed raw environment read
-src/metadata/migration.cpp:1565:portability/env-read # reviewed raw environment read
+src/metadata/migration.cpp:1566:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:103:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:121:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:138:portability/env-read # reviewed raw environment read
@@ -253,7 +253,7 @@ tests/unit/cli/version_generated_header_catch2_test.cpp:83:portability/env-read 
 tests/unit/daemon/components/vector_system_manager_test.cpp:129:portability/env-read # reviewed raw environment read
 tests/unit/daemon/components/vector_system_manager_test.cpp:130:portability/env-read # reviewed raw environment read
 tests/unit/daemon/daemon_catch2_test.cpp:1433:portability/env-read # reviewed raw environment read
-tests/unit/daemon/daemon_metrics_status_test.cpp:962:portability/env-read # reviewed raw environment read
+tests/unit/daemon/daemon_metrics_status_test.cpp:963:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:36:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:44:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:52:portability/env-read # reviewed raw environment read
@@ -275,7 +275,7 @@ tests/unit/metadata/fts5_performance_stress_catch2_test.cpp:31:portability/env-r
 tests/unit/metadata/fts5_performance_stress_catch2_test.cpp:36:portability/env-read # reviewed raw environment read
 tests/unit/metadata/kg_relation_summary_catch2_test.cpp:19:portability/env-read # reviewed raw environment read
 tests/unit/metadata/kg_store_alias_and_entities_catch2_test.cpp:20:portability/env-read # reviewed raw environment read
-tests/unit/metadata/kg_store_catch2_test.cpp:27:portability/env-read # reviewed raw environment read
+tests/unit/metadata/kg_store_catch2_test.cpp:28:portability/env-read # reviewed raw environment read
 tests/unit/metadata/metadata_repository_cache_catch2_test.cpp:25:portability/env-read # reviewed raw environment read
 tests/unit/metadata/path_tree_delete_catch2_test.cpp:24:portability/env-read # reviewed raw environment read
 tests/unit/metadata/query_helpers_integration_catch2_test.cpp:23:portability/env-read # reviewed raw environment read

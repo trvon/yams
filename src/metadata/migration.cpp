@@ -387,7 +387,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createDocumentPathHeads(),
             createGrepTrigramIndex(),
             resetGrepTrigramIndex(),
-            rebuildUnguardedGraphCleanupIndexes()};
+            rebuildUnguardedGraphCleanupIndexes(),
+            createGraphNamespaceIndexes()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -3534,6 +3535,32 @@ Migration YamsMetadataMigrations::rebuildUnguardedGraphCleanupIndexes() {
     };
     // The guarded indexes are valid for v46.
     m.downFunc = [](Database&) -> Result<void> { return {}; };
+    return m;
+}
+
+Migration YamsMetadataMigrations::createGraphNamespaceIndexes() {
+    Migration m;
+    m.version = 48;
+    m.name = "Index graph rows by external namespace (properties.ns)";
+    m.created = std::chrono::system_clock::now();
+    // Namespace removal and its dry run look rows up by properties.ns. Partial indexes on the
+    // same guarded expression the queries use keep that a lookup, not a scan of every node and
+    // edge, and cost nothing for rows without a namespace.
+    m.upFunc = [](Database& db) -> Result<void> {
+        static constexpr const char* kExpr =
+            "(CASE WHEN json_valid(properties) THEN json_extract(properties, '$.ns') END)";
+        const std::string sql = std::string("CREATE INDEX IF NOT EXISTS idx_kg_nodes_ns ON "
+                                            "kg_nodes") +
+                                kExpr + " WHERE " + kExpr +
+                                " IS NOT NULL; CREATE INDEX IF NOT EXISTS idx_kg_edges_ns ON "
+                                "kg_edges" +
+                                kExpr + " WHERE " + kExpr + " IS NOT NULL;";
+        return db.execute(sql);
+    };
+    m.downFunc = [](Database& db) -> Result<void> {
+        return db.execute("DROP INDEX IF EXISTS idx_kg_nodes_ns; "
+                          "DROP INDEX IF EXISTS idx_kg_edges_ns;");
+    };
     return m;
 }
 

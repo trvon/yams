@@ -8,7 +8,9 @@
 #include <yams/daemon/ipc/ipc_protocol_envelope.h>
 #include <yams/daemon/ipc/proto_serializer.h>
 
+#include <any>
 #include <chrono>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -520,6 +522,203 @@ TEST_CASE("ProtoSerializer multi-type roundtrip", "[proto][serializer][roundtrip
         msg.requestId = 103;
         msg.payload = Request{PrepareSessionRequest{}};
         testEncodeDecode(msg);
+    }
+}
+
+namespace {
+template <typename Variant> Variant roundTripVariant(Variant value) {
+    Message message{};
+    message.requestId = 77;
+    message.payload = std::move(value);
+    const auto encoded = ProtoSerializer::encode_payload(message);
+    INFO("Encode failure: " << (encoded ? std::string{} : encoded.error().message));
+    REQUIRE(encoded.has_value());
+    const auto decoded = ProtoSerializer::decode_payload(std::span{encoded.value()});
+    REQUIRE(decoded.has_value());
+    REQUIRE(std::holds_alternative<Variant>(decoded.value().payload));
+    return std::get<Variant>(decoded.value().payload);
+}
+template <typename T> T roundTripRequest(const T& value) {
+    auto request = roundTripVariant(Request{value});
+    REQUIRE(std::holds_alternative<T>(request));
+    return std::get<T>(request);
+}
+template <typename T> T roundTripResponse(const T& value) {
+    auto response = roundTripVariant(Response{value});
+    REQUIRE(std::holds_alternative<T>(response));
+    return std::get<T>(response);
+}
+} // namespace
+
+TEST_CASE("ProtoSerializer carries graph ingest over the socket transport",
+          "[proto][serializer][kg-ingest]") {
+    KgIngestRequest request;
+    request.nodes.push_back(KgIngestNode{"paper:1", "One", "paper", R"({"ns":"pb"})"});
+    request.edges.push_back(KgIngestEdge{"paper:1", "paper:2", "cites", 0.5f, R"({"ns":"pb"})"});
+    request.aliases.push_back(KgIngestAlias{"paper:1", "P1", "doi", 0.75f});
+    request.documentHash = "doc-hash";
+    request.skipExistingNodes = true;
+    request.skipExistingEdges = false;
+    request.ns = "pb";
+
+    const auto decoded = roundTripRequest(request);
+    CHECK(decoded.ns == "pb");
+    REQUIRE(decoded.nodes.size() == 1);
+    CHECK(decoded.nodes[0].nodeKey == "paper:1");
+    CHECK(decoded.nodes[0].label == "One");
+    CHECK(decoded.nodes[0].type == "paper");
+    CHECK(decoded.nodes[0].properties == R"({"ns":"pb"})");
+    REQUIRE(decoded.edges.size() == 1);
+    CHECK(decoded.edges[0].dstNodeKey == "paper:2");
+    CHECK(decoded.edges[0].relation == "cites");
+    CHECK(decoded.edges[0].weight == 0.5f);
+    REQUIRE(decoded.aliases.size() == 1);
+    CHECK(decoded.aliases[0].confidence == 0.75f);
+    CHECK(decoded.documentHash == "doc-hash");
+    CHECK(decoded.skipExistingNodes);
+    CHECK_FALSE(decoded.skipExistingEdges);
+
+    KgIngestResponse response;
+    response.nodesInserted = 3;
+    response.nodesUpdated = 4;
+    response.nodesSkipped = 1;
+    response.edgesInserted = 5;
+    response.edgesUpdated = 6;
+    response.edgesSkipped = 2;
+    response.errors = {"Edge destination node not found: paper:9"};
+    response.unresolvedEdges.push_back(
+        KgIngestUnresolvedEdge{"paper:1", "paper:9", "cites", false, true});
+    response.aliasesUpdated = 7;
+    response.nsConflicts.push_back(
+        KgIngestNsConflict{"node", "sym:x", "", "", "", "", "pb", "ns_change"});
+    const auto decodedResponse = roundTripResponse(response);
+    CHECK(decodedResponse.aliasesUpdated == 7);
+    REQUIRE(decodedResponse.nsConflicts.size() == 1);
+    CHECK(decodedResponse.nsConflicts[0].nodeKey == "sym:x");
+    CHECK(decodedResponse.nsConflicts[0].requestedNs == "pb");
+    CHECK(decodedResponse.nsConflicts[0].reason == "ns_change");
+    CHECK(decodedResponse.nodesInserted == 3);
+    CHECK(decodedResponse.nodesUpdated == 4);
+    CHECK(decodedResponse.nodesSkipped == 1);
+    CHECK(decodedResponse.edgesInserted == 5);
+    CHECK(decodedResponse.edgesUpdated == 6);
+    CHECK(decodedResponse.edgesSkipped == 2);
+    CHECK(decodedResponse.errors == response.errors);
+    REQUIRE(decodedResponse.unresolvedEdges.size() == 1);
+    CHECK(decodedResponse.unresolvedEdges[0].dstNodeKey == "paper:9");
+    CHECK_FALSE(decodedResponse.unresolvedEdges[0].srcMissing);
+    CHECK(decodedResponse.unresolvedEdges[0].dstMissing);
+}
+
+TEST_CASE("Graph removal is a distinct, admitted write operation",
+          "[proto][serializer][kg-remove]") {
+    CHECK(AdmissionPolicy::classify(Request{KgRemoveRequest{}}) == CommandClass::write);
+    Request request{KgRemoveRequest{"pb", "cites", true}};
+    CHECK(getMessageType(request) == MessageType::KgRemoveRequest);
+    CHECK(getMessageType(request) != MessageType::KgIngestRequest);
+    CHECK(getRequestName(request) == "KgRemove");
+    CHECK(getMessageType(Response{KgRemoveResponse{}}) == MessageType::KgRemoveResponse);
+
+    const auto decoded = roundTripRequest(KgRemoveRequest{"pb", "cites", true, true});
+    CHECK(decoded.ns == "pb");
+    CHECK(decoded.relation == "cites");
+    CHECK(decoded.dryRun);
+    CHECK(decoded.includeForeignEdges);
+
+    const auto decodedResponse = roundTripResponse(KgRemoveResponse{2, 7, true, 3, true});
+    CHECK(decodedResponse.nodesRemoved == 2);
+    CHECK(decodedResponse.edgesRemoved == 7);
+    CHECK(decodedResponse.dryRun);
+    CHECK(decodedResponse.foreignEdgesRemoved == 3);
+    CHECK(decodedResponse.refused);
+
+    // An older daemon only knows kg_ingest_request (54); it must not see removal as ingest.
+    google::protobuf::FileDescriptorProto schema;
+    schema.set_name("legacy_kg_remove_guard.proto");
+    schema.set_syntax("proto3");
+    schema.add_message_type()->set_name("LegacyIngest");
+    auto* envelope = schema.add_message_type();
+    envelope->set_name("LegacyEnvelope");
+    auto* ingest = envelope->add_field();
+    ingest->set_name("kg_ingest_request");
+    ingest->set_number(54);
+    ingest->set_label(google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
+    ingest->set_type(google::protobuf::FieldDescriptorProto::TYPE_MESSAGE);
+    ingest->set_type_name(".LegacyIngest");
+    google::protobuf::DescriptorPool pool;
+    const auto* file = pool.BuildFile(schema);
+    REQUIRE(file != nullptr);
+    const auto* descriptor = file->FindMessageTypeByName("LegacyEnvelope");
+    REQUIRE(descriptor != nullptr);
+    google::protobuf::DynamicMessageFactory factory(&pool);
+    std::unique_ptr<google::protobuf::Message> legacy{factory.GetPrototype(descriptor)->New()};
+    Message message{};
+    message.payload = request;
+    const auto wire = ProtoSerializer::encode_payload(message);
+    REQUIRE(wire.has_value());
+    REQUIRE(legacy->ParseFromArray(wire.value().data(), static_cast<int>(wire.value().size())));
+    CHECK_FALSE(legacy->GetReflection()->HasField(
+        *legacy, descriptor->FindFieldByName("kg_ingest_request")));
+}
+
+// Records the legacy field-by-field contract without a concrete byte codec.
+struct KgRecordedFields {
+    std::vector<std::any> values;
+    std::size_t offset{0};
+    template <typename T> KgRecordedFields& operator<<(const T& value) {
+        if constexpr (std::is_convertible_v<T, std::string> && !std::is_same_v<T, bool>) {
+            values.emplace_back(std::string(value));
+        } else {
+            values.emplace_back(value);
+        }
+        return *this;
+    }
+    template <typename T> Result<T> read() {
+        if (offset >= values.size())
+            return ErrorCode::InvalidData;
+        const auto* value = std::any_cast<T>(&values[offset]);
+        if (!value)
+            return ErrorCode::InvalidData;
+        ++offset;
+        return *value;
+    }
+    Result<std::string> readString() { return read<std::string>(); }
+    Result<std::vector<std::string>> readStringVector() { return read<std::vector<std::string>>(); }
+    Result<std::map<std::string, std::string>> readStringMap() {
+        return read<std::map<std::string, std::string>>();
+    }
+};
+
+TEST_CASE("KgIngestResponse binary tail is optional for older peers",
+          "[proto][serializer][kg-ingest][compat]") {
+    KgIngestResponse current;
+    current.nodesInserted = 1;
+    current.nodesUpdated = 9;
+    current.edgesUpdated = 3;
+    current.unresolvedEdges.push_back(KgIngestUnresolvedEdge{"a", "b", "r", true, false});
+
+    SECTION("current layout round-trips the tail") {
+        KgRecordedFields fields;
+        current.serialize(fields);
+        auto parsed = KgIngestResponse::deserialize(fields);
+        REQUIRE(parsed.has_value());
+        CHECK(parsed.value().nodesUpdated == 9);
+        CHECK(parsed.value().edgesUpdated == 3);
+        REQUIRE(parsed.value().unresolvedEdges.size() == 1);
+        CHECK(parsed.value().unresolvedEdges[0].srcMissing);
+    }
+
+    SECTION("pre-tail layout still parses") {
+        KgRecordedFields fields;
+        current.serialize(fields);
+        // Drop the whole tail: nodesUpdated, edgesUpdated, unresolved count and one 5-field
+        // unresolved edge, aliasesUpdated, conflict count.
+        fields.values.resize(fields.values.size() - 10);
+        auto parsed = KgIngestResponse::deserialize(fields);
+        REQUIRE(parsed.has_value());
+        CHECK(parsed.value().nodesInserted == 1);
+        CHECK(parsed.value().nodesUpdated == 0);
+        CHECK(parsed.value().unresolvedEdges.empty());
     }
 }
 

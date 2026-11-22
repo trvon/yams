@@ -6,6 +6,8 @@
 
 #include <iostream>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 
 namespace yams::cli {
 
@@ -20,6 +22,21 @@ std::string snippetModeLabel(app::services::GraphContextSnippetMode mode) {
             return "omitted";
     }
     YAMS_UNREACHABLE("unknown graph context snippet mode");
+}
+
+// File-seeded explore labels each related file with a relationship from the seed whose
+// provenance is "explore:<relation>[:<tags>]". Map file path -> that label.
+std::unordered_map<std::string, std::string>
+relatedFileLabels(const app::services::GraphExploreResponse& response) {
+    static constexpr std::string_view kPrefix = "explore:";
+    std::unordered_map<std::string, std::string> labels;
+    for (const auto& relation : response.relationships) {
+        if (!relation.provenance || !relation.provenance->starts_with(kPrefix)) {
+            continue;
+        }
+        labels.try_emplace(relation.targetLabel, relation.provenance->substr(kPrefix.size()));
+    }
+    return labels;
 }
 
 app::services::GraphContextSnippetMode snippetModeFromLabel(const std::string& mode) {
@@ -134,10 +151,14 @@ nlohmann::json makeGraphExploreJson(const app::services::GraphExploreResponse& r
         out["entrySymbols"].push_back(std::move(entry));
     }
 
+    const auto related = relatedFileLabels(response);
     out["files"] = nlohmann::json::array();
     for (const auto& file : response.files) {
         nlohmann::json item;
         item["filePath"] = file.filePath;
+        if (const auto it = related.find(file.filePath); it != related.end()) {
+            item["via"] = it->second;
+        }
         item["language"] = file.language;
         item["mode"] = snippetModeLabel(file.mode);
         item["startLine"] =
@@ -163,13 +184,16 @@ nlohmann::json makeGraphExploreJson(const app::services::GraphExploreResponse& r
 
     out["relationships"] = nlohmann::json::array();
     for (const auto& relation : response.relationships) {
-        out["relationships"].push_back({{"relation", relation.relation},
-                                        {"sourceNodeKey", relation.sourceNodeKey},
-                                        {"sourceLabel", relation.sourceLabel},
-                                        {"targetNodeKey", relation.targetNodeKey},
-                                        {"targetLabel", relation.targetLabel},
-                                        {"weight", relation.weight},
-                                        {"confidence", relation.confidence}});
+        out["relationships"].push_back(
+            {{"relation", relation.relation},
+             {"sourceNodeKey", relation.sourceNodeKey},
+             {"sourceLabel", relation.sourceLabel},
+             {"targetNodeKey", relation.targetNodeKey},
+             {"targetLabel", relation.targetLabel},
+             {"weight", relation.weight},
+             {"confidence", relation.confidence},
+             {"provenance", relation.provenance ? nlohmann::json(*relation.provenance)
+                                                : nlohmann::json(nullptr)}});
     }
     return out;
 }
@@ -207,9 +231,13 @@ void renderGraphExploreMarkdown(std::ostream& out,
         out << "\n";
     }
 
+    const auto related = relatedFileLabels(response);
     for (const auto& file : response.files) {
         const auto displayPath = projectPathForCli(file.filePath, cwd);
         out << yams::cli::ui::subsection_header(displayPath) << "\n";
+        if (const auto it = related.find(file.filePath); it != related.end()) {
+            out << yams::cli::ui::key_value("Via", it->second) << "\n";
+        }
         if (!file.symbols.empty()) {
             std::string symbolList;
             for (const auto& symbol : file.symbols) {

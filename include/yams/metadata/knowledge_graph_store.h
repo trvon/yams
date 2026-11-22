@@ -150,6 +150,41 @@ struct DocumentGraphCleanupResult {
     std::int64_t edgesDeleted{0};
 };
 
+// Property key that marks a node or edge as owned by an external caller (for example
+// `{"ns":"paperbridge"}`). Only a non-empty JSON string counts. Document cleanup, orphan repair,
+// relation-wide derived-graph resets and snapshot pruning never remove namespaced rows; only
+// namespace removal does.
+inline constexpr std::string_view kExternalNamespaceProperty = "ns";
+
+// Node-key forms YAMS itself creates (document, blob, path/version, tag, natural-language entity,
+// topology and segment nodes, and snapshot-versioned "<key>@snap:<id>" copies). An external
+// caller cannot create or adopt such a key under a namespace, so it cannot pre-empt or later
+// remove a node YAMS will write. Keys emitted by entity-extractor plugins are plugin-defined and
+// are not covered.
+inline constexpr std::string_view kYamsReservedNodeKeyPrefixes[] = {
+    "doc:", "blob:", "path:", "tag:", "nl_entity:", "topology:", "segment:"};
+inline constexpr std::string_view kYamsSnapshotKeyMarker = "@snap:";
+
+inline bool isYamsReservedNodeKey(std::string_view key) {
+    for (const auto prefix : kYamsReservedNodeKeyPrefixes) {
+        if (key.starts_with(prefix)) {
+            return true;
+        }
+    }
+    return key.find(kYamsSnapshotKeyMarker) != std::string_view::npos;
+}
+
+struct NamespaceRemovalResult {
+    std::int64_t nodesDeleted{0};
+    // Every edge removed (or, on a dry run or refusal, that would be removed).
+    std::int64_t edgesDeleted{0};
+    // Subset of edgesDeleted whose own properties.ns is not the removed namespace: edges of
+    // other owners (or un-namespaced) that are incident to a removed node.
+    std::int64_t foreignEdges{0};
+    // True when foreignEdges > 0 and the caller did not allow removing them; nothing deleted.
+    bool refused{false};
+};
+
 struct KGPathRange {
     std::string lower;
     std::string upper;
@@ -203,6 +238,43 @@ public:
         virtual Result<void> deleteDocEntitiesForDocument(std::int64_t documentId) = 0;
         virtual Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) = 0;
         virtual Result<std::int64_t> deleteEdgesByRelation(std::string_view relation) = 0;
+        /// Remove rows whose properties.ns equals `ns` (never empty). With a relation, only
+        /// edges of that relation carrying the namespace are removed and nodes are kept.
+        /// Without one, namespaced edges, namespaced nodes, and every edge incident to a
+        /// removed node are removed; incident edges owned by anyone else are counted in
+        /// foreignEdges and, unless includeForeignEdges, the call is refused with nothing
+        /// deleted. dryRun reports the counts without deleting.
+        virtual Result<NamespaceRemovalResult>
+        deleteByNamespace(std::string_view /*ns*/, std::optional<std::string_view> /*relation*/,
+                          bool /*dryRun*/, bool /*includeForeignEdges*/) {
+            return Error{ErrorCode::NotImplemented, "Namespace removal is not implemented"};
+        }
+        /// The edge with these endpoints and relation on this transaction, if any.
+        virtual Result<std::optional<KGEdge>> getEdgeByEndpoints(std::int64_t /*srcNodeId*/,
+                                                                 std::int64_t /*dstNodeId*/,
+                                                                 std::string_view /*relation*/) {
+            return Error{ErrorCode::NotImplemented, "Transactional edge lookup is not implemented"};
+        }
+        /// Insert or replace weight and properties of one edge exactly (no MAX(weight) merge).
+        /// `existed` must reflect this transaction's state; it keeps the cached edge count right.
+        virtual Result<void> upsertEdgeExact(const KGEdge& /*edge*/, bool /*existed*/) {
+            return Error{ErrorCode::NotImplemented, "Exact edge upsert is not implemented"};
+        }
+        /// Upsert one alias; returns true when a new row was inserted.
+        virtual Result<bool> upsertAliasCounted(const KGAlias& /*alias*/) {
+            return Error{ErrorCode::NotImplemented, "Counted alias upsert is not implemented"};
+        }
+        /// Nested atomic scope inside this batch. rollbackToSavepoint undoes every write since
+        /// the matching beginSavepoint and leaves the outer transaction usable.
+        virtual Result<void> beginSavepoint() {
+            return Error{ErrorCode::NotImplemented, "Savepoints are not implemented"};
+        }
+        virtual Result<void> releaseSavepoint() {
+            return Error{ErrorCode::NotImplemented, "Savepoints are not implemented"};
+        }
+        virtual Result<void> rollbackToSavepoint() {
+            return Error{ErrorCode::NotImplemented, "Savepoints are not implemented"};
+        }
         virtual Result<std::int64_t> deleteOrphanedEdges() = 0;
         virtual Result<std::int64_t> deleteOrphanedDocEntities() = 0;
         virtual Result<void> commit() = 0;
@@ -572,6 +644,32 @@ public:
                                        std::string_view /*dstNodeKey*/,
                                        std::string_view /*relation*/) {
         return Error{ErrorCode::NotImplemented, "Payload-free edge presence is not implemented"};
+    }
+
+    // Blob node key ("blob:<sha256>") of the newest snapshot version recorded for a path:
+    // path:logical:<path> --path_version--> path:<snapshot>:<path> --has_version--> blob.
+    // nullopt when the path has no recorded version. Ingest uses it to skip minting a new
+    // snapshot path node when the content at a path is unchanged.
+    virtual Result<std::optional<std::string>> latestPathVersionBlobKey(std::string_view /*path*/) {
+        return Error{ErrorCode::NotImplemented, "Path version lookup is not implemented"};
+    }
+
+    // Distinct non-empty node types present in the store, without counting nodes. The default
+    // derives them from getNodeTypeCounts(); backends with a type index override it to avoid a
+    // full scan.
+    virtual Result<std::vector<std::string>> listNodeTypes() {
+        auto counts = getNodeTypeCounts();
+        if (!counts) {
+            return counts.error();
+        }
+        std::vector<std::string> types;
+        types.reserve(counts.value().size());
+        for (auto& [type, count] : counts.value()) {
+            if (count > 0 && !type.empty()) {
+                types.push_back(std::move(type));
+            }
+        }
+        return types;
     }
 };
 

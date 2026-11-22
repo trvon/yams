@@ -152,6 +152,9 @@ template <> struct ResponseOf<GraphTraceRequest> {
 template <> struct ResponseOf<KgIngestRequest> {
     using type = KgIngestResponse;
 };
+template <> struct ResponseOf<KgRemoveRequest> {
+    using type = KgRemoveResponse;
+};
 
 // Cat operations
 template <> struct ResponseOf<CatRequest> {

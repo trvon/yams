@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <map>
 #include <mutex>
 #include <random>
 #include <span>
@@ -5819,12 +5820,381 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
         const auto& ingestResp = std::get<KgIngestResponse>(resp);
         CHECK(ingestResp.success);
-        CHECK(ingestResp.nodesInserted == 1);
+        CHECK(ingestResp.nodesInserted == 0);
+        CHECK(ingestResp.nodesUpdated == 1);
         CHECK(ingestResp.edgesSkipped == 1);
         CHECK(ingestResp.aliasesSkipped == 1);
         REQUIRE(ingestResp.errors.size() == 2);
         CHECK(ingestResp.errors[0] == "Edge destination node not found: fn:missing");
         CHECK(ingestResp.errors[1] == "Alias node not found: fn:missing");
+        REQUIRE(ingestResp.unresolvedEdges.size() == 1);
+        CHECK(ingestResp.unresolvedEdges[0].srcNodeKey == "fn:existing");
+        CHECK(ingestResp.unresolvedEdges[0].dstNodeKey == "fn:missing");
+        CHECK(ingestResp.unresolvedEdges[0].relation == "calls");
+        CHECK_FALSE(ingestResp.unresolvedEdges[0].srcMissing);
+        CHECK(ingestResp.unresolvedEdges[0].dstMissing);
+    }
+
+    SECTION("kg ingest counts inserted and updated rows instead of request sizes") {
+        fixture.initMetadata();
+
+        KgIngestRequest req;
+        req.nodes.push_back(KgIngestNode{"paper:a", "A", "paper", R"({"ns":"pb"})"});
+        req.nodes.push_back(KgIngestNode{"paper:b", "B", "paper", R"({"ns":"pb"})"});
+        req.edges.push_back(KgIngestEdge{"paper:a", "paper:b", "cites", 1.0f, R"({"ns":"pb"})"});
+        // Same edge twice in one request: the second is an update, not a second insert.
+        req.edges.push_back(KgIngestEdge{"paper:a", "paper:b", "cites", 1.0f, R"({"ns":"pb"})"});
+
+        auto first = dispatchRequest(*fixture.dispatcher, Request{req});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(first));
+        const auto& firstResp = std::get<KgIngestResponse>(first);
+        CHECK(firstResp.success);
+        CHECK(firstResp.nodesInserted == 2);
+        CHECK(firstResp.nodesUpdated == 0);
+        CHECK(firstResp.edgesInserted == 1);
+        CHECK(firstResp.edgesUpdated == 1);
+        CHECK(firstResp.unresolvedEdges.empty());
+
+        req.nodes[0].label = "A renamed";
+        auto second = dispatchRequest(*fixture.dispatcher, Request{req});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(second));
+        const auto& secondResp = std::get<KgIngestResponse>(second);
+        CHECK(secondResp.success);
+        CHECK(secondResp.nodesInserted == 0);
+        CHECK(secondResp.nodesUpdated == 2);
+        CHECK(secondResp.edgesInserted == 0);
+        CHECK(secondResp.edgesUpdated == 2);
+
+        auto renamed = fixture.kgStore->getNodeByKey("paper:a");
+        REQUIRE(renamed.has_value());
+        REQUIRE(renamed.value().has_value());
+        CHECK(renamed.value()->label.value_or("") == "A renamed");
+    }
+
+    SECTION("kg ingest skip_existing flags leave existing rows untouched") {
+        fixture.initMetadata();
+        auto src = fixture.upsertNode("fn:skip:src", "original", "function");
+        fixture.upsertNode("fn:skip:dst", "dst", "function");
+
+        KgIngestRequest seed;
+        seed.edges.push_back(
+            KgIngestEdge{"fn:skip:src", "fn:skip:dst", "calls", 1.0f, R"({"version":1})"});
+        auto seeded = dispatchRequest(*fixture.dispatcher, Request{seed});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(seeded));
+        REQUIRE(std::get<KgIngestResponse>(seeded).edgesInserted == 1);
+
+        KgIngestRequest req;
+        req.skipExistingNodes = true;
+        req.skipExistingEdges = true;
+        req.nodes.push_back(KgIngestNode{"fn:skip:src", "replaced", "function", ""});
+        req.nodes.push_back(KgIngestNode{"fn:skip:new", "new", "function", ""});
+        req.edges.push_back(
+            KgIngestEdge{"fn:skip:src", "fn:skip:dst", "calls", 1.0f, R"({"version":2})"});
+        req.edges.push_back(KgIngestEdge{"fn:skip:src", "fn:skip:new", "calls", 1.0f, ""});
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& ingestResp = std::get<KgIngestResponse>(resp);
+        CHECK(ingestResp.success);
+        CHECK(ingestResp.nodesInserted == 1);
+        CHECK(ingestResp.nodesSkipped == 1);
+        CHECK(ingestResp.nodesUpdated == 0);
+        CHECK(ingestResp.edgesInserted == 1);
+        CHECK(ingestResp.edgesSkipped == 1);
+        CHECK(ingestResp.edgesUpdated == 0);
+        CHECK(ingestResp.unresolvedEdges.empty());
+
+        auto kept = fixture.kgStore->getNodeByKey("fn:skip:src");
+        REQUIRE(kept.has_value());
+        REQUIRE(kept.value().has_value());
+        CHECK(kept.value()->label.value_or("") == "original");
+        auto edges = fixture.kgStore->getEdgesFrom(src, std::string_view("calls"), 10, 0);
+        REQUIRE(edges.has_value());
+        REQUIRE(edges.value().size() == 2);
+        for (const auto& edge : edges.value()) {
+            if (edge.properties && edge.properties->find("version") != std::string::npos) {
+                CHECK(*edge.properties == R"({"version":1})");
+            }
+        }
+    }
+
+    SECTION("kg remove requires a namespace") {
+        fixture.initMetadata();
+        KgRemoveRequest req;
+        req.relation = "cites";
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        CHECK(std::get<ErrorResponse>(resp).code == ErrorCode::InvalidArgument);
+    }
+
+    SECTION("kg remove reports and guards edges it does not own") {
+        fixture.initMetadata();
+        KgIngestRequest ingest;
+        ingest.nodes.push_back(KgIngestNode{"paper:x", "X", "paper", R"({"ns":"pb"})"});
+        ingest.nodes.push_back(KgIngestNode{"paper:y", "Y", "paper", R"({"ns":"pb"})"});
+        ingest.nodes.push_back(KgIngestNode{"note:z", "Z", "note", ""});
+        ingest.edges.push_back(KgIngestEdge{"paper:x", "paper:y", "cites", 1.0f, R"({"ns":"pb"})"});
+        // Un-namespaced edge owned by nobody in particular, attached to a pb node.
+        ingest.edges.push_back(KgIngestEdge{"note:z", "paper:x", "about", 1.0f, ""});
+        auto ingested = dispatchRequest(*fixture.dispatcher, Request{ingest});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(ingested));
+        REQUIRE(std::get<KgIngestResponse>(ingested).success);
+
+        const auto remove = [&](bool dryRun, bool includeForeign, std::string relation = {}) {
+            KgRemoveRequest req;
+            req.ns = "pb";
+            req.relation = std::move(relation);
+            req.dryRun = dryRun;
+            req.includeForeignEdges = includeForeign;
+            auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+            REQUIRE(std::holds_alternative<KgRemoveResponse>(resp));
+            return std::get<KgRemoveResponse>(resp);
+        };
+        const auto exists = [&](const std::string& key) {
+            auto node = fixture.kgStore->getNodeByKey(key);
+            REQUIRE(node.has_value());
+            return node.value().has_value();
+        };
+
+        auto dry = remove(true, false);
+        CHECK(dry.dryRun);
+        CHECK(dry.nodesRemoved == 2);
+        CHECK(dry.edgesRemoved == 2);
+        CHECK(dry.foreignEdgesRemoved == 1);
+        CHECK_FALSE(dry.refused);
+        CHECK(exists("paper:x"));
+
+        auto refused = remove(false, false);
+        CHECK(refused.refused);
+        CHECK(refused.foreignEdgesRemoved == 1);
+        CHECK(exists("paper:x"));
+        CHECK(exists("paper:y"));
+
+        auto byRelation = remove(false, false, "cites");
+        CHECK_FALSE(byRelation.refused);
+        CHECK(byRelation.nodesRemoved == 0);
+        CHECK(byRelation.edgesRemoved == 1);
+        CHECK(byRelation.foreignEdgesRemoved == 0);
+
+        auto all = remove(false, true);
+        CHECK_FALSE(all.refused);
+        CHECK(all.nodesRemoved == 2);
+        CHECK(all.edgesRemoved == 1);
+        CHECK(all.foreignEdgesRemoved == 1);
+        CHECK_FALSE(exists("paper:y"));
+        CHECK(exists("note:z"));
+    }
+
+    SECTION("kg ingest refuses rows that would change ownership") {
+        fixture.initMetadata();
+        fixture.upsertNode("sym:yams", "yams-owned", "symbol", R"({"document_hash":"h1"})");
+        fixture.upsertNode("paper:other", "other", "paper", R"({"ns":"other"})");
+        fixture.upsertNode("paper:mine", "mine", "paper", R"({"ns":"pb"})");
+
+        KgIngestRequest req;
+        req.nodes.push_back(KgIngestNode{"sym:yams", "taken", "symbol", R"({"ns":"pb"})"});
+        req.nodes.push_back(KgIngestNode{"paper:other", "taken", "paper", R"({"ns":"pb"})"});
+        req.nodes.push_back(KgIngestNode{"paper:mine", "stripped", "paper", R"({"x":1})"});
+        req.nodes.push_back(KgIngestNode{"doc:abc", "doc", "document", R"({"ns":"pb"})"});
+        req.nodes.push_back(KgIngestNode{"paper:bad", "bad", "paper", R"({"ns":5})"});
+        req.nodes.push_back(KgIngestNode{"paper:empty", "bad", "paper", R"({"ns":""})"});
+        req.nodes.push_back(KgIngestNode{"paper:new", "new", "paper", R"({"ns":"pb"})"});
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& r = std::get<KgIngestResponse>(resp);
+        CHECK(r.success);
+        CHECK(r.nodesInserted == 1);
+        CHECK(r.nodesSkipped == 6);
+        REQUIRE(r.nsConflicts.size() == 6);
+        std::map<std::string, std::string> reasons;
+        for (const auto& c : r.nsConflicts) {
+            CHECK(c.kind == "node");
+            reasons[c.nodeKey] = c.reason;
+        }
+        CHECK(reasons["sym:yams"] == "ns_change");
+        CHECK(reasons["paper:other"] == "ns_change");
+        CHECK(reasons["paper:mine"] == "ns_change");
+        CHECK(reasons["doc:abc"] == "reserved_key");
+        CHECK(reasons["paper:bad"] == "invalid_ns");
+        CHECK(reasons["paper:empty"] == "invalid_ns");
+
+        auto yamsNode = fixture.kgStore->getNodeByKey("sym:yams");
+        REQUIRE(yamsNode.has_value());
+        REQUIRE(yamsNode.value().has_value());
+        CHECK(yamsNode.value()->label.value_or("") == "yams-owned");
+        CHECK(yamsNode.value()->properties.value_or("") == R"({"document_hash":"h1"})");
+        auto doc = fixture.kgStore->getNodeByKey("doc:abc");
+        REQUIRE(doc.has_value());
+        CHECK_FALSE(doc.value().has_value());
+
+        // A namespace cannot be removed through a node it never owned.
+        KgRemoveRequest remove;
+        remove.ns = "pb";
+        remove.includeForeignEdges = true;
+        auto removed = dispatchRequest(*fixture.dispatcher, Request{remove});
+        REQUIRE(std::holds_alternative<KgRemoveResponse>(removed));
+        CHECK(std::get<KgRemoveResponse>(removed).nodesRemoved == 2); // paper:mine, paper:new
+        yamsNode = fixture.kgStore->getNodeByKey("sym:yams");
+        REQUIRE(yamsNode.has_value());
+        CHECK(yamsNode.value().has_value());
+    }
+
+    SECTION("kg ingest refuses edge ownership changes and counts lower-weight writes") {
+        fixture.initMetadata();
+        auto a = fixture.upsertNode("n:a", "a", "t");
+        auto b = fixture.upsertNode("n:b", "b", "t");
+        fixture.addEdge(a, b, "shared", 0.9);
+
+        KgIngestRequest req;
+        req.edges.push_back(KgIngestEdge{"n:a", "n:b", "shared", 1.0f, R"({"ns":"pb"})"});
+        req.edges.push_back(KgIngestEdge{"n:a", "n:b", "low", 0.8f, ""});
+        req.edges.push_back(KgIngestEdge{"n:a", "n:b", "low", 0.2f, R"({"note":"lower"})"});
+        req.edges.push_back(KgIngestEdge{"n:a", "n:b", "bad", 1.0f, R"({"ns":{}})"});
+        req.aliases.push_back(KgIngestAlias{"n:a", "alias-a", "unit", 0.5f});
+        req.aliases.push_back(KgIngestAlias{"n:a", "alias-a", "unit", 0.6f});
+
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& r = std::get<KgIngestResponse>(resp);
+        CHECK(r.success);
+        CHECK(r.edgesInserted == 1); // low @0.8
+        CHECK(r.edgesUpdated == 0);  // the 0.2 write changes nothing
+        CHECK(r.edgesSkipped == 3);  // shared (ns_change), low @0.2, bad (invalid_ns)
+        REQUIRE(r.nsConflicts.size() == 2);
+        CHECK(r.aliasesInserted == 1);
+        CHECK(r.aliasesUpdated == 1);
+    }
+
+    SECTION("kg ingest keeps the owner on label-only updates and guards aliases") {
+        fixture.initMetadata();
+        auto a = fixture.upsertNode("paper:own", "old", "paper", R"({"ns":"pb","doi":"x"})");
+        auto b = fixture.upsertNode("paper:own2", "b", "paper", R"({"ns":"pb"})");
+        fixture.addEdge(a, b, "cites", 1.0f, R"({"ns":"pb","k":1})");
+        fixture.upsertNode("note:plain", "plain", "note");
+
+        KgIngestRequest req;
+        req.ns = "pb";
+        req.nodes.push_back(KgIngestNode{"paper:own", "new label", "paper", ""}); // no properties
+        req.edges.push_back(KgIngestEdge{"paper:own", "paper:own2", "cites", 0.4f, ""});
+        req.aliases.push_back(KgIngestAlias{"paper:own", "own-alias", "unit", 1.0f});
+        req.aliases.push_back(KgIngestAlias{"note:plain", "plain-alias", "unit", 1.0f});
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& r = std::get<KgIngestResponse>(resp);
+        CHECK(r.success);
+        CHECK(r.nodesUpdated == 1);
+        CHECK(r.edgesUpdated == 1);
+        CHECK(r.aliasesInserted == 1);
+        CHECK(r.aliasesSkipped == 1);
+        REQUIRE(r.nsConflicts.size() == 1);
+        CHECK(r.nsConflicts[0].kind == "alias");
+        CHECK(r.nsConflicts[0].nodeKey == "note:plain");
+        CHECK(r.nsConflicts[0].requestedNs == "pb");
+
+        auto node = fixture.kgStore->getNodeByKey("paper:own");
+        REQUIRE(node.has_value());
+        REQUIRE(node.value().has_value());
+        CHECK(node.value()->label.value_or("") == "new label");
+        CHECK(node.value()->properties.value_or("") == R"({"ns":"pb","doi":"x"})");
+        auto edges = fixture.kgStore->getEdgesFrom(a, std::string_view("cites"), 10, 0);
+        REQUIRE(edges.has_value());
+        REQUIRE(edges.value().size() == 1);
+        CHECK(edges.value()[0].properties.value_or("") == R"({"ns":"pb","k":1})");
+        CHECK(edges.value()[0].weight == Catch::Approx(0.4f));
+
+        // Without a request namespace, aliases may only go on un-namespaced nodes.
+        KgIngestRequest unscoped;
+        unscoped.aliases.push_back(KgIngestAlias{"paper:own", "x-alias", "unit", 1.0f});
+        unscoped.aliases.push_back(KgIngestAlias{"note:plain", "y-alias", "unit", 1.0f});
+        auto unscopedResp = dispatchRequest(*fixture.dispatcher, Request{unscoped});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(unscopedResp));
+        const auto& u = std::get<KgIngestResponse>(unscopedResp);
+        CHECK(u.aliasesInserted == 1);
+        REQUIRE(u.nsConflicts.size() == 1);
+        CHECK(u.nsConflicts[0].nodeKey == "paper:own");
+        CHECK(u.nsConflicts[0].existingNs == "pb");
+    }
+
+    SECTION("kg ingest refuses namespaced writes to every YAMS-generated key form") {
+        fixture.initMetadata();
+        KgIngestRequest req;
+        for (const auto* key :
+             {"doc:h", "blob:h", "path:file:/a", "path:dir:/a", "path:logical:/a", "tag:x",
+              "nl_entity:person:x", "topology:cluster:1", "segment:title:x", "sym:f@snap:s1"}) {
+            req.nodes.push_back(KgIngestNode{key, "k", "t", R"({"ns":"pb"})"});
+        }
+        req.nodes.push_back(KgIngestNode{"paper:fine", "k", "t", R"({"ns":"pb"})"});
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& r = std::get<KgIngestResponse>(resp);
+        CHECK(r.nodesInserted == 1);
+        REQUIRE(r.nsConflicts.size() == 10);
+        for (const auto& c : r.nsConflicts) {
+            INFO(c.nodeKey);
+            CHECK(c.reason == "reserved_key");
+        }
+    }
+
+    SECTION("kg ingest reports an unknown outcome when the writer is too slow") {
+        fixture.initMetadata();
+        fixture.svc->getWriteCoordinator()->shutdown();
+        WriteCoordinator::Config cfg;
+        cfg.graphOpResultTimeout = std::chrono::milliseconds{50};
+        auto slow =
+            std::make_unique<WriteCoordinator>(fixture.writeIo, fixture.kgStore, fixture.repo, cfg);
+        slow->testing_setBeforeKgCommitHook([]() -> Result<void> {
+            std::this_thread::sleep_for(std::chrono::milliseconds{400});
+            return Result<void>();
+        });
+        slow->start();
+        fixture.svc->__test_setWriteCoordinator(std::move(slow));
+
+        KgIngestRequest req;
+        req.nodes.push_back(KgIngestNode{"paper:slow", "S", "paper", R"({"ns":"pb"})"});
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& r = std::get<KgIngestResponse>(resp);
+        CHECK_FALSE(r.success);
+        CHECK(r.nodesInserted == 0);
+        REQUIRE(r.errors.size() == 1);
+        CHECK(r.errors[0].find("outcome is unknown") != std::string::npos);
+
+        // The write itself still lands; only this response could not say so.
+        REQUIRE(fixture.svc->getWriteCoordinator()->flush(std::chrono::seconds{10}).has_value());
+        auto node = fixture.kgStore->getNodeByKey("paper:slow");
+        REQUIRE(node.has_value());
+        CHECK(node.value().has_value());
+    }
+
+    SECTION("kg ingest reports nothing written when the transaction does not commit") {
+        fixture.initMetadata();
+        fixture.svc->getWriteCoordinator()->testing_setBeforeKgCommitHook(
+            []() -> Result<void> { return Error{ErrorCode::DatabaseError, "injected"}; });
+
+        KgIngestRequest req;
+        req.nodes.push_back(KgIngestNode{"paper:rolled", "R", "paper", R"({"ns":"pb"})"});
+        auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
+        REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
+        const auto& r = std::get<KgIngestResponse>(resp);
+        CHECK_FALSE(r.success);
+        CHECK(r.nodesInserted == 0);
+        REQUIRE(r.errors.size() == 1);
+        CHECK(r.errors[0].find("not committed") != std::string::npos);
+        CHECK(r.errors[0].find("injected") != std::string::npos);
+
+        KgRemoveRequest remove;
+        remove.ns = "pb";
+        auto removed = dispatchRequest(*fixture.dispatcher, Request{remove});
+        REQUIRE(std::holds_alternative<ErrorResponse>(removed));
+        CHECK(std::get<ErrorResponse>(removed).message.find("injected") != std::string::npos);
+
+        fixture.svc->getWriteCoordinator()->testing_setBeforeKgCommitHook({});
+        auto node = fixture.kgStore->getNodeByKey("paper:rolled");
+        REQUIRE(node.has_value());
+        CHECK_FALSE(node.value().has_value());
     }
 
     SECTION("kg ingest inserts nodes edges and aliases") {
@@ -5927,7 +6297,8 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
 
         REQUIRE(std::holds_alternative<KgIngestResponse>(resp));
         const auto& ingestResp = std::get<KgIngestResponse>(resp);
-        CHECK(ingestResp.success);
+        // The op is all or nothing: an alias failure leaves nothing written.
+        CHECK_FALSE(ingestResp.success);
         CHECK(ingestResp.aliasesInserted == 0);
         REQUIRE(ingestResp.errors.size() == 1);
         CHECK(ingestResp.errors[0].find("Alias insert failed:") == 0);

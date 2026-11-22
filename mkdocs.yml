@@ -25,6 +25,7 @@ nav:
       - Configuration reading: architecture/config-reading.md
       - Environment overrides: architecture/environment-overrides.md
       - Retrieval contracts: architecture/retrieval_contracts.md
+      - External graph ingest: architecture/graph-ingest.md
   - Benchmarks:
       - Results: benchmarks/index.md
       - Ingestion oracle: benchmarks/ingestion_oracle.md

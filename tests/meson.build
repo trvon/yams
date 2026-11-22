@@ -2210,6 +2210,7 @@ if catch2_dep.found()
     files(
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/add_command_stdin_catch2_test.cpp',
+      'unit/cli/graph_ingest_cli_catch2_test.cpp',
       'unit/cli/command_registry_catch2_test.cpp',
       'unit/cli/content_roundtrip_catch2_test.cpp',
       'unit/cli/completion_command_catch2_test.cpp',
@@ -2273,6 +2274,7 @@ if catch2_dep.found()
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/graph_explore_presenter_catch2_test.cpp',
       'unit/cli/graph_helpers_catch2_test.cpp',
+      'unit/cli/graph_ingest_support_catch2_test.cpp',
       'unit/cli/graph_query_presenter_catch2_test.cpp',
       'unit/cli/graph_topology_support_catch2_test.cpp',
       'unit/cli/vector_db_util_catch2_test.cpp',
@@ -2505,6 +2507,7 @@ if catch2_dep.found()
     'sources': files(
       'unit/metadata/kg_store_catch2_test.cpp',
       'unit/metadata/kg_relation_summary_catch2_test.cpp',
+      'unit/metadata/kg_namespace_catch2_test.cpp',
     ),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'metadata', 'kg', 'concurrency'],

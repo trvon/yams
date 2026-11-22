@@ -55,6 +55,7 @@ public:
             std::holds_alternative<RepairRequest>(request) ||
             std::holds_alternative<GraphRepairRequest>(request) ||
             std::holds_alternative<KgIngestRequest>(request) ||
+            std::holds_alternative<KgRemoveRequest>(request) ||
             std::holds_alternative<CancelDownloadJobRequest>(request) ||
             std::holds_alternative<PluginScanRequest>(request) ||
             std::holds_alternative<PluginLoadRequest>(request) ||

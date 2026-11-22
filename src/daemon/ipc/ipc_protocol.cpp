@@ -36,6 +36,10 @@ template <> struct MessageTypeTraits<UnlinkPathRequest> {
     static constexpr MessageType value = MessageType::UnlinkPathRequest;
     static constexpr const char* name = "UnlinkPath";
 };
+template <> struct MessageTypeTraits<KgRemoveRequest> {
+    static constexpr MessageType value = MessageType::KgRemoveRequest;
+    static constexpr const char* name = "KgRemove";
+};
 template <> struct MessageTypeTraits<ListRequest> {
     static constexpr MessageType value = MessageType::ListRequest;
     static constexpr const char* name = "List";
@@ -335,6 +339,9 @@ template <> struct MessageTypeTraits<GraphValidateResponse> {
 template <> struct MessageTypeTraits<KgIngestResponse> {
     static constexpr MessageType value = MessageType::KgIngestResponse;
 };
+template <> struct MessageTypeTraits<KgRemoveResponse> {
+    static constexpr MessageType value = MessageType::KgRemoveResponse;
+};
 template <> struct MessageTypeTraits<MetadataValueCountsResponse> {
     static constexpr MessageType value = MessageType::MetadataValueCountsResponse;
 };
@@ -398,7 +405,8 @@ static constexpr MessageType kRequestTypeMap[] = {
     MessageType::MetadataValueCountsRequest, // 46
     MessageType::MemorySyncRequest,          // 47
     MessageType::RepairRequest_MsgType,      // 56 (RepairRequest)
-    MessageType::UnlinkPathRequest           // 48
+    MessageType::UnlinkPathRequest,          // 48
+    MessageType::KgRemoveRequest             // 49
 };
 
 // MUST MATCH Request std::variant order in ipc_protocol.h
@@ -452,7 +460,8 @@ static constexpr const char* kRequestNameMap[] = {
     "MetadataValueCounts", // 46
     "MemorySync",          // 47
     "Repair",              // 48
-    "UnlinkPath"           // 49
+    "UnlinkPath",          // 49
+    "KgRemove"             // 50
 };
 
 // MUST MATCH Response std::variant order in ipc_protocol.h
@@ -501,11 +510,12 @@ static constexpr MessageType kResponseTypeMap[] = {
     MessageType::EmbeddingEvent,              // 41
     MessageType::ModelLoadEvent,              // 42
     MessageType::RepairResponse_MsgType,      // 43
-    MessageType::RepairEvent_MsgType          // 44
+    MessageType::RepairEvent_MsgType,         // 44
+    MessageType::KgRemoveResponse             // 45
 };
 
 // MUST MATCH Response std::variant order in ipc_protocol_responses.h
-static constexpr std::array<const char*, 45> kResponseNameMap = {
+static constexpr std::array<const char*, 46> kResponseNameMap = {
     "SearchResponse",              // 0
     "AddResponse",                 // 1
     "GetResponse",                 // 2
@@ -550,7 +560,8 @@ static constexpr std::array<const char*, 45> kResponseNameMap = {
     "EmbeddingEvent",              // 41
     "ModelLoadEvent",              // 42
     "RepairResponse",              // 43
-    "RepairEvent"                  // 44
+    "RepairEvent",                 // 44
+    "KgRemoveResponse"             // 45
 };
 
 static_assert(std::size(kResponseNameMap) == std::variant_size_v<Response>);

@@ -2612,6 +2612,11 @@ MCPServer::handleGraphQuery(const MCPGraphRequest& req) {
     if (req.action == "ingest") {
         co_return co_await handleKgIngest(req);
     }
+    if (req.action == "remove") {
+        co_return Error{ErrorCode::InvalidArgument,
+                        "graph no longer removes rows; use the graph_remove tool (or the "
+                        "execute op graph_remove)"};
+    }
 
     const auto symbolToJson = [](const auto& s) {
         json sj{{"node_key", s.nodeKey},
@@ -2824,6 +2829,7 @@ MCPServer::handleKgIngest(const MCPGraphRequest& req) {
     dreq.documentHash = req.documentHash;
     dreq.skipExistingNodes = req.skipExistingNodes;
     dreq.skipExistingEdges = req.skipExistingEdges;
+    dreq.ns = req.ns;
 
     dreq.nodes.reserve(req.nodes.size());
     for (const auto& n : req.nodes) {
@@ -2873,9 +2879,78 @@ MCPServer::handleKgIngest(const MCPGraphRequest& req) {
     out.edgesSkipped = resp.edgesSkipped;
     out.aliasesInserted = resp.aliasesInserted;
     out.aliasesSkipped = resp.aliasesSkipped;
+    out.nodesUpdated = resp.nodesUpdated;
+    out.edgesUpdated = resp.edgesUpdated;
+    out.unresolvedEdges = json::array();
+    for (const auto& edge : resp.unresolvedEdges) {
+        out.unresolvedEdges.push_back(json{{"src_node_key", edge.srcNodeKey},
+                                           {"dst_node_key", edge.dstNodeKey},
+                                           {"relation", edge.relation},
+                                           {"src_missing", edge.srcMissing},
+                                           {"dst_missing", edge.dstMissing}});
+    }
+    out.aliasesUpdated = resp.aliasesUpdated;
+    out.nsConflicts = json::array();
+    for (const auto& c : resp.nsConflicts) {
+        out.nsConflicts.push_back(json{{"kind", c.kind},
+                                       {"node_key", c.nodeKey},
+                                       {"src_node_key", c.srcNodeKey},
+                                       {"dst_node_key", c.dstNodeKey},
+                                       {"relation", c.relation},
+                                       {"existing_ns", c.existingNs},
+                                       {"requested_ns", c.requestedNs},
+                                       {"reason", c.reason}});
+    }
     out.errors = resp.errors;
     out.success = resp.success;
+    // strict: a request that left anything unwritten for ownership or a missing endpoint is a
+    // failure for the caller. The rows that were written stay written.
+    if (req.strict && out.success && (!resp.nsConflicts.empty() || !resp.unresolvedEdges.empty())) {
+        out.success = false;
+        out.errors.push_back("strict: " + std::to_string(resp.nsConflicts.size()) +
+                             " ns conflicts, " + std::to_string(resp.unresolvedEdges.size()) +
+                             " unresolved edges");
+    }
 
+    co_return out;
+}
+
+boost::asio::awaitable<Result<MCPGraphResponse>>
+MCPServer::handleKgRemove(const MCPGraphRequest& req) {
+    // Fail closed before contacting the daemon: removal is always namespace-scoped.
+    if (req.ns.empty()) {
+        co_return Error{ErrorCode::InvalidArgument,
+                        "graph_remove requires 'ns' (the properties.ns namespace); removal by "
+                        "relation alone is not supported"};
+    }
+    auto clientRes = requireDaemonClient();
+    if (!clientRes)
+        co_return clientRes.error();
+
+    yams::daemon::KgRemoveRequest dreq;
+    dreq.ns = req.ns;
+    dreq.relation = req.relation;
+    dreq.dryRun = req.dryRun;
+    dreq.includeForeignEdges = req.includeForeignEdges;
+    auto res = co_await clientRes.value()->call<yams::daemon::KgRemoveRequest>(dreq);
+    if (!res) {
+        co_return res.error();
+    }
+
+    MCPGraphResponse out;
+    out.action = "remove";
+    out.nodesRemoved = res.value().nodesRemoved;
+    out.edgesRemoved = res.value().edgesRemoved;
+    out.foreignEdgesRemoved = res.value().foreignEdgesRemoved;
+    out.refused = res.value().refused;
+    out.dryRun = res.value().dryRun;
+    out.success = !out.refused;
+    if (out.refused) {
+        out.errors.push_back("refused: " + std::to_string(out.foreignEdgesRemoved) +
+                             " incident edges are not owned by '" + req.ns +
+                             "'; nothing was removed. Pass include_foreign_edges=true to "
+                             "remove them too");
+    }
     co_return out;
 }
 

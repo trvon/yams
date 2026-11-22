@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright 2025 YAMS Contributors
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <future>
@@ -571,6 +572,75 @@ TEST_CASE("KG Store: ensurePathNode links logical path to snapshot path", "[unit
     REQUIRE((edges.has_value()));
     REQUIRE_FALSE(edges.value().empty());
     CHECK((edges.value()[0].dstNodeId == snapshotId.value()));
+}
+
+TEST_CASE("KG Store: latestPathVersionBlobKey returns the newest version's blob",
+          "[unit][metadata][kg]") {
+    KGStoreFixture fix;
+    const std::string path = "/repo/latest.cpp";
+    auto none = fix.store_->latestPathVersionBlobKey(path);
+    REQUIRE((none.has_value()));
+    CHECK_FALSE(none.value().has_value());
+
+    const std::string hashOne(64, 'a');
+    const std::string hashTwo(64, 'b');
+    auto blobOne = fix.store_->ensureBlobNode(hashOne);
+    auto blobTwo = fix.store_->ensureBlobNode(hashTwo);
+    REQUIRE((blobOne.has_value()));
+    REQUIRE((blobTwo.has_value()));
+
+    const auto addVersion = [&](const std::string& snapshot, std::int64_t blobId) {
+        auto pathId = fix.store_->ensurePathNode(
+            PathNodeDescriptor{.snapshotId = snapshot, .path = path, .isDirectory = false});
+        REQUIRE((pathId.has_value()));
+        REQUIRE((fix.store_->linkPathVersion(pathId.value(), blobId, 0).has_value()));
+    };
+    addVersion("snap1", blobOne.value());
+    auto first = fix.store_->latestPathVersionBlobKey(path);
+    REQUIRE((first.has_value()));
+    REQUIRE((first.value().has_value()));
+    CHECK((*first.value() == "blob:" + hashOne));
+
+    addVersion("snap2", blobTwo.value());
+    addVersion("snap3", blobOne.value()); // content reverted
+    auto latest = fix.store_->latestPathVersionBlobKey(path);
+    REQUIRE((latest.has_value()));
+    REQUIRE((latest.value().has_value()));
+    CHECK((*latest.value() == "blob:" + hashOne));
+
+    // Other paths are not affected.
+    auto other = fix.store_->latestPathVersionBlobKey("/repo/latest.cpp.bak");
+    REQUIRE((other.has_value()));
+    CHECK_FALSE(other.value().has_value());
+}
+
+TEST_CASE_METHOD(KGStoreFixture, "KG Store lists distinct node types without counting",
+                 "[unit][metadata][kg]") {
+    auto empty = store_->listNodeTypes();
+    REQUIRE((empty.has_value()));
+    CHECK(empty.value().empty());
+
+    const std::vector<KGNode> nodes{
+        {.nodeKey = "path:a", .label = "a", .type = "path"},
+        {.nodeKey = "path:b", .label = "b", .type = "path"},
+        {.nodeKey = "paper:x", .label = "x", .type = "paper"},
+        {.nodeKey = "author:y", .label = "y", .type = "author"},
+        {.nodeKey = "untyped:z", .label = "z", .type = ""},
+    };
+    REQUIRE((store_->upsertNodes(nodes).has_value()));
+
+    auto types = store_->listNodeTypes();
+    REQUIRE((types.has_value()));
+    CHECK((types.value() == std::vector<std::string>{"author", "paper", "path"}));
+
+    auto counts = store_->getNodeTypeCounts();
+    REQUIRE((counts.has_value()));
+    std::vector<std::string> fromCounts;
+    for (const auto& [type, count] : counts.value()) {
+        fromCounts.push_back(type);
+    }
+    std::sort(fromCounts.begin(), fromCounts.end());
+    CHECK((fromCounts == types.value()));
 }
 
 TEST_CASE("KG Store: fetchPathHistory follows rename chains and returns blob hashes",

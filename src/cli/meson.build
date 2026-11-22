@@ -8,6 +8,7 @@ yams_cli_sources = [
   'progress_indicator.cpp',
   'graph_explore_presenter.cpp',
   'graph_helpers.cpp',
+  'graph_ingest_support.cpp',
   'graph_query_execution.cpp',
   'graph_query_presenter.cpp',
   'graph_scope_support.cpp',

@@ -299,6 +299,7 @@ private:
     static Migration resetGrepTrigramIndex();
     // Version 47: Rebuild v37 graph cleanup indexes left on the unguarded expression.
     static Migration rebuildUnguardedGraphCleanupIndexes();
+    static Migration createGraphNamespaceIndexes();
 };
 
 /**

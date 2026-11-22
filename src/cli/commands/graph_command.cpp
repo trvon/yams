@@ -4,11 +4,14 @@
 #include <cctype>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -19,6 +22,7 @@
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/graph_explore_presenter.h>
 #include <yams/cli/graph_helpers.h>
+#include <yams/cli/graph_ingest_support.h>
 #include <yams/cli/graph_query_execution.h>
 #include <yams/cli/graph_query_presenter.h>
 #include <yams/cli/graph_scope_support.h>
@@ -139,15 +143,19 @@ public:
             ->check(CLI::Range(1, 5));
         cmd->add_option(
             "--explore", exploreQuery_,
-            "Build agent-oriented graph context for a symbol, file, or natural-language query");
+            "Build graph context for a symbol, file, or natural-language query; a file expands "
+            "to files in its directory, sharing its tags, or semantically near it");
         cmd->add_option("--max-files", exploreMaxFiles_, "Maximum files to include for --explore")
             ->default_val(8);
 
         // Agent-oriented navigation ops (share --depth where relevant)
-        cmd->add_option("--lookup", lookupSymbol_,
-                        "Resolve a symbol definition (go-to-definition)");
+        cmd->add_option(
+            "--lookup", lookupSymbol_,
+            "Resolve a named node (symbol or ingested); fails on stores with only file nodes");
         cmd->add_option("--at-file", lookupAtFile_, "Disambiguate --lookup by file path substring");
-        cmd->add_option("--trace", traceFrom_, "Trace a path from this symbol (use with --to)");
+        cmd->add_option(
+            "--trace", traceFrom_,
+            "Trace a path from this node (use with --to); needs symbol or ingested nodes");
         cmd->add_option("--to", traceTo_, "Target symbol for --trace");
 
         // Relation filtering for traversal
@@ -194,6 +202,42 @@ public:
         cmd->add_option("--snapshot", topologySnapshotId_,
                         "Specific topology snapshot id (defaults to latest)");
 
+        // Write subcommands for external graphs (same payload as the MCP graph tool).
+        auto* ingest = cmd->add_subcommand(
+            "ingest",
+            "Upsert nodes, edges and aliases from a JSON payload (MCP graph ingest shape)");
+        ingest
+            ->add_option("--file,-f", ingestFile_,
+                         "Payload file with nodes/edges/aliases, or '-' for stdin")
+            ->required();
+        ingest->add_flag("--json", jsonOutput_, "Output as JSON");
+        ingest->add_flag("--strict", ingestStrict_,
+                         "Exit non-zero when any row was refused (ns_conflicts) or any edge "
+                         "was unresolved; written rows stay written");
+        ingest->callback([this]() {
+            mode_ = Mode::Ingest;
+            cli_->setPendingCommand(this);
+        });
+
+        auto* remove = cmd->add_subcommand(
+            "remove",
+            "Delete graph rows whose properties.ns equals --ns (never by relation alone)");
+        remove->add_option("--ns", removeNs_, "Caller namespace to remove (properties.ns)")
+            ->required()
+            ->check([](const std::string& value) {
+                return value.empty() ? std::string("--ns must not be empty") : std::string{};
+            });
+        remove->add_option("--relation,-r", removeRelation_,
+                           "Only remove namespaced edges with this relation; keep nodes");
+        remove->add_flag("--dry-run", removeDryRun_, "Report what would be removed");
+        remove->add_flag("--include-foreign-edges", removeIncludeForeign_,
+                         "Also remove other owners' edges that touch the namespace's nodes");
+        remove->add_flag("--json", jsonOutput_, "Output as JSON");
+        remove->callback([this]() {
+            mode_ = Mode::Remove;
+            cli_->setPendingCommand(this);
+        });
+
         cmd->callback([this]() { cli_->setPendingCommand(this); });
     }
 
@@ -204,6 +248,13 @@ public:
         try {
             using namespace yams::daemon;
             invocationCwd_ = invocationCwdForCli();
+
+            if (mode_ == Mode::Ingest) {
+                co_return co_await executeIngest();
+            }
+            if (mode_ == Mode::Remove) {
+                co_return co_await executeRemove();
+            }
 
             if (!exploreQuery_.empty()) {
                 co_return co_await executeGraphExplore();
@@ -257,6 +308,146 @@ public:
     }
 
 private:
+    static Result<std::string> readIngestPayload(const std::string& path) {
+        if (path == "-") {
+            std::string text{std::istreambuf_iterator<char>(std::cin),
+                             std::istreambuf_iterator<char>()};
+            return text;
+        }
+        std::ifstream in(path, std::ios::binary);
+        if (!in) {
+            return Error{ErrorCode::FileNotFound, "Cannot read graph ingest payload: " + path};
+        }
+        std::ostringstream buffer;
+        buffer << in.rdbuf();
+        return buffer.str();
+    }
+
+    boost::asio::awaitable<Result<void>> executeIngest() {
+        auto text = readIngestPayload(ingestFile_);
+        if (!text) {
+            co_return text.error();
+        }
+        auto request = parseGraphIngestPayloadText(text.value());
+        if (!request) {
+            co_return request.error();
+        }
+
+        auto leaseRes = acquireGraphClientLease();
+        if (!leaseRes) {
+            co_return leaseRes.error();
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        printFallbackNoticeIfNeeded(leaseHandle.plan);
+        auto& client = **leaseHandle.lease;
+
+        // Chunks run in order (nodes, then edges, then aliases); each one commits on its own.
+        // Stop at the first chunk that fails, and always report what did commit.
+        const auto chunks = chunkGraphIngestRequest(request.value(), kGraphIngestChunkRows);
+        GraphIngestProgress progress(chunks.size());
+        for (const auto& chunk : chunks) {
+            auto r = co_await client.call<yams::daemon::KgIngestRequest>(chunk);
+            if (!progress.record(r)) {
+                break;
+            }
+        }
+        const auto& merged = progress.merged();
+
+        if (wantsJsonOutput()) {
+            std::cout << graphIngestProgressToJson(progress).dump(2) << "\n";
+        } else {
+            std::cout << "nodes: " << merged.nodesInserted << " inserted, " << merged.nodesUpdated
+                      << " updated, " << merged.nodesSkipped << " skipped\n";
+            std::cout << "edges: " << merged.edgesInserted << " inserted, " << merged.edgesUpdated
+                      << " updated, " << merged.edgesSkipped << " skipped ("
+                      << merged.unresolvedEdges.size() << " unresolved)\n";
+            std::cout << "aliases: " << merged.aliasesInserted << " inserted, "
+                      << merged.aliasesUpdated << " updated, " << merged.aliasesSkipped
+                      << " skipped\n";
+            if (!merged.nsConflicts.empty()) {
+                std::cout << "ns conflicts: " << merged.nsConflicts.size()
+                          << " rows refused (use --json for the list)\n";
+            }
+            std::cout << "chunks: " << progress.chunksCommitted() << "/" << progress.chunksTotal()
+                      << " committed\n";
+            constexpr std::size_t kShown = 20;
+            for (std::size_t i = 0; i < merged.unresolvedEdges.size() && i < kShown; ++i) {
+                const auto& edge = merged.unresolvedEdges[i];
+                std::cout << "  unresolved: " << edge.srcNodeKey << " -[" << edge.relation << "]-> "
+                          << edge.dstNodeKey << " (missing "
+                          << (edge.srcMissing && edge.dstMissing ? "both"
+                              : edge.srcMissing                  ? "src"
+                                                                 : "dst")
+                          << ")\n";
+            }
+            if (merged.unresolvedEdges.size() > kShown) {
+                std::cout << "  ... " << (merged.unresolvedEdges.size() - kShown)
+                          << " more (use --json for the full list)\n";
+            }
+            for (const auto& error : merged.errors) {
+                if (error.rfind("Edge ", 0) != 0 && error.rfind("Namespace conflict", 0) != 0) {
+                    std::cerr << "warning: " << error << "\n";
+                }
+            }
+        }
+        if (!progress.complete()) {
+            co_return Error{ErrorCode::WriteError,
+                            "Graph ingest stopped: " + progress.failure() + " (" +
+                                std::to_string(progress.chunksCommitted()) + "/" +
+                                std::to_string(progress.chunksTotal()) + " chunks committed)"};
+        }
+        if (ingestStrict_ && progress.hasRefusals()) {
+            co_return Error{ErrorCode::ValidationError,
+                            "strict: " + std::to_string(merged.nsConflicts.size()) +
+                                " ns conflicts, " + std::to_string(merged.unresolvedEdges.size()) +
+                                " unresolved edges (committed rows were kept)"};
+        }
+        co_return Result<void>();
+    }
+
+    boost::asio::awaitable<Result<void>> executeRemove() {
+        yams::daemon::KgRemoveRequest request;
+        request.ns = removeNs_;
+        request.relation = removeRelation_;
+        request.dryRun = removeDryRun_;
+        request.includeForeignEdges = removeIncludeForeign_;
+
+        auto leaseRes = acquireGraphClientLease();
+        if (!leaseRes) {
+            co_return leaseRes.error();
+        }
+        auto leaseHandle = std::move(leaseRes.value());
+        printFallbackNoticeIfNeeded(leaseHandle.plan);
+        auto& client = **leaseHandle.lease;
+
+        auto r = co_await client.call<yams::daemon::KgRemoveRequest>(request);
+        if (!r) {
+            co_return Error{r.error().code, "Graph removal failed: " + r.error().message};
+        }
+        if (wantsJsonOutput()) {
+            std::cout << graphRemoveResponseToJson(r.value(), removeNs_, removeRelation_).dump(2)
+                      << "\n";
+        } else {
+            const auto& resp = r.value();
+            std::cout << (resp.dryRun || resp.refused ? "would remove " : "removed ")
+                      << resp.nodesRemoved << " nodes, " << resp.edgesRemoved << " edges ("
+                      << resp.foreignEdgesRemoved
+                      << " not owned by the namespace) (ns=" << removeNs_;
+            if (!removeRelation_.empty()) {
+                std::cout << ", relation=" << removeRelation_;
+            }
+            std::cout << ")\n";
+        }
+        if (r.value().refused) {
+            co_return Error{ErrorCode::InvalidOperation,
+                            "refused: " + std::to_string(r.value().foreignEdgesRemoved) +
+                                " incident edges are not owned by '" + removeNs_ +
+                                "'; nothing was removed. Re-run with --include-foreign-edges to "
+                                "remove them too"};
+        }
+        co_return Result<void>();
+    }
+
     Result<yams::cli::CliDaemonClientLease> acquireGraphClientLease() const {
         yams::daemon::ClientConfig cfg;
         if (cli_ && cli_->hasExplicitDataDir()) {
@@ -1108,6 +1299,14 @@ private:
     std::string lookupAtFile_;
     std::string traceFrom_;
     std::string traceTo_;
+    enum class Mode { Read, Ingest, Remove };
+    Mode mode_{Mode::Read};
+    std::string ingestFile_;
+    std::string removeNs_;
+    std::string removeRelation_;
+    bool removeDryRun_{false};
+    bool removeIncludeForeign_{false};
+    bool ingestStrict_{false};
 };
 
 std::unique_ptr<ICommand> createGraphCommand() {

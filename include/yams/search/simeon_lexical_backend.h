@@ -156,15 +156,6 @@ public:
         bool concept_mining_enabled = false;
         float concept_weight = 0.5f;
 
-        // When concept_mining_enabled is true and this callback is set,
-        // the build thread calls fn(docId, entityText, confidence) for
-        // every bigram concept matched in every document. Intended for
-        // populating kg_doc_entities so the graph reranker can match
-        // query concepts against document entities.
-        using EntityCallback =
-            std::function<void(std::int64_t docId, std::string entityText, float confidence)>;
-        EntityCallback entity_callback;
-
         // Reserved for backend-owned bandit flows. Normal SearchEngine bandit
         // routing is controlled per request by SearchEngineConfig::simeonBanditArm.
         // Direct scoreBanditRouted() calls are available whenever the backend is

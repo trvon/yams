@@ -839,8 +839,17 @@ message KgIngestRequest {
   repeated KgIngestEdge edges = 2;
   repeated KgIngestAlias aliases = 3;
   string document_hash = 4;
-  bool skip_existing_nodes = 5;
-  bool skip_existing_edges = 6;
+  bool skip_existing_nodes = 5;  // false = upsert (default)
+  bool skip_existing_edges = 6;  // false = upsert (default)
+  string ns = 7;  // namespace the request acts for (governs aliases)
+}
+
+message KgIngestUnresolvedEdge {
+  string src_node_key = 1;
+  string dst_node_key = 2;
+  string relation = 3;
+  bool src_missing = 4;
+  bool dst_missing = 5;
 }
 
 message KgIngestResponse {
@@ -852,6 +861,38 @@ message KgIngestResponse {
   uint64 aliases_skipped = 6;
   repeated string errors = 7;
   bool success = 8;
+  uint64 nodes_updated = 9;
+  uint64 edges_updated = 10;
+  repeated KgIngestUnresolvedEdge unresolved_edges = 11;
+  uint64 aliases_updated = 12;
+  repeated KgIngestNsConflict ns_conflicts = 13;
+}
+
+message KgIngestNsConflict {
+  string kind = 1;
+  string node_key = 2;
+  string src_node_key = 3;
+  string dst_node_key = 4;
+  string relation = 5;
+  string existing_ns = 6;
+  string requested_ns = 7;
+  string reason = 8;
+}
+
+// Scoped removal is its own payload, not an ignorable KgIngestRequest flag.
+message KgRemoveRequest {
+  string ns = 1;        // required: matches properties.ns
+  string relation = 2;  // optional: only edges with this relation
+  bool dry_run = 3;
+  bool include_foreign_edges = 4;
+}
+
+message KgRemoveResponse {
+  uint64 nodes_removed = 1;
+  uint64 edges_removed = 2;
+  bool dry_run = 3;
+  uint64 foreign_edges_removed = 4;
+  bool refused = 5;
 }
 
 // Generic metadata value counts query (MCP client mode)
@@ -1269,6 +1310,7 @@ message Envelope {
     GraphValidateRequest graph_validate_request = 53;
     // KG Ingest request (PBI-093)
     KgIngestRequest kg_ingest_request = 54;
+    KgRemoveRequest kg_remove_request = 191;
     // Graph query requests
     GraphQueryRequest graph_query_request = 55;
     GraphExploreRequest graph_explore_request = 62;
@@ -1324,6 +1366,7 @@ message Envelope {
     GraphValidateResponse graph_validate_response = 138;
     // KG Ingest response (PBI-093)
     KgIngestResponse kg_ingest_response = 139;
+    KgRemoveResponse kg_remove_response = 192;
     // Graph query responses
     GraphQueryResponse graph_query_response = 140;
     GraphExploreResponse graph_explore_response = 148;
