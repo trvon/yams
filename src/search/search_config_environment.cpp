@@ -262,6 +262,16 @@ SearchEnvironmentPins LegacySearchConfigEnvironment::applyTo(SearchEngineConfig&
         spdlog::info("SearchEngine vectorMaxResults overridden to {} via env",
                      config.vectorMaxResults);
     }
+    // 0 restores the automatic fusion window; negative values are rejected.
+    if (auto fusionLimit = getEnvInt("YAMS_SEARCH_FUSION_CANDIDATE_LIMIT")) {
+        if (*fusionLimit >= 0) {
+            config.fusionCandidateLimit = static_cast<size_t>(*fusionLimit);
+            spdlog::info("SearchEngine fusionCandidateLimit overridden to {} via env",
+                         config.fusionCandidateLimit);
+        } else {
+            spdlog::warn("Ignoring negative YAMS_SEARCH_FUSION_CANDIDATE_LIMIT={}", *fusionLimit);
+        }
+    }
     if (auto kgMax = getEnvInt("YAMS_KG_MAX_RESULTS")) {
         config.kgMaxResults = static_cast<size_t>(*kgMax);
         spdlog::info("SearchEngine kgMaxResults overridden to {} via env", config.kgMaxResults);
