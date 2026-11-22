@@ -1128,6 +1128,26 @@ StoredDocument storeDocument(GraphContextServiceFixture& fixture, const std::str
     return stored;
 }
 
+void linkSemanticNeighbors(GraphContextServiceFixture& fixture, const StoredDocument& from,
+                           const StoredDocument& to, float weight) {
+    KGEdge edge;
+    edge.srcNodeId = from.docNodeId;
+    edge.dstNodeId = to.docNodeId;
+    edge.relation = "semantic_neighbor";
+    edge.weight = weight;
+    REQUIRE((fixture.kgStore->addEdge(edge).has_value()));
+}
+
+std::string relatedVia(const GraphExploreResponse& response, const std::filesystem::path& path) {
+    for (const auto& relation : response.relationships) {
+        if (relation.targetLabel == path.string() && relation.provenance &&
+            relation.provenance->starts_with("explore:")) {
+            return relation.relation;
+        }
+    }
+    return {};
+}
+
 } // namespace
 
 TEST_CASE("GraphContextService lookup and trace fail clearly without symbol nodes",
@@ -1163,4 +1183,197 @@ TEST_CASE("GraphContextService lookup and trace fail clearly without symbol node
     REQUIRE((legacy.has_value()));
     REQUIRE((legacy.value().matches.size() == 1));
     CHECK(legacy.value().matches.front().filePath == legacyPath.string());
+}
+
+TEST_CASE("GraphContextService file explore expands by directory, tag, then semantic neighbor",
+          "[services][graph][context][related]") {
+    GraphContextServiceFixture fixture;
+    const auto seed = storeDocument(fixture, "repo/src/daemon/widget.cpp", {"daemon"});
+    // Same directory: the header shares the seed's stem and outranks the unrelated sibling.
+    const auto header = storeDocument(fixture, "repo/src/daemon/widget.h");
+    const auto sibling = storeDocument(fixture, "repo/src/daemon/aaa_unrelated.cpp");
+    // Shared tag, other directory.
+    const auto tagged = storeDocument(fixture, "repo/tests/daemon/widget_test.cpp", {"daemon"});
+    // Semantic neighbor only.
+    const auto neighbor = storeDocument(fixture, "repo/docs/widget.md");
+    linkSemanticNeighbors(fixture, seed, neighbor, 0.9F);
+    // Unrelated document: never returned.
+    const auto unrelated = storeDocument(fixture, "repo/other/zzz.cpp");
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphExploreRequest req;
+    req.query = seed.path.string();
+    req.includeCode = false;
+    req.budget.maxFiles = 5;
+    const auto result = service->explore(req);
+    REQUIRE((result.has_value()));
+    const auto& response = result.value();
+
+    REQUIRE((response.files.size() == 5));
+    CHECK(response.files[0].filePath == seed.path.string());
+    // Budget 4 gives each relation a share of 2, taken in relation order.
+    CHECK(response.files[1].filePath == header.path.string());
+    CHECK(response.files[2].filePath == sibling.path.string());
+    CHECK(response.files[3].filePath == tagged.path.string());
+    CHECK(response.files[4].filePath == neighbor.path.string());
+    CHECK(relatedVia(response, header.path) == "same_directory");
+    CHECK(relatedVia(response, sibling.path) == "same_directory");
+    CHECK(relatedVia(response, tagged.path) == "shared_tag");
+    CHECK(relatedVia(response, neighbor.path) == "semantic_neighbor");
+    CHECK(relatedVia(response, unrelated.path).empty());
+    // Related files are context, not query matches.
+    REQUIRE((response.entrySymbols.size() == 1));
+    CHECK(response.entrySymbols.front().filePath == seed.path.string());
+
+    // --max-files still bounds the whole result, seed included; each relation gets one slot.
+    req.budget.maxFiles = 4;
+    const auto capped = service->explore(req);
+    REQUIRE((capped.has_value()));
+    REQUIRE((capped.value().files.size() == 4));
+    CHECK(capped.value().files[0].filePath == seed.path.string());
+    CHECK(capped.value().files[1].filePath == header.path.string());
+    CHECK(capped.value().files[2].filePath == tagged.path.string());
+    CHECK(capped.value().files[3].filePath == neighbor.path.string());
+
+    req.budget.maxFiles = 1;
+    const auto seedOnly = service->explore(req);
+    REQUIRE((seedOnly.has_value()));
+    REQUIRE((seedOnly.value().files.size() == 1));
+    CHECK(seedOnly.value().files.front().filePath == seed.path.string());
+}
+
+TEST_CASE("GraphContextService file explore follows has_tag edges and relative global paths",
+          "[services][graph][context][related]") {
+    GraphContextServiceFixture fixture;
+    const auto seed = storeDocument(fixture, "repo/src/search/ranker.cpp");
+    const auto tagged = storeDocument(fixture, "repo/include/yams/search/ranker.hpp");
+    const auto untagged = storeDocument(fixture, "repo/include/yams/other.hpp");
+    KGNode tag;
+    tag.nodeKey = "tag:search";
+    tag.label = "search";
+    tag.type = "tag";
+    const auto tagId = fixture.kgStore->upsertNode(tag);
+    REQUIRE((tagId.has_value()));
+    for (const auto* doc : {&seed, &tagged}) {
+        KGEdge edge;
+        edge.srcNodeId = doc->docNodeId;
+        edge.dstNodeId = tagId.value();
+        edge.relation = "has_tag";
+        REQUIRE((fixture.kgStore->addEdge(edge).has_value()));
+    }
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    // Unscoped (--global) query with a repository-relative path.
+    GraphExploreRequest req;
+    req.query = "repo/src/search/ranker.cpp";
+    req.includeCode = false;
+    const auto result = service->explore(req);
+    REQUIRE((result.has_value()));
+    const auto& response = result.value();
+    REQUIRE((response.files.size() == 2));
+    CHECK(response.files[0].filePath == seed.path.string());
+    CHECK(response.entrySymbols.front().exactMatch);
+    CHECK(response.files[1].filePath == tagged.path.string());
+    CHECK(relatedVia(response, tagged.path) == "shared_tag");
+    CHECK(relatedVia(response, untagged.path).empty());
+    bool provenanceNamesTag = false;
+    for (const auto& relation : response.relationships) {
+        if (relation.targetLabel == tagged.path.string()) {
+            provenanceNamesTag = relation.provenance == "explore:shared_tag:search";
+        }
+    }
+    CHECK(provenanceNamesTag);
+}
+
+TEST_CASE("GraphContextService file explore finds siblings stored as path locations",
+          "[services][graph][context][related]") {
+    GraphContextServiceFixture fixture;
+    // The content of copy/shared.h was first stored at other/shared.h, so its document row
+    // carries that path; only its path location places it beside the seed.
+    const auto original = storeDocument(fixture, "other/shared.h");
+    const auto seed = storeDocument(fixture, "copy/main.cpp");
+    const auto copyPath = fixture.writeSource("copy/shared.h", {"// other/shared.h"});
+    auto copyInfo = fixture.metadataRepo->getDocument(original.documentId);
+    REQUIRE((copyInfo.has_value()));
+    REQUIRE((copyInfo.value().has_value()));
+    auto location = *copyInfo.value();
+    location.filePath = copyPath.string();
+    const auto derived = computePathDerivedValues(location.filePath);
+    location.fileName = copyPath.filename().string();
+    location.pathPrefix = derived.pathPrefix;
+    location.reversePath = derived.reversePath;
+    location.pathHash = derived.pathHash;
+    location.parentHash = derived.parentHash;
+    location.pathDepth = derived.pathDepth;
+    REQUIRE(
+        (fixture.metadataRepo->recordDocumentPath(location, original.documentId, {}).has_value()));
+    for (const auto& path : {seed.path, original.path}) {
+        // Ingest records every location, the first one included.
+        auto info = fixture.metadataRepo->findDocumentByExactPath(path.string());
+        REQUIRE((info.has_value()));
+        if (info.value()) {
+            REQUIRE((fixture.metadataRepo->recordDocumentPath(*info.value(), info.value()->id, {})
+                         .has_value()));
+        }
+    }
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+    GraphExploreRequest req;
+    req.query = seed.path.string();
+    req.includeCode = false;
+    const auto result = service->explore(req);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().files.size() == 2));
+    // Path locations are stored normalized (symlinks resolved).
+    const std::filesystem::path storedCopy = derived.normalizedPath;
+    CHECK(result.value().files[1].filePath == storedCopy.string());
+    CHECK(relatedVia(result.value(), storedCopy) == "same_directory");
+}
+
+TEST_CASE("GraphContextService file explore warns when nothing is related",
+          "[services][graph][context][related]") {
+    GraphContextServiceFixture fixture;
+    const auto seed = storeDocument(fixture, "lonely/only.cpp");
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+    GraphExploreRequest req;
+    req.query = seed.path.string();
+    req.includeCode = false;
+    const auto result = service->explore(req);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().files.size() == 1));
+    bool warned = false;
+    for (const auto& warning : result.value().warnings) {
+        warned = warned || warning.find("No related files") != std::string::npos;
+    }
+    CHECK(warned);
+}
+
+TEST_CASE("GraphContextService query explore ranks files by score, not path order",
+          "[services][graph][context][natural-language]") {
+    GraphContextServiceFixture fixture;
+    // Both files contain both query terms in their paths; only the second names them in the
+    // file name. Alphabetical order would put the first ahead.
+    const auto byDirectory = fixture.writeSource("render/widget/a_util.cpp", {"int util() {}"});
+    const auto byName = fixture.writeSource("src/z_render_widget.cpp", {"int widget() {}"});
+    fixture.upsertPathNode(byDirectory, "path:logical:" + byDirectory.string());
+    fixture.upsertPathNode(byName, "path:logical:" + byName.string());
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphExploreRequest req;
+    req.query = "render widget";
+    req.includeCode = false;
+    const auto result = service->explore(req);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().files.size() == 2));
+    CHECK(result.value().files[0].filePath == byName.string());
+    CHECK(result.value().files[1].filePath == byDirectory.string());
+    CHECK(result.value().entrySymbols.front().filePath == byName.string());
+    CHECK(result.value().entrySymbols.front().score > result.value().entrySymbols.back().score);
 }

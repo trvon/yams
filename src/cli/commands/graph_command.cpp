@@ -139,7 +139,8 @@ public:
             ->check(CLI::Range(1, 5));
         cmd->add_option(
             "--explore", exploreQuery_,
-            "Build agent-oriented graph context for a symbol, file, or natural-language query");
+            "Build graph context for a symbol, file, or natural-language query; a file expands "
+            "to files in its directory, sharing its tags, or semantically near it");
         cmd->add_option("--max-files", exploreMaxFiles_, "Maximum files to include for --explore")
             ->default_val(8);
 

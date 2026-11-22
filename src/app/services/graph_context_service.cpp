@@ -536,21 +536,37 @@ Result<bool> storeHasSymbolNodes(metadata::KnowledgeGraphStore& kgStore) {
 constexpr std::size_t kExploreCandidatePoolFactor = 8;
 constexpr std::size_t kExploreMinCandidatePool = 64;
 
-// Order candidates by how many distinct query terms their file covers (across all of that
-// file's candidates), then by the terms the candidate itself covers, keeping the lookup score
-// order among ties. Multi-term queries then prefer the file that answers most of the query.
+// Score weights for multi-term explore ranking. A query term covered anywhere in a file's
+// candidates outweighs the lookup tier gap (alias 95 / label 80 / fuzzy 70), so the file that
+// answers most of the query wins; a term in the file name counts more than one in a directory.
+constexpr double kFileCoverageWeight = 10.0;
+constexpr double kBasenameTermWeight = 3.0;
+constexpr double kSymbolCoverageWeight = 1.0;
+
+// Fold query-term coverage into each candidate's score, then order by score. Lookup returns
+// label matches alphabetically, so without this, equal-score files came back in path order.
 void rankByQueryCoverage(std::vector<GraphContextSymbol>& symbols,
                          const std::vector<std::string>& terms) {
     if (terms.size() < 2 || symbols.size() < 2) {
         return;
     }
+    const auto limit = std::min<std::size_t>(terms.size(), 64);
     const auto termMask = [&](const GraphContextSymbol& symbol) {
         std::uint64_t mask = 0;
-        const auto limit = std::min<std::size_t>(terms.size(), 64);
         for (std::size_t i = 0; i < limit; ++i) {
             if (containsToken(symbol.label, terms[i]) ||
                 containsToken(symbol.qualifiedName, terms[i]) ||
                 containsToken(symbol.filePath, terms[i])) {
+                mask |= std::uint64_t{1} << i;
+            }
+        }
+        return mask;
+    };
+    const auto basenameMask = [&](const std::string& filePath) {
+        std::uint64_t mask = 0;
+        const auto name = std::filesystem::path(filePath).filename().string();
+        for (std::size_t i = 0; i < limit; ++i) {
+            if (containsToken(name, terms[i])) {
                 mask |= std::uint64_t{1} << i;
             }
         }
@@ -563,22 +579,112 @@ void rankByQueryCoverage(std::vector<GraphContextSymbol>& symbols,
         masks.push_back(termMask(symbol));
         fileMasks[symbol.filePath] |= masks.back();
     }
-    std::vector<std::size_t> order(symbols.size());
-    std::iota(order.begin(), order.end(), std::size_t{0});
-    std::stable_sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
-        const auto lhsFile = std::popcount(fileMasks[symbols[lhs].filePath]);
-        const auto rhsFile = std::popcount(fileMasks[symbols[rhs].filePath]);
-        if (lhsFile != rhsFile) {
-            return lhsFile > rhsFile;
+    std::unordered_map<std::string, int> basenameHits;
+    for (std::size_t i = 0; i < symbols.size(); ++i) {
+        auto& symbol = symbols[i];
+        auto [it, inserted] = basenameHits.try_emplace(symbol.filePath, 0);
+        if (inserted) {
+            it->second = std::popcount(basenameMask(symbol.filePath));
         }
-        return std::popcount(masks[lhs]) > std::popcount(masks[rhs]);
-    });
-    std::vector<GraphContextSymbol> ranked;
-    ranked.reserve(symbols.size());
-    for (const auto index : order) {
-        ranked.push_back(std::move(symbols[index]));
+        symbol.score += kFileCoverageWeight * std::popcount(fileMasks[symbol.filePath]) +
+                        kBasenameTermWeight * it->second +
+                        kSymbolCoverageWeight * std::popcount(masks[i]);
     }
-    symbols = std::move(ranked);
+    std::stable_sort(symbols.begin(), symbols.end(),
+                     [](const auto& lhs, const auto& rhs) { return lhs.score > rhs.score; });
+}
+
+bool isFilePathQuery(const std::string& query, const std::vector<std::string>& terms) {
+    if (terms.size() != 1 || terms.front() != query) {
+        return false;
+    }
+    const std::filesystem::path queryPath(query);
+    return queryPath.has_extension() || queryPath.has_parent_path();
+}
+
+// A whole-file candidate is the file the query names: the same absolute path, the query
+// resolved against the scope, or (unscoped relative query) a path ending in the query.
+bool filePathMatchesQuery(std::string_view filePath, const std::string& query,
+                          std::string_view scopePathPrefix) {
+    if (filePath.empty()) {
+        return false;
+    }
+    const auto candidate = std::filesystem::path(std::string(filePath)).lexically_normal();
+    const auto queryPath = std::filesystem::path(query).lexically_normal();
+    if (queryPath.is_absolute()) {
+        return candidate == queryPath;
+    }
+    if (!scopePathPrefix.empty()) {
+        return candidate ==
+               (std::filesystem::path(std::string(scopePathPrefix)) / queryPath).lexically_normal();
+    }
+    const auto candidateText = candidate.generic_string();
+    const auto suffix = queryPath.generic_string();
+    if (suffix.empty() || suffix.starts_with("..")) {
+        return false;
+    }
+    return candidateText == suffix ||
+           (candidateText.size() > suffix.size() && candidateText.ends_with(suffix) &&
+            candidateText[candidateText.size() - suffix.size() - 1] == '/');
+}
+
+// Relations a file-seeded explore follows, in metadata-first order.
+constexpr std::string_view kRelatedSameDirectory = "same_directory";
+constexpr std::string_view kRelatedSharedTag = "shared_tag";
+constexpr std::string_view kRelatedSemanticNeighbor = "semantic_neighbor";
+// Rows scanned per source (directory listing, tag members, neighbor edges) before ranking.
+constexpr std::size_t kRelatedScanLimit = 256;
+constexpr std::size_t kRelatedSemanticEdgeLimit = 64;
+constexpr std::size_t kRelatedSeedTagLimit = 32;
+
+struct RelatedFileCandidate {
+    std::string filePath;
+    bool sameDirectory{false};
+    std::vector<std::string> sharedTags;
+    std::optional<float> semanticWeight;
+    double score{0.0};
+};
+
+// Shared leading characters of two file stems, relative to the longer stem: links
+// foo.cpp, foo.h and foo_test.cpp within a candidate group.
+double stemAffinity(std::string_view lhsPath, std::string_view rhsPath) {
+    const auto lhs = lowerAscii(std::filesystem::path(std::string(lhsPath)).stem().string());
+    const auto rhs = lowerAscii(std::filesystem::path(std::string(rhsPath)).stem().string());
+    const auto longest = std::max(lhs.size(), rhs.size());
+    if (longest == 0) {
+        return 0.0;
+    }
+    std::size_t common = 0;
+    while (common < lhs.size() && common < rhs.size() && lhs[common] == rhs[common]) {
+        ++common;
+    }
+    return static_cast<double>(common) / static_cast<double>(longest);
+}
+
+// Leading directory components two paths share.
+std::size_t sharedDirectoryDepth(std::string_view lhsPath, std::string_view rhsPath) {
+    const auto lhs = std::filesystem::path(std::string(lhsPath)).parent_path();
+    const auto rhs = std::filesystem::path(std::string(rhsPath)).parent_path();
+    std::size_t depth = 0;
+    for (auto l = lhs.begin(), r = rhs.begin(); l != lhs.end() && r != rhs.end() && *l == *r;
+         ++l, ++r) {
+        ++depth;
+    }
+    return depth;
+}
+
+// One score ranks candidates inside every relation group: each other signal that also links
+// the candidate to the seed counts, then file-name affinity, then directory proximity.
+double relatedFileScore(const RelatedFileCandidate& candidate, std::string_view seedPath) {
+    double score = 0.0;
+    if (candidate.semanticWeight) {
+        score += 2.0 + std::clamp(static_cast<double>(*candidate.semanticWeight), 0.0, 1.0);
+    }
+    score += static_cast<double>(candidate.sharedTags.size());
+    score += 1.5 * stemAffinity(candidate.filePath, seedPath);
+    score += 0.1 * static_cast<double>(std::min<std::size_t>(
+                       sharedDirectoryDepth(candidate.filePath, seedPath), 10));
+    return score;
 }
 
 GraphContextRelation
@@ -697,6 +803,23 @@ public:
             symbols.resize(req.budget.maxSymbols);
             response.truncated = true;
         }
+        // A query naming one file seeds navigation from that file: put it first and expand to
+        // related documents below.
+        std::optional<GraphContextSymbol> fileSeed;
+        if (isFilePathQuery(req.query, terms)) {
+            const auto seedIt = std::ranges::find_if(symbols, [&](const auto& symbol) {
+                return isWholeFileContext(symbol) &&
+                       filePathMatchesQuery(symbol.filePath, req.query, req.scopePathPrefix);
+            });
+            if (seedIt != symbols.end()) {
+                if (!seedIt->exactMatch) {
+                    seedIt->exactMatch = true;
+                    seedIt->score += 20.0;
+                }
+                std::rotate(symbols.begin(), seedIt, seedIt + 1);
+                fileSeed = symbols.front();
+            }
+        }
         response.entrySymbols = symbols;
         YAMS_DCHECK(response.entrySymbols.size() <= req.budget.maxSymbols,
                     "graph explore entry symbols must respect maxSymbols budget");
@@ -725,6 +848,9 @@ public:
                 return !relationEndpointWithinScope(relation.sourceNodeKey, req.scopePathPrefix) ||
                        !relationEndpointWithinScope(relation.targetNodeKey, req.scopePathPrefix);
             });
+        }
+        if (fileSeed) {
+            addRelatedFiles(*fileSeed, req, symbols, response);
         }
         addSnippets(symbols, response, req);
         YAMS_DCHECK(response.emittedChars <= req.budget.maxTotalChars,
@@ -931,6 +1057,277 @@ public:
     }
 
 private:
+    // Expand a file seed to related documents in metadata-first order: same directory, shared
+    // tags, then semantic neighbors. Each relation gets a share of the remaining file budget;
+    // unused shares pass to the next relation. Every added file carries a relationship from
+    // the seed that names the relation it came from.
+    void addRelatedFiles(const GraphContextSymbol& seed, const GraphExploreRequest& req,
+                         std::vector<GraphContextSymbol>& symbols, GraphExploreResponse& response) {
+        YAMS_ZONE_SCOPED_N("graph_context::addRelatedFiles");
+        std::unordered_set<std::string> shownFiles;
+        for (const auto& symbol : symbols) {
+            shownFiles.insert(symbol.filePath);
+        }
+        if (req.budget.maxFiles <= shownFiles.size()) {
+            return;
+        }
+        const auto budget = req.budget.maxFiles - shownFiles.size();
+        const auto& seedPath = seed.filePath;
+
+        std::unordered_map<std::string, RelatedFileCandidate> candidates;
+        const auto candidateFor = [&](const std::string& path) -> RelatedFileCandidate* {
+            if (path.empty() || shownFiles.contains(path) ||
+                !pathWithinScope(path, req.scopePathPrefix)) {
+                return nullptr;
+            }
+            auto [it, inserted] = candidates.try_emplace(path);
+            if (inserted) {
+                it->second.filePath = path;
+            }
+            return &it->second;
+        };
+
+        std::optional<metadata::DocumentInfo> seedDoc;
+        if (metadataRepo_) {
+            if (auto found = metadataRepo_->findDocumentByExactPath(seedPath); found) {
+                seedDoc = std::move(found.value());
+            }
+            metadata::DocumentQueryOptions siblings;
+            siblings.pathPrefix = std::filesystem::path(seedPath).parent_path().generic_string();
+            siblings.prefixIsDirectory = true;
+            siblings.includeSubdirectories = false;
+            // Match path locations: a document row keeps the first path its content was seen
+            // at, so identical files elsewhere would hide this directory's members.
+            siblings.usePathLocations = true;
+            siblings.currentPathsOnly = true;
+            siblings.limit = static_cast<int>(kRelatedScanLimit);
+            if (auto docs = metadataRepo_->queryDocuments(siblings); docs) {
+                for (const auto& doc : docs.value()) {
+                    // The exact-path lookup normalizes symlinks; the stored path may not be.
+                    if (!seedDoc && doc.filePath == seedPath) {
+                        seedDoc = doc;
+                    }
+                    if (auto* candidate = candidateFor(doc.filePath)) {
+                        candidate->sameDirectory = true;
+                    }
+                }
+            }
+        }
+
+        std::optional<std::int64_t> seedDocNodeId;
+        if (seedDoc && !seedDoc->sha256Hash.empty()) {
+            if (auto node = kgStore_->getNodeByKey("doc:" + seedDoc->sha256Hash);
+                node && node.value()) {
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+                seedDocNodeId = node.value()->id;
+            }
+        }
+
+        const auto docNodePath = [&](const metadata::KGNode& node) -> std::string {
+            if (node.label && !node.label->empty()) {
+                return *node.label;
+            }
+            if (metadataRepo_ && node.nodeKey.starts_with("doc:")) {
+                if (auto doc = metadataRepo_->getDocumentByHash(node.nodeKey.substr(4));
+                    doc && doc.value()) {
+                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+                    return doc.value()->filePath;
+                }
+            }
+            return {};
+        };
+        const auto hydrateNodes = [&](const std::vector<std::int64_t>& ids) {
+            std::unordered_map<std::int64_t, metadata::KGNode> out;
+            if (ids.empty()) {
+                return out;
+            }
+            if (auto nodes = kgStore_->getNodesByIds(ids); nodes) {
+                for (auto& node : nodes.value()) {
+                    out.emplace(node.id, std::move(node));
+                }
+            }
+            return out;
+        };
+
+        // Shared tags: graph has_tag edges when the store has them, else the tag metadata.
+        bool tagsFromGraph = false;
+        if (seedDocNodeId) {
+            auto tagEdges = kgStore_->getEdgesFrom(*seedDocNodeId, std::string_view("has_tag"),
+                                                   kRelatedSeedTagLimit);
+            if (tagEdges && !tagEdges.value().empty()) {
+                tagsFromGraph = true;
+                std::vector<std::int64_t> tagIds;
+                for (const auto& edge : tagEdges.value()) {
+                    tagIds.push_back(edge.dstNodeId);
+                }
+                auto tagNodes = hydrateNodes(tagIds);
+                for (const auto tagId : tagIds) {
+                    const auto tagIt = tagNodes.find(tagId);
+                    const std::string tagName =
+                        tagIt == tagNodes.end()
+                            ? std::to_string(tagId)
+                            : tagIt->second.label.value_or(tagIt->second.nodeKey);
+                    auto members =
+                        kgStore_->getEdgesTo(tagId, std::string_view("has_tag"), kRelatedScanLimit);
+                    if (!members) {
+                        continue;
+                    }
+                    std::vector<std::int64_t> memberIds;
+                    for (const auto& edge : members.value()) {
+                        if (edge.srcNodeId != *seedDocNodeId) {
+                            memberIds.push_back(edge.srcNodeId);
+                        }
+                    }
+                    for (const auto& [id, node] : hydrateNodes(memberIds)) {
+                        if (auto* candidate = candidateFor(docNodePath(node))) {
+                            candidate->sharedTags.push_back(tagName);
+                        }
+                    }
+                }
+            }
+        }
+        if (!tagsFromGraph && seedDoc && metadataRepo_) {
+            if (auto tags = metadataRepo_->getDocumentTags(seedDoc->id); tags) {
+                auto seedTags = std::move(tags.value());
+                if (seedTags.size() > kRelatedSeedTagLimit) {
+                    seedTags.resize(kRelatedSeedTagLimit);
+                }
+                for (const auto& tag : seedTags) {
+                    metadata::DocumentQueryOptions tagged;
+                    tagged.tags = {tag};
+                    tagged.usePathLocations = true;
+                    tagged.currentPathsOnly = true;
+                    tagged.limit = static_cast<int>(kRelatedScanLimit);
+                    auto docs = metadataRepo_->queryDocuments(tagged);
+                    if (!docs) {
+                        continue;
+                    }
+                    for (const auto& doc : docs.value()) {
+                        if (auto* candidate = candidateFor(doc.filePath)) {
+                            candidate->sharedTags.push_back(tag);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (seedDocNodeId) {
+            auto edges = kgStore_->getEdgesBidirectional(
+                *seedDocNodeId, std::string_view("semantic_neighbor"), kRelatedSemanticEdgeLimit);
+            if (edges) {
+                std::unordered_map<std::int64_t, float> weights;
+                for (const auto& edge : edges.value()) {
+                    const auto other =
+                        edge.srcNodeId == *seedDocNodeId ? edge.dstNodeId : edge.srcNodeId;
+                    if (other == *seedDocNodeId) {
+                        continue;
+                    }
+                    auto [it, inserted] = weights.try_emplace(other, edge.weight);
+                    if (!inserted) {
+                        it->second = std::max(it->second, edge.weight);
+                    }
+                }
+                std::vector<std::int64_t> ids;
+                ids.reserve(weights.size());
+                for (const auto& [id, _] : weights) {
+                    ids.push_back(id);
+                }
+                for (const auto& [id, node] : hydrateNodes(ids)) {
+                    if (auto* candidate = candidateFor(docNodePath(node))) {
+                        candidate->semanticWeight = weights.at(id);
+                    }
+                }
+            }
+        }
+
+        // Group each candidate under the first relation that reaches it, then rank inside it.
+        std::array<std::vector<const RelatedFileCandidate*>, 3> groups;
+        for (auto& [path, candidate] : candidates) {
+            candidate.score = relatedFileScore(candidate, seedPath);
+            if (candidate.sameDirectory) {
+                groups[0].push_back(&candidate);
+            } else if (!candidate.sharedTags.empty()) {
+                groups[1].push_back(&candidate);
+            } else if (candidate.semanticWeight) {
+                groups[2].push_back(&candidate);
+            }
+        }
+        for (auto& group : groups) {
+            std::ranges::sort(group, [](const auto* lhs, const auto* rhs) {
+                if (lhs->score != rhs->score) {
+                    return lhs->score > rhs->score;
+                }
+                return lhs->filePath < rhs->filePath;
+            });
+        }
+        static constexpr std::array<std::string_view, 3> kGroupRelation{
+            kRelatedSameDirectory, kRelatedSharedTag, kRelatedSemanticNeighbor};
+
+        const auto share = std::max<std::size_t>(1, (budget + groups.size() - 1) / groups.size());
+        std::array<std::size_t, 3> taken{};
+        std::vector<std::pair<std::size_t, const RelatedFileCandidate*>> picked;
+        for (std::size_t g = 0; g < groups.size() && picked.size() < budget; ++g) {
+            while (taken[g] < groups[g].size() && taken[g] < share && picked.size() < budget) {
+                picked.emplace_back(g, groups[g][taken[g]++]);
+            }
+        }
+        for (std::size_t g = 0; g < groups.size() && picked.size() < budget; ++g) {
+            while (taken[g] < groups[g].size() && picked.size() < budget) {
+                picked.emplace_back(g, groups[g][taken[g]++]);
+            }
+        }
+        if (picked.empty()) {
+            // Say so only for a stored document; a bare graph node has nothing to expand.
+            if (seedDoc) {
+                response.warnings.push_back(
+                    "No related files for " + seedPath +
+                    ": no other documents in its directory, no shared tags, no semantic neighbors");
+            }
+            return;
+        }
+
+        std::vector<GraphContextRelation> relations;
+        relations.reserve(picked.size());
+        for (std::size_t rank = 0; rank < picked.size(); ++rank) {
+            const auto [group, candidate] = picked[rank];
+            GraphContextSymbol related;
+            related.nodeKey = "path:logical:" + candidate->filePath;
+            related.label = candidate->filePath;
+            related.qualifiedName = candidate->filePath;
+            related.kind = "document";
+            related.filePath = candidate->filePath;
+            related.generatedOrCache = isGeneratedOrCachePath(candidate->filePath);
+            related.testFile = isTestPath(candidate->filePath);
+            // Below the seed, in pick order.
+            related.score = seed.score - 1.0 - static_cast<double>(rank) * 1e-3;
+            symbols.push_back(std::move(related));
+
+            if (!req.budget.includeRelationships) {
+                continue;
+            }
+            GraphContextRelation relation;
+            relation.relation = std::string(kGroupRelation[group]);
+            relation.sourceNodeKey = seed.nodeKey;
+            relation.sourceLabel = seedPath;
+            relation.targetNodeKey = "path:logical:" + candidate->filePath;
+            relation.targetLabel = candidate->filePath;
+            relation.weight = candidate->semanticWeight.value_or(1.0F);
+            relation.confidence = std::clamp(static_cast<double>(relation.weight), 0.0, 1.0);
+            std::string provenance = "explore:" + relation.relation;
+            if (group == 1) {
+                provenance += ":";
+                for (std::size_t i = 0; i < candidate->sharedTags.size(); ++i) {
+                    provenance += (i == 0 ? "" : ",") + candidate->sharedTags[i];
+                }
+            }
+            relation.provenance = std::move(provenance);
+            relations.push_back(std::move(relation));
+        }
+        response.relationships.insert(response.relationships.begin(),
+                                      std::make_move_iterator(relations.begin()),
+                                      std::make_move_iterator(relations.end()));
+    }
+
     void addRelationships(const std::vector<std::string>& nodeKeys, GraphExploreResponse& response,
                           const GraphContextBudget& budget) {
         YAMS_ZONE_SCOPED_N("graph_context::addRelationships");
@@ -1092,20 +1489,24 @@ private:
             byFile[symbol.filePath].push_back(symbol);
         }
 
+        // Callers pass symbols already ranked. Order files by their best score and keep that
+        // ranked order among ties; sorting ties by path made equal-score files alphabetical.
         std::vector<std::string> files;
         files.reserve(byFile.size());
-        for (const auto& [file, _] : byFile) {
-            files.push_back(file);
-        }
-        std::sort(files.begin(), files.end(), [&](const auto& lhs, const auto& rhs) {
-            const auto& lhsSyms = byFile.at(lhs);
-            const auto& rhsSyms = byFile.at(rhs);
-            const double lhsScore = lhsSyms.empty() ? 0.0 : lhsSyms.front().score;
-            const double rhsScore = rhsSyms.empty() ? 0.0 : rhsSyms.front().score;
-            if (lhsScore != rhsScore) {
-                return lhsScore > rhsScore;
+        std::unordered_map<std::string, double> bestScore;
+        for (const auto& symbol : symbols) {
+            if (symbol.filePath.empty()) {
+                continue;
             }
-            return lhs < rhs;
+            auto [it, inserted] = bestScore.try_emplace(symbol.filePath, symbol.score);
+            if (inserted) {
+                files.push_back(symbol.filePath);
+            } else {
+                it->second = std::max(it->second, symbol.score);
+            }
+        }
+        std::stable_sort(files.begin(), files.end(), [&](const auto& lhs, const auto& rhs) {
+            return bestScore.at(lhs) > bestScore.at(rhs);
         });
 
         totalFilesConsidered = files.size();

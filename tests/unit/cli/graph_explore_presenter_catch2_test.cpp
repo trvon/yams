@@ -129,3 +129,35 @@ TEST_CASE("Graph explore presenter renders json and markdown", "[cli][graph]") {
     CHECK(rendered.find("processTask --calls--> helper") != std::string::npos);
     CHECK(rendered.find("src/cli/commands/graph_command.cpp") != std::string::npos);
 }
+
+TEST_CASE("Graph explore presenter labels related files with their relation", "[cli][graph]") {
+    const auto cwd = std::filesystem::current_path();
+    const auto seedPath = (cwd / "src" / "seed.cpp").string();
+    const auto relatedPath = (cwd / "src" / "seed.h").string();
+    yams::app::services::GraphExploreResponse response;
+    response.query = seedPath;
+    for (const auto& path : {seedPath, relatedPath}) {
+        yams::app::services::GraphContextSnippet snippet;
+        snippet.filePath = path;
+        snippet.mode = yams::app::services::GraphContextSnippetMode::Omitted;
+        response.files.push_back(snippet);
+    }
+    yams::app::services::GraphContextRelation relation;
+    relation.relation = "same_directory";
+    relation.sourceNodeKey = "path:logical:" + seedPath;
+    relation.sourceLabel = seedPath;
+    relation.targetNodeKey = "path:logical:" + relatedPath;
+    relation.targetLabel = relatedPath;
+    relation.provenance = "explore:same_directory";
+    response.relationships.push_back(relation);
+
+    const auto json = yams::cli::makeGraphExploreJson(response);
+    CHECK_FALSE(json["files"][0].contains("via"));
+    CHECK(json["files"][1]["via"] == "same_directory");
+    CHECK(json["relationships"][0]["provenance"] == "explore:same_directory");
+
+    std::ostringstream out;
+    yams::cli::renderGraphExploreMarkdown(out, response, cwd);
+    CHECK(out.str().find("same_directory") != std::string::npos);
+    CHECK(out.str().find("Via") != std::string::npos);
+}
