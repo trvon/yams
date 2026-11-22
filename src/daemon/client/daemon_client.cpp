@@ -207,7 +207,6 @@ public:
     ClientConfig config_;
     std::shared_ptr<IClientTransport> transport_;
     ClientTransportMode resolvedTransportMode_{ClientTransportMode::Socket};
-    CircuitBreaker breaker_;
     std::chrono::milliseconds headerTimeout_{30000}; // 30s default
     std::chrono::milliseconds bodyTimeout_{60000};   // 60s default
     TransportOptions transportOptions_;
@@ -624,8 +623,6 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
             auto r = co_await try_connect(impl->config_.connectTimeout);
             if (r) {
                 updateSocketHealthCache(socketPath, true);
-                if (!impl->config_.enableCircuitBreaker)
-                    impl->breaker_.recordSuccess();
                 // Clear explicitly disconnected flag on successful connection
                 impl->explicitly_disconnected_ = false;
                 // Refresh transport to get a fresh pool in case the old one was shut down
@@ -2392,42 +2389,6 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
     spdlog::info("Daemon process spawned, client will now poll for readiness");
     return Result<void>();
 #endif
-}
-
-// Circuit Breaker implementation
-CircuitBreaker::CircuitBreaker(const Config& config)
-    : config_(config), lastStateChange_(std::chrono::steady_clock::now()) {}
-
-void CircuitBreaker::recordSuccess() {
-    if (state_ == State::HalfOpen) {
-        consecutiveSuccesses_++;
-        if (consecutiveSuccesses_ >= config_.successThreshold) {
-            transitionTo(State::Closed);
-        }
-    }
-    consecutiveFailures_ = 0;
-}
-
-void CircuitBreaker::recordFailure() {
-    consecutiveFailures_++;
-    consecutiveSuccesses_ = 0;
-
-    if (state_ == State::HalfOpen ||
-        (state_ == State::Closed && consecutiveFailures_ >= config_.failureThreshold)) {
-        transitionTo(State::Open);
-    }
-}
-
-void CircuitBreaker::transitionTo(State newState) {
-    state_ = newState;
-    lastStateChange_ = std::chrono::steady_clock::now();
-
-    if (newState == State::Open) {
-        openedAt_ = lastStateChange_;
-    }
-
-    consecutiveFailures_ = 0;
-    consecutiveSuccesses_ = 0;
 }
 
 void DaemonClient::setStreamingEnabled(bool enabled) {

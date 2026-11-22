@@ -1169,6 +1169,14 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'repair_fsm_wiring',
+    'sources': files('unit/daemon/repair_fsm_wiring_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'repair'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'repair_stalled_processing',
     'sources': files('unit/daemon/repair_stalled_processing_catch2_test.cpp'),
     'deps': test_deps,
@@ -2945,6 +2953,15 @@ if catch2_dep.found()
     'sources': files('unit/core/uuid_test.cpp'),
     'deps': core_test_deps,
     'suite': ['catch2', 'unit', 'core', 'uuid'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
+    'name': 'core_repair_fsm',
+    'target': 'core_repair_fsm',
+    'sources': files('unit/core/repair_fsm_catch2_test.cpp'),
+    'deps': core_test_deps,
+    'suite': ['catch2', 'unit', 'core', 'repair'],
     'timeout': 60,
   }]
 

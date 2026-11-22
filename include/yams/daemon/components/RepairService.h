@@ -1,6 +1,7 @@
 #pragma once
 
 #include <yams/app/services/session_service.hpp>
+#include <yams/core/repair_fsm.h>
 #include <yams/core/types.h>
 #include <yams/daemon/components/sqlite_vacuum.h>
 #include <yams/daemon/components/TopologyManager.h>
@@ -21,6 +22,7 @@
 #include <string_view>
 #include <tuple>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
 #ifdef YAMS_TESTING
@@ -335,6 +337,11 @@ public:
     std::size_t recoverStalledProcessing(std::int64_t cutoffEpoch);
 
 #ifdef YAMS_TESTING
+    /// Observes the background loop's RepairFsm transitions. Set before start(); called on the
+    /// loop's thread.
+    void testing_setRepairStageObserver(std::function<void(core::RepairFsm::State)> observer) {
+        repairStageObserver_ = std::move(observer);
+    }
     void testing_setVectorVacuumPolicy(const SqliteVacuumPolicy& policy) {
         vectorVacuumPolicy_ = policy;
     }
@@ -484,6 +491,8 @@ private:
 
     // ── Background loop (absorbs RepairCoordinator::runAsync) ──
     boost::asio::awaitable<void> backgroundLoop(ShutdownState* shutdownState);
+    /// Test seam: sees each RepairFsm transition of the background loop. Empty in production.
+    std::function<void(core::RepairFsm::State)> repairStageObserver_;
     boost::asio::awaitable<void> spawnInitialScan(std::int64_t startAfterId);
     RepairScanCursor scanCursor_;
     // Fingerprint of the content extractors the last finished startup sweep ran with, persisted
