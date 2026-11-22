@@ -29,7 +29,9 @@ The CLI file and the MCP arguments have the same shape:
 }
 ```
 
-- Nodes upsert by `node_key`; label, type and properties are replaced.
+- Nodes upsert by `node_key`. A label, type or properties value that is sent
+  replaces the stored one; an omitted or empty one keeps it. Properties are
+  replaced as a whole, not merged.
 - Edges upsert by (src, dst, relation). Weight becomes the max of the old and
   new weight; properties are replaced when the new weight is not lower.
 - `skip_existing_*` (default `false`) leaves existing rows untouched and counts
@@ -66,6 +68,8 @@ set it.
   `deleteEdgesForSourceFile`, document graph cleanup) and orphan repair
   (`deleteOrphanedNodes`) never remove a row with an `ns`, whatever its
   `document_hash`, `file_path` or `source_file` properties say.
+- Snapshot-version pruning removes nodes carrying `snapshot_id` and
+  `canonical_key`; external rows should not use those keys.
 - `doc:<hash>` and `blob:<hash>` nodes are YAMS-owned. Deleting or re-indexing a
   document removes them, and every edge to them, including namespaced edges.
   Link external nodes to documents only if that is acceptable.

@@ -720,6 +720,12 @@ RequestDispatcher::handleKgIngestRequest(const KgIngestRequest& req) {
     wb->ops.emplace_back(std::move(op));
     coord->enqueue(std::move(wb));
     auto fr = coord->flush();
+    if (!fr && fr.error().code == ErrorCode::Timeout) {
+        // The writer may still be applying the op; its outcome is not safe to read.
+        resp.success = false;
+        resp.errors.push_back("Flush failed: " + fr.error().message);
+        co_return resp;
+    }
 
     resp.nodesInserted = outcome->nodesInserted;
     resp.nodesUpdated = outcome->nodesUpdated;

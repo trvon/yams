@@ -639,6 +639,43 @@ TEST_CASE("Daemon client request execution", "[daemon][socket][requests]") {
         REQUIRE(grepResult.value().matches.empty());
     }
 
+    SECTION("graph ingest and namespace removal cross the socket") {
+        KgIngestRequest ingest;
+        ingest.nodes.push_back(KgIngestNode{"paper:sock:a", "A", "paper", R"({"ns":"sockns"})"});
+        ingest.nodes.push_back(KgIngestNode{"paper:sock:b", "B", "paper", R"({"ns":"sockns"})"});
+        ingest.edges.push_back(
+            KgIngestEdge{"paper:sock:a", "paper:sock:b", "cites", 1.0f, R"({"ns":"sockns"})"});
+        ingest.edges.push_back(KgIngestEdge{"paper:sock:a", "paper:sock:missing", "cites", 1.0f,
+                                            R"({"ns":"sockns"})"});
+
+        auto first = yams::cli::run_sync(client.call<KgIngestRequest>(ingest), 10s);
+        INFO("ingest error: " << (first ? std::string{} : first.error().message));
+        REQUIRE(first.has_value());
+        CHECK(first.value().success);
+        CHECK(first.value().nodesInserted == 2);
+        CHECK(first.value().edgesInserted == 1);
+        REQUIRE(first.value().unresolvedEdges.size() == 1);
+        CHECK(first.value().unresolvedEdges[0].dstMissing);
+
+        auto second = yams::cli::run_sync(client.call<KgIngestRequest>(ingest), 10s);
+        REQUIRE(second.has_value());
+        CHECK(second.value().nodesUpdated == 2);
+        CHECK(second.value().edgesUpdated == 1);
+
+        KgRemoveRequest unscoped;
+        unscoped.relation = "cites";
+        auto rejected = yams::cli::run_sync(client.call<KgRemoveRequest>(unscoped), 10s);
+        REQUIRE_FALSE(rejected.has_value());
+
+        KgRemoveRequest remove;
+        remove.ns = "sockns";
+        auto removed = yams::cli::run_sync(client.call<KgRemoveRequest>(remove), 10s);
+        INFO("remove error: " << (removed ? std::string{} : removed.error().message));
+        REQUIRE(removed.has_value());
+        CHECK(removed.value().nodesRemoved == 2);
+        CHECK(removed.value().edgesRemoved == 1);
+    }
+
     SECTION("prepare session request succeeds") {
         PrepareSessionRequest req;
         req.sessionName = "default";
