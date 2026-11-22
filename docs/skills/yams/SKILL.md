@@ -41,7 +41,7 @@ yams graph --list-types        # List node types with counts
 yams graph --relations         # List relation types with counts
 yams graph --search "pattern"  # Search nodes by label
 yams graph ingest --file g.json --json      # Upsert external nodes/edges (properties.ns)
-yams graph remove --ns <ns> [--relation r]  # Remove one caller namespace
+yams graph remove --ns <ns> [--relation r] [--include-foreign-edges]  # Remove one caller namespace
 # graph owns path/tree/topology inspection; retired tree is not top-level
 
 # Agent storage

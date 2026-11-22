@@ -116,7 +116,9 @@ yams graph remove --ns paperbridge --relation cites --dry-run
 ```
 
 Mark rows with `"properties": {"ns": "<tool>"}` so document cleanup leaves them
-alone. Payload, counts and cleanup rules: [External graph ingest](architecture/graph-ingest.md).
+alone. Ingest never changes an existing row's owner, and removal refuses to drop
+other owners' edges unless `--include-foreign-edges` is given. Payload, counts,
+ownership and cleanup rules: [External graph ingest](architecture/graph-ingest.md).
 
 ## Check health
 
