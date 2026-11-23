@@ -493,8 +493,12 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
                         [&](const auto& hash) { return !existingHashes.value().contains(hash); });
     }
 
+    // With no snapshot there is nothing to update: a dirty set covers only recent documents, and
+    // building from it alone would publish a topology of those. This is a fresh store, or one
+    // whose snapshot was removed (migration 47 drops snapshots too large to read).
+    const bool noPriorSnapshot = !latestBatch.has_value() && !documentHashes.empty();
     std::vector<std::string> rebuildHashes =
-        replacingStaleSnapshot ? std::vector<std::string>{} : documentHashes;
+        (replacingStaleSnapshot || noPriorSnapshot) ? std::vector<std::string>{} : documentHashes;
     topology::TopologyDirtyRegion dirtyRegion;
     bool widerRebuild = false;
     topology::TopologyExtractionStats seedExtractionStats;
@@ -623,7 +627,8 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     RebuildStats stats;
     stats.reason = reason;
     stats.dryRun = dryRun;
-    stats.fullRebuild = documentHashes.empty() || replacingStaleSnapshot || widerRebuild;
+    stats.fullRebuild =
+        documentHashes.empty() || replacingStaleSnapshot || widerRebuild || noPriorSnapshot;
     stats.snapshotId = artifacts.snapshotId;
     stats.algorithm = artifacts.algorithm;
     stats.documentsRequested = extractionStats.documentsRequested;
@@ -762,6 +767,8 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     if (replacingStaleSnapshot) {
         stats.issues.push_back("prior topology members are missing from metadata; rebuilding from "
                                "the current corpus");
+    } else if (noPriorSnapshot) {
+        stats.issues.push_back("no prior topology snapshot; rebuilding from the current corpus");
     } else if (!documentHashes.empty()) {
         if (widerRebuild) {
             stats.issues.push_back("incremental topology rebuild of " +
