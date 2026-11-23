@@ -43,6 +43,7 @@ private:
         std::uint64_t startTimeNs = 0;
         std::string token;
         std::string exePath;
+        std::string dataDir; ///< data dir the recorded daemon serves (empty in older records)
         bool isJson = false;
     };
 

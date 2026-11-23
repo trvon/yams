@@ -213,6 +213,11 @@ struct ResolvedRuntimePaths {
 Result<ResolvedRuntimePaths>
 resolve_runtime_paths(const RuntimePathOverrides& overrides = RuntimePathOverrides{});
 
+/// Paths of the shared (default) daemon: the platform config file, its data/socket/PID keys, and
+/// platform defaults. Flags and environment overrides are ignored, so a scratch target can be
+/// compared against the daemon a plain `yams daemon start` would run for the user.
+ResolvedRuntimePaths resolve_shared_runtime_paths();
+
 // Platform-specific directory resolution (follows OS best practices)
 // Windows: APPDATA (roaming) for config, LOCALAPPDATA for data/cache/runtime
 // Unix/macOS: XDG Base Directory Specification

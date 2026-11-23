@@ -2196,6 +2196,9 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
         const std::wstring logLevel(logLevelOverride->begin(), logLevelOverride->end());
         cmdLine += L" --log-level " + logLevel;
     }
+    if (!config.logFile.empty()) {
+        cmdLine += L" --log-file \"" + config.logFile.wstring() + L"\"";
+    }
     if (!dataDir.empty()) {
         cmdLine += L" --data-dir \"" + dataDir.wstring() + L"\"";
     }
@@ -2299,7 +2302,7 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
     }
 
     std::vector<std::string> ownedArgs;
-    ownedArgs.reserve(11);
+    ownedArgs.reserve(13);
     ownedArgs.push_back(exePath);
     ownedArgs.push_back("--socket");
     ownedArgs.push_back(socketPath.string());
@@ -2318,6 +2321,10 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
     if (!dataDir.empty()) {
         ownedArgs.push_back("--data-dir");
         ownedArgs.push_back(dataDir.string());
+    }
+    if (!config.logFile.empty()) {
+        ownedArgs.push_back("--log-file");
+        ownedArgs.push_back(config.logFile.string());
     }
     std::vector<char*> args;
     args.reserve(ownedArgs.size() + 1);
