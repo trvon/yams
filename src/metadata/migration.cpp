@@ -228,6 +228,34 @@ Result<std::vector<MigrationHistory>> MigrationManager::getHistory() {
     return history;
 }
 
+std::string MigrationManager::describePendingFailure() {
+    auto current = getCurrentVersion();
+    auto history = getHistory();
+    if (!current || !history) {
+        return {};
+    }
+    const MigrationHistory* failed = nullptr;
+    for (const auto& entry : history.value()) {
+        if (!entry.success && entry.version > current.value() &&
+            (failed == nullptr || entry.version < failed->version)) {
+            failed = &entry;
+        }
+    }
+    if (failed == nullptr) {
+        return {};
+    }
+    std::string text = "migration " + std::to_string(failed->version) + " (" + failed->name +
+                       ") failed: " + failed->error;
+    // sqlite3_errstr(SQLITE_TOOBIG). A value past SQLITE_LIMIT_LENGTH cannot be read, so any
+    // migration that rebuilds an index over that column stops on it.
+    if (failed->error.find("string or blob too big") != std::string::npos) {
+        text += ". A stored value larger than SQLite's length limit (usually a knowledge-graph "
+                "property) blocks this migration; back up yams.db and see \"Metadata migration "
+                "failed\" in docs/guide.md";
+    }
+    return text;
+}
+
 Result<void> MigrationManager::verifyIntegrity() {
     auto result = db_.checkIntegrity();
     if (!result)

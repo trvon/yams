@@ -100,6 +100,15 @@ public:
     Result<std::vector<MigrationHistory>> getHistory();
 
     /**
+     * @brief Describe the migration that stopped the last migrate() call
+     *
+     * Reads migration_history for the lowest failed version above the current one and returns
+     * "migration <v> (<name>) failed: <error>", plus a next step when the error is known.
+     * Empty when history records no such failure.
+     */
+    std::string describePendingFailure();
+
+    /**
      * @brief Verify database integrity after migrations
      */
     Result<void> verifyIntegrity();

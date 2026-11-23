@@ -127,3 +127,23 @@ yams status            # daemon state, data directory, document count
 yams doctor            # connectivity and plugin checks
 yams daemon log -n 50
 ```
+
+### Metadata migration failed
+
+`yams daemon status` shows `Database ✗ Migration failed` and the error names
+the migration and the SQLite error. `string or blob too big` means a stored
+value exceeds SQLite's length limit (1e9 bytes), so the migration cannot read
+it. Migration 47 removes oversized topology snapshots itself; they are a cache
+and rebuild after the next ingest. For any other value, stop the daemon, back
+up `yams.db`, and list the largest graph rows:
+
+```bash
+yams daemon stop
+cp ~/.local/share/yams/yams.db ~/yams.db.bak
+sqlite3 ~/.local/share/yams/yams.db \
+  "SELECT id, node_key, type, octet_length(properties) AS bytes
+   FROM kg_nodes ORDER BY bytes DESC LIMIT 10"
+```
+
+`octet_length()` reads the size without loading the value. Open an issue with
+that list before deleting rows that are not a cache.

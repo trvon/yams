@@ -1693,6 +1693,44 @@ TEST_CASE("Migration version 47 removes topology snapshots too large to read",
     CHECK((countKey("doc:a") == 1));
 }
 
+TEST_CASE("MigrationManager names the failed migration and a next step",
+          "[unit][metadata][schema][migration]") {
+    StandaloneMigrationDb db{"migration_failure_description", false};
+
+    Migration create;
+    create.version = 1;
+    create.name = "create widgets";
+    create.upSQL = "CREATE TABLE widgets (id INTEGER PRIMARY KEY, body TEXT);"
+                   "INSERT INTO widgets (body) VALUES ('{\"a\":\"" +
+                   std::string(8192, 'x') + "\"}');";
+    create.created = std::chrono::system_clock::now();
+
+    Migration index;
+    index.version = 2;
+    index.name = "index widget bodies";
+    index.upSQL = "CREATE INDEX idx_widgets_a ON widgets(json_extract(body, '$.a'));";
+    index.created = std::chrono::system_clock::now();
+
+    db.mm.registerMigration(create);
+    db.mm.registerMigration(index);
+    CHECK(db.mm.describePendingFailure().empty());
+
+    REQUIRE(db.mm.migrateTo(1).has_value());
+    sqlite3_limit(db.db.rawHandle(), SQLITE_LIMIT_LENGTH, 1024);
+    REQUIRE_FALSE(db.mm.migrate().has_value());
+
+    const std::string text = db.mm.describePendingFailure();
+    INFO(text);
+    CHECK(text.rfind("migration 2 (index widget bodies) failed: ", 0) == 0);
+    CHECK(text.find("string or blob too big") != std::string::npos);
+    CHECK(text.find("docs/guide.md") != std::string::npos);
+
+    // Once it succeeds, nothing is pending.
+    sqlite3_limit(db.db.rawHandle(), SQLITE_LIMIT_LENGTH, 1000000000);
+    REQUIRE(db.mm.migrate().has_value());
+    CHECK(db.mm.describePendingFailure().empty());
+}
+
 TEST_CASE("Migration version 46 empties a grep trigram index built before NUL handling",
           "[unit][metadata][schema][migration]") {
     StandaloneMigrationDb db{"migration_v46_grep_trigram_reset"};

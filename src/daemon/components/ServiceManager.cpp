@@ -3640,19 +3640,28 @@ ServiceManager::co_migrateDatabase(int /*timeout_ms*/, yams::compat::stop_token 
         boost::asio::detached);
 
     // Package the blocking migration and run it off the event loop.
-    auto task = std::make_shared<std::packaged_task<bool()>>([mm]() {
+    // On failure, names the migration and the SQLite error (from migration_history) so the
+    // daemon's error and `yams daemon status` say what stopped startup.
+    auto failure = std::make_shared<std::string>();
+    auto task = std::make_shared<std::packaged_task<bool()>>([mm, failure]() {
         bool ok = false;
         try {
             auto r = mm->migrate();
             ok = static_cast<bool>(r);
             if (!ok) {
+                *failure = mm->describePendingFailure();
+                if (failure->empty()) {
+                    *failure = "migration failed: " + r.error().message;
+                }
                 spdlog::warn("Database migration failed: {}", r.error().message);
             } else {
                 spdlog::info("Database migrations completed");
             }
         } catch (const std::exception& e) {
+            *failure = std::string("migration threw: ") + e.what();
             spdlog::warn("Database migration threw exception: {}", e.what());
         } catch (...) {
+            *failure = "migration failed (unknown exception)";
             spdlog::warn("Database migration failed (unknown exception)");
         }
         return ok;
@@ -3668,10 +3677,14 @@ ServiceManager::co_migrateDatabase(int /*timeout_ms*/, yams::compat::stop_token 
                      "treating as failure");
         co_return false;
     }
-    if (ok) {
+    {
         std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
-        state_.readiness.databasePhase = std::string(dbphase::kReady);
+        state_.readiness.databasePhase =
+            std::string(ok ? dbphase::kReady : dbphase::kMigrationFailed);
         state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
+    }
+    if (!ok && failureReason) {
+        *failureReason = *failure;
     }
     co_return ok;
 }
