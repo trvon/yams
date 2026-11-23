@@ -1594,6 +1594,105 @@ TEST_CASE("Migration version 47 leaves guarded graph cleanup indexes in place",
     CHECK((before.value() == after.value()));
 }
 
+TEST_CASE("Migration version 47 removes topology snapshots too large to read",
+          "[unit][metadata][schema][migration][kg]") {
+    StandaloneMigrationDb db{"migration_v47_oversized_topology"};
+    REQUIRE(db.mm.migrateTo(36).has_value());
+    REQUIRE(db.db
+                .execute(R"(
+        CREATE INDEX idx_kg_nodes_document_hash ON kg_nodes(json_extract(properties, '$.document_hash'))
+            WHERE json_extract(properties, '$.document_hash') IS NOT NULL;
+        CREATE INDEX idx_kg_nodes_file_path ON kg_nodes(json_extract(properties, '$.file_path'))
+            WHERE json_extract(properties, '$.file_path') IS NOT NULL;
+        CREATE INDEX idx_kg_nodes_source_file ON kg_nodes(json_extract(properties, '$.source_file'))
+            WHERE json_extract(properties, '$.source_file') IS NOT NULL;
+        CREATE INDEX idx_kg_edges_source_file ON kg_edges(json_extract(properties, '$.source_file'))
+            WHERE json_extract(properties, '$.source_file') IS NOT NULL;
+    )")
+                .has_value());
+    REQUIRE(db.mm.migrateTo(46).has_value());
+
+    // A real store hit SQLite's 1e9-byte length limit; lowering the limit on the migrating
+    // connection reproduces that at test scale. The rows are written under the default limit.
+    constexpr int kLimit = 64 * 1024;
+    const std::string bigPayload =
+        R"({"format":"zstd_binary_v1","data_b64":")" + std::string(4 * kLimit, 'A') + R"("})";
+    const std::string insert =
+        "INSERT INTO kg_nodes (node_key, label, type, properties) VALUES (?, ?, ?, ?)";
+    REQUIRE(executeBound(db.db, insert, std::string("doc:a"), std::string("a"),
+                         std::string("document"), std::string(R"({"document_hash":"h1"})"))
+                .has_value());
+    REQUIRE(executeBound(db.db, insert, std::string("topology:snapshot:s0"), std::string("s0"),
+                         std::string("topology_snapshot"), std::string(R"({"data_b64":"AA"})"))
+                .has_value());
+    REQUIRE(executeBound(db.db, insert, std::string("topology:snapshot:s1"), std::string("s1"),
+                         std::string("topology_snapshot"), bigPayload)
+                .has_value());
+    REQUIRE(executeBound(db.db, insert, std::string("topology:roads:s1"), std::string("s1"),
+                         std::string("topology_road_snapshot"), std::string(R"({"roads":[]})"))
+                .has_value());
+    REQUIRE(executeBound(db.db, insert, std::string("topology:snapshot:latest"),
+                         std::string("latest_topology_snapshot"),
+                         std::string("topology_snapshot_pointer"),
+                         std::string(R"({"snapshot_id":"s1"})"))
+                .has_value());
+    REQUIRE(db.db
+                .execute("INSERT INTO kg_edges (src_node_id, dst_node_id, relation, properties) "
+                         "SELECT a.id, b.id, 'rel', '{}' FROM kg_nodes a, kg_nodes b "
+                         "WHERE a.node_key = 'doc:a' AND b.node_key = 'topology:snapshot:s0'")
+                .has_value());
+
+    sqlite3_limit(db.db.rawHandle(), SQLITE_LIMIT_LENGTH, kLimit);
+
+    // The failure mode: maintaining an expression index on properties reads the old value.
+    auto plainDelete =
+        db.db.execute("DELETE FROM kg_nodes WHERE node_key = 'topology:snapshot:s1'");
+    REQUIRE_FALSE(plainDelete.has_value());
+    CHECK(plainDelete.error().message.find("string or blob too big") != std::string::npos);
+
+    auto migrated = db.mm.migrateTo(47);
+    INFO((migrated ? std::string("ok") : migrated.error().message));
+    REQUIRE(migrated.has_value());
+
+    auto countKey = [&](const char* key) {
+        auto count =
+            querySingleInt64(db.db, "SELECT COUNT(*) FROM kg_nodes WHERE node_key = ?", key);
+        REQUIRE(count.has_value());
+        return count.value();
+    };
+    CHECK((countKey("topology:snapshot:s1") == 0));
+    CHECK((countKey("topology:roads:s1") == 0));
+    CHECK((countKey("topology:snapshot:latest") == 0));
+    CHECK((countKey("topology:snapshot:s0") == 1));
+    CHECK((countKey("doc:a") == 1));
+    auto edges = querySingleInt64(db.db, "SELECT COUNT(*) FROM kg_edges");
+    REQUIRE(edges.has_value());
+    CHECK((edges.value() == 1));
+
+    for (const char* index : {"idx_kg_nodes_document_hash", "idx_kg_nodes_file_path",
+                              "idx_kg_nodes_source_file", "idx_kg_edges_source_file"}) {
+        auto guarded = querySingleInt64(db.db,
+                                        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' "
+                                        "AND name = ? AND sql LIKE '%json_valid%'",
+                                        index);
+        REQUIRE(guarded.has_value());
+        CHECK((guarded.value() == 1));
+    }
+    auto hashPlan =
+        queryPlanContains(db.db,
+                          "SELECT id FROM kg_nodes WHERE CASE WHEN json_valid(properties) "
+                          "THEN json_extract(properties, '$.document_hash') END = 'h1'",
+                          "idx_kg_nodes_document_hash");
+    REQUIRE(hashPlan.has_value());
+    CHECK(hashPlan.value());
+
+    // Re-running v47 finds nothing to remove and keeps the indexes.
+    REQUIRE(db.mm.rollbackTo(46).has_value());
+    REQUIRE(db.mm.migrateTo(47).has_value());
+    CHECK((countKey("topology:snapshot:s0") == 1));
+    CHECK((countKey("doc:a") == 1));
+}
+
 TEST_CASE("Migration version 46 empties a grep trigram index built before NUL handling",
           "[unit][metadata][schema][migration]") {
     StandaloneMigrationDb db{"migration_v46_grep_trigram_reset"};
