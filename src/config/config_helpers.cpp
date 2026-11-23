@@ -1031,6 +1031,49 @@ Result<ResolvedRuntimePaths> resolve_runtime_paths(const RuntimePathOverrides& o
     return resolved;
 }
 
+ResolvedRuntimePaths resolve_shared_runtime_paths() {
+    ResolvedRuntimePaths resolved;
+    resolved.configFile =
+        make_resolved_path(get_config_dir() / "config.toml", RuntimePathSource::PlatformDefault,
+                           "platform config default");
+    const auto& configPath = resolved.configFile.value;
+
+    resolved.dataDir = make_resolved_path(
+        get_platform_data_dir(), RuntimePathSource::PlatformDefault, "platform data default");
+    for (const auto& [section, key] :
+         {std::pair{"core", "data_dir"}, std::pair{"daemon", "data_dir"},
+          std::pair{"daemon", "storage"}, std::pair{"daemon", "storage_path"}}) {
+        if (auto value = parse_config_path_value(configPath, section, key); !value.empty()) {
+            resolved.dataDir = make_resolved_path(std::move(value), RuntimePathSource::ConfigFile,
+                                                  std::string(section) + "." + key);
+            break;
+        }
+    }
+
+    resolved.runtimeDir = make_resolved_path(get_runtime_dir(), RuntimePathSource::PlatformDefault,
+                                             "platform runtime default");
+
+    if (auto socket = parse_config_path_value(configPath, "daemon", "socket_path");
+        !socket.empty()) {
+        resolved.socketPath = make_resolved_path(std::move(socket), RuntimePathSource::ConfigFile,
+                                                 "daemon.socket_path");
+    } else {
+        resolved.socketPath =
+            make_resolved_path(resolve_default_socket_path(std::nullopt),
+                               RuntimePathSource::PlatformDefault, "platform socket default");
+    }
+
+    if (auto pid = parse_config_path_value(configPath, "daemon", "pid_file"); !pid.empty()) {
+        resolved.pidFile =
+            make_resolved_path(std::move(pid), RuntimePathSource::ConfigFile, "daemon.pid_file");
+    } else {
+        resolved.pidFile =
+            make_resolved_path(resolve_default_pid_path(std::nullopt),
+                               RuntimePathSource::PlatformDefault, "platform PID default");
+    }
+    return resolved;
+}
+
 std::filesystem::path resolve_socket_path_from_config() {
     auto resolved = resolve_runtime_paths();
     if (resolved) {

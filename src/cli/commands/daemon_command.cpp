@@ -17,6 +17,7 @@
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/daemon_start_plan.h>
 #include <yams/daemon/client/process_discovery.h>
 #include <yams/daemon/client/systemd_user_unit.h>
 #include <yams/daemon/ipc/socket_utils.h>
@@ -154,6 +155,9 @@ public:
         start->add_option("--socket", socketPath_, "Socket path for daemon communication");
         start->add_option("--data-dir,--storage", dataDir_, "Data directory for daemon storage");
         start->add_option("--pid-file", pidFileOption_, "PID file path");
+        start->add_option("--log-file", logFileOption_,
+                          "Daemon log file (default: under the data dir or beside the socket "
+                          "when they are not the defaults)");
         start
             ->add_option("--log-level", startLogLevel_,
                          "Daemon log level (trace, debug, info, warn, error)")
@@ -679,22 +683,48 @@ private:
     }
 #endif
 
-    bool checkAndHandleVersionMismatch(const std::string& socketPath) {
+    // What `daemon start` found on its target socket.
+    enum class ExistingDaemon {
+        None,    // nothing running there (or it was an incompatible one, now stopped)
+        Running, // a compatible daemon serving the target data dir
+    };
+
+    // Probe the daemon on `socketPath`. A daemon serving a different data dir (or one that does
+    // not say which, unless this start targets the shared default daemon) is never stopped or
+    // replaced: start refuses and exits instead.
+    ExistingDaemon probeExistingDaemon(const std::string& socketPath,
+                                       const yams::daemon::client::DaemonStartPlan& plan) {
+        namespace dc = yams::daemon::client;
         if (!daemon::DaemonClient::isDaemonRunning(socketPath)) {
-            return false; // No daemon running, no version mismatch
+            return ExistingDaemon::None;
         }
+        yams::daemon::ClientConfig probeCfg;
+        probeCfg.socketPath = socketPath;
 
         // Probe status via DaemonClient
         auto statusResult = runDaemonClient(
-            {}, [](yams::daemon::DaemonClient& client) { return client.status(); },
+            probeCfg, [](yams::daemon::DaemonClient& client) { return client.status(); },
             std::chrono::seconds(5));
+        const bool sharedTarget = plan.sharedSocket && plan.sharedDataDir;
         if (!statusResult) {
             spdlog::warn("Could not get status from running daemon: {}",
                          statusResult.error().message);
-            return false; // Treat as not ready; let startup spinner handle readiness
+            if (!sharedTarget) {
+                refuseStart(dc::otherStoreRefusal(socketPath, {}, plan.dataDir));
+            }
+            return ExistingDaemon::None; // let startup spinner handle readiness
         }
 
         const auto& status = statusResult.value();
+        std::optional<std::filesystem::path> liveDataDir;
+        if (!status.dataDir.empty()) {
+            liveDataDir = std::filesystem::path(status.dataDir);
+        }
+        const auto store = dc::classifyLiveDaemonStore(liveDataDir, plan.dataDir);
+        if (store == dc::LiveDaemonStore::Other ||
+            (store == dc::LiveDaemonStore::Unknown && !sharedTarget)) {
+            refuseStart(dc::otherStoreRefusal(socketPath, liveDataDir.value_or(""), plan.dataDir));
+        }
 
         if (!isVersionCompatible(status.version)) {
             spdlog::info("Stopping incompatible daemon (version {})...", status.version);
@@ -703,7 +733,7 @@ private:
             daemon::ShutdownRequest sreq;
             sreq.graceful = true;
             auto shutdownResult = runDaemonClient(
-                {}, [](yams::daemon::DaemonClient& client) { return client.shutdown(true); },
+                probeCfg, [](yams::daemon::DaemonClient& client) { return client.shutdown(true); },
                 std::chrono::seconds(10));
             bool stopped = false;
 
@@ -723,8 +753,8 @@ private:
                 spdlog::warn(
                     "Socket shutdown failed for incompatible daemon, trying PID-based termination");
 
-                // Resolve PID file path
-                std::string pidFilePath = YamsCLI::resolveConfiguredDaemonPidFilePath().string();
+                // The PID file of this start's target, never the shared default's.
+                const std::string pidFilePath = plan.pidFile.string();
 
                 pid_t pid = readPidFromFile(pidFilePath);
                 if (pid > 0 &&
@@ -751,24 +781,95 @@ private:
 
             if (stopped) {
                 spdlog::info("Successfully stopped incompatible daemon");
-                return false; // No daemon running now
+                return ExistingDaemon::None;
             } else {
                 spdlog::error("Failed to stop incompatible daemon");
-                return true; // Old daemon still running (block new start)
+                refuseStart("Failed to stop the incompatible daemon on '" + socketPath + "'");
             }
         }
 
-        return true; // Compatible daemon is running (block new start)
+        return ExistingDaemon::Running;
+    }
+
+    [[noreturn]] static void refuseStart(const std::string& message) {
+        spdlog::error("{}", message);
+        std::cerr << "[FAIL] " << message << "\n";
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): CLI exit path
+        std::exit(1);
+    }
+
+    // Data dir a start launches with: --data-dir, else the CLI's (global flag, env or config).
+    std::optional<std::filesystem::path> targetDataDir() const {
+        if (!dataDir_.empty()) {
+            return std::filesystem::path(dataDir_);
+        }
+        if (cli_ && !cli_->getDataPath().empty()) {
+            return cli_->getDataPath();
+        }
+        return std::nullopt;
+    }
+
+    // Socket, PID file, log file and data dir of the daemon this command targets.
+    std::optional<yams::daemon::client::DaemonStartPlan> targetPlan() const {
+        yams::config::RuntimePathOverrides overrides;
+        if (!socketPath_.empty()) {
+            overrides.socketPath = socketPath_;
+        }
+        if (auto dir = targetDataDir()) {
+            overrides.dataDir = *dir;
+        }
+        if (!startConfigPath_.empty()) {
+            overrides.configFile = startConfigPath_;
+        }
+        const auto effective = yams::config::resolve_runtime_paths(overrides);
+        if (!effective) {
+            spdlog::debug("Runtime path resolution failed: {}", effective.error().message);
+            return std::nullopt;
+        }
+        std::optional<std::filesystem::path> pidFlag;
+        if (!pidFileOption_.empty()) {
+            pidFlag = std::filesystem::path(pidFileOption_);
+        }
+        std::optional<std::filesystem::path> logFlag;
+        if (!logFileOption_.empty()) {
+            logFlag = std::filesystem::path(logFileOption_);
+        }
+        return yams::daemon::client::planDaemonStart(
+            effective.value(), yams::config::resolve_shared_runtime_paths(), pidFlag, logFlag);
     }
 
     std::string resolveConfiguredSocketPath() const {
-        return socketPath_.empty() ? YamsCLI::resolveConfiguredDaemonSocketPath().string()
-                                   : socketPath_;
+        if (!socketPath_.empty()) {
+            return socketPath_;
+        }
+        if (auto plan = targetPlan()) {
+            return plan->socketPath.string();
+        }
+        return YamsCLI::resolveConfiguredDaemonSocketPath().string();
     }
 
+    // --pid-file, else the target's PID file: a target other than the shared default daemon
+    // never resolves to the shared PID file.
     std::string resolveConfiguredPidFilePath() const {
-        return pidFileOption_.empty() ? YamsCLI::resolveConfiguredDaemonPidFilePath().string()
-                                      : pidFileOption_;
+        if (!pidFileOption_.empty()) {
+            return pidFileOption_;
+        }
+        if (auto plan = targetPlan()) {
+            return plan->pidFile.string();
+        }
+        return YamsCLI::resolveConfiguredDaemonPidFilePath().string();
+    }
+
+    // PID file stop/restart may act on: the one the scope allows, or the target's own
+    // (socket-derived) PID file, which no other daemon shares.
+    std::string lifecyclePidFile(const yams::daemon::client::LifecycleScope& scope) const {
+        if (scope.pidFile) {
+            return resolveConfiguredPidFilePath();
+        }
+        if (auto plan = targetPlan(); plan && !plan->sharedSocket) {
+            return plan->pidFile.string();
+        }
+        return {};
     }
 
     // Which daemon stop/restart may act on, from the flags given and the resolved paths.
@@ -825,19 +926,31 @@ private:
             }
         }
 
-        // Resolve paths if not explicitly provided
-        // For start: do NOT persist a resolved socket into socketPath_ unless user passed it.
-        // Use a local effective path for pre-checks only; the daemon will resolve from config.
-        pidFile_ = resolveConfiguredPidFilePath();
-        const std::string configuredSocket = resolveConfiguredSocketPath();
-        const std::string effectiveSocket = resolveSocketPathForLiveDaemon(
-            configuredSocket, pidFile_, lifecycleScope().anyLiveDaemon);
+        // Resolve the target once: socket (flag > env > config), PID file and log file derived
+        // from it, data dir. Only a start aimed at the shared default daemon may follow
+        // discovery to a live daemon on another socket.
+        auto targetPlanOpt = targetPlan();
+        if (!targetPlanOpt) {
+            refuseStart("Could not resolve daemon runtime paths; check YAMS_* path variables and "
+                        "the config file");
+        }
+        auto plan = *targetPlanOpt;
+        pidFile_ = plan.pidFile.string();
+        const std::string effectiveSocket =
+            lifecycleScope().anyLiveDaemon
+                ? resolveSocketPathForLiveDaemon(plan.socketPath.string(), pidFile_, true)
+                : plan.socketPath.string();
+        plan.socketPath = effectiveSocket;
 
         spdlog::debug("Using socket (effective): {}", effectiveSocket);
         spdlog::debug("Using PID file: {}", pidFile_);
+        if (!plan.logFile.empty()) {
+            spdlog::debug("Using log file: {}", plan.logFile.string());
+        }
 
-        // Check if daemon is already running and handle version compatibility
-        if (checkAndHandleVersionMismatch(effectiveSocket)) {
+        // A daemon already on the target socket: refuse if it serves another store, replace an
+        // incompatible version of this store's daemon, otherwise offer a restart.
+        if (probeExistingDaemon(effectiveSocket, plan) == ExistingDaemon::Running) {
             if (startRestart_) {
                 std::cout << "[INFO] YAMS daemon is already running - restarting...\n";
                 restartDaemon();
@@ -970,12 +1083,8 @@ private:
                 args.push_back(socketPath_);
             }
             // Optional data-dir (prefer explicit CLI option, then global CLI data path)
-            std::string effectiveDataDir;
-            if (!dataDir_.empty()) {
-                effectiveDataDir = dataDir_;
-            } else if (cli_) {
-                effectiveDataDir = cli_->getDataPath().string();
-            }
+            const std::string effectiveDataDir =
+                targetDataDir().value_or(std::filesystem::path{}).string();
             if (!effectiveDataDir.empty()) {
                 args.emplace_back("--data-dir");
                 args.push_back(effectiveDataDir);
@@ -991,6 +1100,10 @@ private:
             if (!startLogLevel_.empty()) {
                 args.emplace_back("--log-level");
                 args.push_back(startLogLevel_);
+            }
+            if (!plan.logFile.empty()) {
+                args.emplace_back("--log-file");
+                args.push_back(plan.logFile.string());
             }
             // Ensure foreground flag is propagated so the daemon doesn't daemonize
             args.emplace_back("--foreground");
@@ -1015,11 +1128,10 @@ private:
             daemon::ClientConfig config;
             config.socketPath = effectiveSocket;
             config.pidFile = pidFile_;
+            config.logFile = plan.logFile;
             // Prefer explicit start option; otherwise use global CLI data path
-            if (!dataDir_.empty()) {
-                config.dataDir = dataDir_;
-            } else if (cli_) {
-                config.dataDir = cli_->getDataPath();
+            if (auto dir = targetDataDir()) {
+                config.dataDir = *dir;
             }
 
             config.logLevel = startLogLevel_;
@@ -1068,7 +1180,7 @@ private:
         }
         // A command aimed at another socket must not signal, or clean up after, the daemon
         // that the shared PID file names.
-        pidFile_ = scope.pidFile ? resolveConfiguredPidFilePath() : std::string{};
+        pidFile_ = lifecyclePidFile(scope);
         // Resolve paths if not explicitly provided (do not persist into socketPath_)
         const std::string configuredSocket = resolveConfiguredSocketPath();
         const std::string effectiveSocket =
@@ -1997,7 +2109,7 @@ private:
             spdlog::warn(
                 "systemctl --user restart yams-daemon.service failed; restarting over IPC");
         }
-        pidFile_ = scope.pidFile ? resolveConfiguredPidFilePath() : std::string{};
+        pidFile_ = lifecyclePidFile(scope);
 
         const std::string configuredSocket = resolveConfiguredSocketPath();
         const std::string effectiveSocket =
@@ -2024,10 +2136,12 @@ private:
 
         daemon::ClientConfig config;
         config.socketPath = effectiveSocket;
-        if (!dataDir_.empty())
-            config.dataDir = dataDir_;
-        else if (cli_)
-            config.dataDir = cli_->getDataPath().string();
+        if (auto dir = targetDataDir())
+            config.dataDir = *dir;
+        if (auto plan = targetPlan()) {
+            config.pidFile = plan->pidFile;
+            config.logFile = plan->logFile;
+        }
         config.logLevel = startLogLevel_;
         config.daemonBinary = startDaemonBinary_;
         config.configPath = startConfigPath_;
@@ -2491,6 +2605,7 @@ private:
     std::string socketPath_;
     std::string pidFileOption_; // --pid-file as given; never a resolved default
     std::string pidFile_;       // PID file the current operation works with
+    std::string logFileOption_; // --log-file as given (start)
     bool foreground_ = false;
     bool force_ = false;
     bool detailed_ = false;

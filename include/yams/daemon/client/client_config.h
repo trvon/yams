@@ -30,6 +30,7 @@ struct ClientConfig {
     std::filesystem::path dataDir;
     std::filesystem::path daemonBinary;
     std::filesystem::path configPath;
+    std::filesystem::path logFile; ///< startDaemon: passed as --log-file when set
     std::string logLevel;
     std::chrono::milliseconds connectTimeout{1000};
     std::chrono::milliseconds headerTimeout{30000};
