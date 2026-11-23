@@ -229,6 +229,20 @@ public:
         virtual Result<void> addAliases(const std::vector<KGAlias>& aliases) = 0;
         virtual Result<void> addDocEntities(const std::vector<DocEntity>& entities) = 0;
         virtual Result<void> deleteNodeById(std::int64_t nodeId) = 0;
+        /// Delete the node stored under `nodeKey` without reading its properties. Returns true
+        /// when a node was removed.
+        virtual Result<bool> deleteNodeByKey(std::string_view /*nodeKey*/) {
+            return Error{ErrorCode::NotImplemented,
+                         "Transactional delete by key is not implemented"};
+        }
+        /// Delete every node whose key starts with `keyPrefix` and whose label equals `label`,
+        /// without reading properties. The label check keeps a prefix that is itself a prefix of
+        /// another owner's keys from matching that owner. Returns the number removed.
+        virtual Result<std::int64_t> deleteNodesByKeyPrefix(std::string_view /*keyPrefix*/,
+                                                            std::string_view /*label*/) {
+            return Error{ErrorCode::NotImplemented,
+                         "Transactional delete by key prefix is not implemented"};
+        }
         virtual Result<std::int64_t> deleteNodesForDocumentHash(std::string_view documentHash) = 0;
         virtual Result<DocumentGraphCleanupResult>
         deleteDocumentGraphData(const std::vector<DocumentGraphCleanupTarget>& /*targets*/) {
