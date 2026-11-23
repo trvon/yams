@@ -3412,6 +3412,69 @@ public:
         return stmt.execute();
     }
 
+    Result<bool> deleteNodeByKey(std::string_view nodeKey) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+        auto stmtR = db.prepareCached("DELETE FROM kg_nodes WHERE node_key = ?");
+        if (!stmtR) {
+            return stmtR.error();
+        }
+        auto& stmt = *stmtR.value();
+        if (auto bound = stmt.bind(1, nodeKey); !bound) {
+            return bound.error();
+        }
+        if (auto executed = stmt.execute(); !executed) {
+            return executed.error();
+        }
+        return db.changes() > 0;
+    }
+
+    Result<std::int64_t> deleteNodesByKeyPrefix(std::string_view keyPrefix,
+                                                std::string_view label) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        if (keyPrefix.empty()) {
+            return Error{ErrorCode::InvalidArgument, "Key prefix must not be empty"};
+        }
+        // A half-open key range keeps this on the node_key unique index. The upper bound is the
+        // prefix with its last byte below 0xFF incremented; a prefix of only 0xFF bytes has no
+        // finite bound and scans to the end of the index.
+        std::string upper(keyPrefix);
+        while (!upper.empty() && static_cast<unsigned char>(upper.back()) == 0xFFU) {
+            upper.pop_back();
+        }
+        if (!upper.empty()) {
+            upper.back() = static_cast<char>(static_cast<unsigned char>(upper.back()) + 1U);
+        }
+        Database& db = **conn_;
+        auto stmtR = db.prepareCached(
+            upper.empty() ? "DELETE FROM kg_nodes WHERE node_key >= ?1 AND label = ?2"
+                          : "DELETE FROM kg_nodes WHERE node_key >= ?1 AND node_key < ?3 "
+                            "AND label = ?2");
+        if (!stmtR) {
+            return stmtR.error();
+        }
+        auto& stmt = *stmtR.value();
+        if (auto bound = stmt.bind(1, keyPrefix); !bound) {
+            return bound.error();
+        }
+        if (auto bound = stmt.bind(2, label); !bound) {
+            return bound.error();
+        }
+        if (!upper.empty()) {
+            if (auto bound = stmt.bind(3, std::string_view{upper}); !bound) {
+                return bound.error();
+            }
+        }
+        if (auto executed = stmt.execute(); !executed) {
+            return executed.error();
+        }
+        return static_cast<std::int64_t>(db.changes());
+    }
+
     Result<std::int64_t> deleteNodesForDocumentHash(std::string_view documentHash) override {
         if (!transactionStarted_) {
             return Error{ErrorCode::InvalidState, "Transaction not started"};

@@ -502,15 +502,18 @@ bool isWholeFileContext(const GraphContextSymbol& symbol) {
 
 // Node types every store gets from ingest, versioning and topology. A label match on one of
 // these is a file or bookkeeping node, never a definition.
-constexpr std::array<std::string_view, 9> kStructuralNodeTypes{"path",
-                                                               "blob",
-                                                               "document",
-                                                               "file",
-                                                               "directory",
-                                                               "text_segment",
-                                                               "topology_cluster",
-                                                               "topology_snapshot",
-                                                               "topology_snapshot_pointer"};
+constexpr std::array<std::string_view, 12> kStructuralNodeTypes{"path",
+                                                                "blob",
+                                                                "document",
+                                                                "file",
+                                                                "directory",
+                                                                "text_segment",
+                                                                "topology_cluster",
+                                                                "topology_snapshot",
+                                                                "topology_snapshot_pointer",
+                                                                "topology_road_snapshot",
+                                                                "topology_route_fit_snapshot",
+                                                                "topology_payload_chunk"};
 
 const std::string& symbolNavigationUnavailableMessage() {
     static const std::string kMessage =

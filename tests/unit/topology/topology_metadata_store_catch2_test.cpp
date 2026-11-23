@@ -9,7 +9,10 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/topology/topology_artifacts.h>
+#include <yams/topology/topology_codec.h>
 #include <yams/topology/topology_metadata_store.h>
+
+#include <nlohmann/json.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -538,4 +541,273 @@ TEST_CASE("MetadataKgTopologyArtifactStore retains a bounded number of snapshots
     auto oldest = fixture.kgStore->getNodeByKey("topology:snapshot:snap-1");
     REQUIRE(oldest.has_value());
     CHECK_FALSE(oldest.value().has_value());
+}
+
+namespace {
+
+// A batch over `docCount` documents whose compressed payload spans many small chunks: the
+// document hashes are distinct 64-character strings, which compress poorly.
+TopologyArtifactBatch makeWideBatch(TestFixture& fixture, const std::string& snapshotId,
+                                    std::size_t docCount, bool addDocs = true) {
+    TopologyArtifactBatch batch;
+    batch.snapshotId = snapshotId;
+    batch.algorithm = "connected_components_v1";
+    batch.topologyEpoch = 7;
+    batch.generatedAtUnixSeconds = 1700000000;
+    constexpr std::size_t kClusters = 8;
+    for (std::size_t c = 0; c < kClusters; ++c) {
+        ClusterArtifact cluster;
+        cluster.clusterId = "cluster-" + snapshotId + "-" + std::to_string(c);
+        batch.clusters.push_back(cluster);
+    }
+    for (std::size_t i = 0; i < docCount; ++i) {
+        std::string hash = std::to_string(i) + "x" + std::to_string(i * 2654435761ULL);
+        while (hash.size() < 64) {
+            hash += std::to_string((hash.size() * 40503ULL + i * 977ULL) % 1000003ULL);
+        }
+        hash.resize(64);
+        if (addDocs) {
+            fixture.addDocument(hash, "/repo/wide/" + std::to_string(i) + ".md");
+        }
+        auto& cluster = batch.clusters[i % kClusters];
+        cluster.memberDocumentHashes.push_back(hash);
+        ++cluster.memberCount;
+        DocumentClusterMembership membership;
+        membership.documentHash = hash;
+        membership.clusterId = cluster.clusterId;
+        membership.persistenceScore = static_cast<double>(i % 17) / 17.0;
+        batch.memberships.push_back(membership);
+    }
+    return batch;
+}
+
+std::int64_t scalarQuery(TestFixture& fixture, const std::string& sql,
+                         const std::string& param = {}) {
+    auto res = fixture.pool->withConnection([&](Database& db) -> Result<std::int64_t> {
+        auto stmtRes = db.prepare(sql);
+        if (!stmtRes) {
+            return stmtRes.error();
+        }
+        auto stmt = std::move(stmtRes).value();
+        if (!param.empty()) {
+            if (auto bound = stmt.bind(1, param); !bound) {
+                return bound.error();
+            }
+        }
+        auto stepRes = stmt.step();
+        if (!stepRes) {
+            return stepRes.error();
+        }
+        return stmt.getInt64(0);
+    });
+    REQUIRE(res.has_value());
+    return res.value();
+}
+
+std::int64_t chunkCountFor(TestFixture& fixture, const std::string& ownerKey) {
+    return scalarQuery(fixture,
+                       "SELECT COUNT(*) FROM kg_nodes WHERE type = 'topology_payload_chunk' "
+                       "AND label = ?",
+                       ownerKey);
+}
+
+std::int64_t largestStoredValue(TestFixture& fixture) {
+    return scalarQuery(fixture,
+                       "SELECT COALESCE(MAX(LENGTH(CAST(properties AS BLOB))), 0) FROM kg_nodes");
+}
+
+nlohmann::json manifestOf(TestFixture& fixture, const std::string& nodeKey) {
+    auto node = fixture.kgStore->getNodeByKey(nodeKey);
+    REQUIRE(node.has_value());
+    REQUIRE(node.value().has_value());
+    REQUIRE(node.value()->properties.has_value());
+    return nlohmann::json::parse(*node.value()->properties);
+}
+
+constexpr std::size_t kSmallChunk = 512;
+
+} // namespace
+
+TEST_CASE("MetadataKgTopologyArtifactStore round-trips a snapshot spanning many chunks",
+          "[unit][topology][store][chunks]") {
+    TestFixture fixture;
+    const auto batch = makeWideBatch(fixture, "snap-wide", 200);
+
+    MetadataKgTopologyArtifactStore store(fixture.repository, fixture.kgStore);
+    store.setPayloadChunkBytesForTesting(kSmallChunk);
+    REQUIRE(store.storeBatch(batch).has_value());
+
+    const auto chunks = chunkCountFor(fixture, "topology:snapshot:snap-wide");
+    CHECK(chunks >= 4);
+    // No single stored value, manifest included, exceeds the chunk size.
+    CHECK(largestStoredValue(fixture) <= static_cast<std::int64_t>(kSmallChunk));
+
+    // The snapshot node holds only a manifest.
+    const auto manifest = manifestOf(fixture, "topology:snapshot:snap-wide");
+    CHECK(manifest.at("format") == "topology_chunked_v1");
+    CHECK(manifest.at("chunk_count").get<std::int64_t>() == chunks);
+    CHECK(manifest.at("membership_count") == 200);
+    CHECK(manifest.at("snapshot_id") == "snap-wide");
+
+    MetadataKgTopologyArtifactStore reopened(fixture.repository, fixture.kgStore);
+    auto loaded = reopened.loadLatestShared();
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded.value());
+    CHECK(loaded.value()->snapshotId == "snap-wide");
+    REQUIRE(loaded.value()->memberships.size() == batch.memberships.size());
+    CHECK(loaded.value()->memberships.back().documentHash == batch.memberships.back().documentHash);
+    REQUIRE(loaded.value()->clusters.size() == batch.clusters.size());
+    CHECK(loaded.value()->clusters[3].memberDocumentHashes ==
+          batch.clusters[3].memberDocumentHashes);
+
+    SECTION("a missing chunk makes the snapshot undecodable, not partially loaded") {
+        auto removed = fixture.pool->withConnection([](Database& db) -> Result<void> {
+            return db.execute("DELETE FROM kg_nodes WHERE node_key = "
+                              "'topology:chunk:topology:snapshot:snap-wide:1'");
+        });
+        REQUIRE(removed.has_value());
+        MetadataKgTopologyArtifactStore broken(fixture.repository, fixture.kgStore);
+        auto failed = broken.loadLatestShared();
+        REQUIRE_FALSE(failed.has_value());
+        CHECK(failed.error().code == ErrorCode::InvalidData);
+        // A rebuild still replaces it.
+        broken.setPayloadChunkBytesForTesting(kSmallChunk);
+        REQUIRE(broken.storeBatch(makeWideBatch(fixture, "snap-next", 50, false)).has_value());
+        auto next = broken.loadLatestShared();
+        REQUIRE(next.has_value());
+        REQUIRE(next.value());
+        CHECK(next.value()->snapshotId == "snap-next");
+    }
+}
+
+TEST_CASE("MetadataKgTopologyArtifactStore reads a legacy single-value snapshot",
+          "[unit][topology][store][chunks]") {
+    TestFixture fixture;
+    fixture.addDocument("hash_a", "/repo/a.md");
+    fixture.addDocument("hash_b", "/repo/b.md");
+    const auto batch = makeTwoDocBatch("snap-legacy", 3);
+    {
+        MetadataKgTopologyArtifactStore store(fixture.repository, fixture.kgStore);
+        REQUIRE(store.storeBatch(batch).has_value());
+    }
+    // Rewrite the snapshot as the pre-chunking writer stored it: the whole v1 payload in
+    // properties, no chunk nodes.
+    auto legacy = serializeTopologyBatchCompressed(batch);
+    REQUIRE(legacy.has_value());
+    auto rewritten = fixture.pool->withConnection([&](Database& db) -> Result<void> {
+        if (auto cleared = db.execute("DELETE FROM kg_nodes WHERE type = 'topology_payload_chunk'");
+            !cleared) {
+            return cleared.error();
+        }
+        auto stmtRes = db.prepare("UPDATE kg_nodes SET properties = ? WHERE node_key = ?");
+        if (!stmtRes) {
+            return stmtRes.error();
+        }
+        auto stmt = std::move(stmtRes).value();
+        if (auto bound = stmt.bind(1, legacy.value()); !bound) {
+            return bound.error();
+        }
+        if (auto bound = stmt.bind(2, std::string("topology:snapshot:snap-legacy")); !bound) {
+            return bound.error();
+        }
+        return stmt.execute();
+    });
+    REQUIRE(rewritten.has_value());
+
+    MetadataKgTopologyArtifactStore reopened(fixture.repository, fixture.kgStore);
+    auto loaded = reopened.loadLatestShared();
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded.value());
+    CHECK(loaded.value()->snapshotId == "snap-legacy");
+    CHECK(loaded.value()->memberships.size() == 2U);
+    CHECK(loaded.value()->topologyEpoch == 3U);
+
+    // The next write uses the chunked format.
+    REQUIRE(reopened.storeBatch(makeTwoDocBatch("snap-new", 4)).has_value());
+    CHECK(chunkCountFor(fixture, "topology:snapshot:snap-new") >= 1);
+    CHECK(manifestOf(fixture, "topology:snapshot:snap-new").at("format") == "topology_chunked_v1");
+}
+
+TEST_CASE("MetadataKgTopologyArtifactStore replacing or pruning a snapshot removes its chunks",
+          "[unit][topology][store][chunks]") {
+    TestFixture fixture;
+    const auto wide = makeWideBatch(fixture, "snap-1", 200);
+    MetadataKgTopologyArtifactStore store(fixture.repository, fixture.kgStore);
+    store.setPayloadChunkBytesForTesting(kSmallChunk);
+    REQUIRE(store.storeBatch(wide).has_value());
+    const auto wideChunks = chunkCountFor(fixture, "topology:snapshot:snap-1");
+    REQUIRE(wideChunks >= 4);
+
+    SECTION("the same snapshot id stored again with a smaller payload") {
+        REQUIRE(store.storeBatch(makeWideBatch(fixture, "snap-1", 10, false)).has_value());
+        const auto narrowChunks = chunkCountFor(fixture, "topology:snapshot:snap-1");
+        CHECK(narrowChunks < wideChunks);
+        CHECK(
+            manifestOf(fixture, "topology:snapshot:snap-1").at("chunk_count").get<std::int64_t>() ==
+            narrowChunks);
+        MetadataKgTopologyArtifactStore reopened(fixture.repository, fixture.kgStore);
+        auto loaded = reopened.loadLatestShared();
+        REQUIRE(loaded.has_value());
+        REQUIRE(loaded.value());
+        CHECK(loaded.value()->memberships.size() == 10U);
+    }
+
+    SECTION("snapshots beyond the retention window lose their chunks") {
+        const auto total = MetadataKgTopologyArtifactStore::kRetainedSnapshots + 2;
+        for (std::size_t i = 2; i <= total; ++i) {
+            REQUIRE(
+                store.storeBatch(makeWideBatch(fixture, "snap-" + std::to_string(i), 200, false))
+                    .has_value());
+        }
+        CHECK(chunkCountFor(fixture, "topology:snapshot:snap-1") == 0);
+        CHECK(chunkCountFor(fixture, "topology:snapshot:snap-2") == 0);
+        CHECK(chunkCountFor(fixture, "topology:snapshot:snap-" + std::to_string(total)) > 0);
+        const auto owners = scalarQuery(fixture, "SELECT COUNT(DISTINCT label) FROM kg_nodes "
+                                                 "WHERE type = 'topology_payload_chunk'");
+        CHECK(owners ==
+              static_cast<std::int64_t>(MetadataKgTopologyArtifactStore::kRetainedSnapshots));
+    }
+}
+
+TEST_CASE("MetadataKgTopologyArtifactStore failed chunk write leaves the previous pointer intact",
+          "[unit][topology][store][chunks]") {
+    TestFixture fixture;
+    const auto good = makeWideBatch(fixture, "snap-good", 200);
+    MetadataKgTopologyArtifactStore store(fixture.repository, fixture.kgStore);
+    store.setPayloadChunkBytesForTesting(kSmallChunk);
+    REQUIRE(store.storeBatch(good).has_value());
+
+    // Fail the write partway through the next snapshot's chunks.
+    auto injected = fixture.pool->withConnection([](Database& db) -> Result<void> {
+        return db.execute("CREATE TRIGGER inject_chunk_failure BEFORE INSERT ON kg_nodes "
+                          "WHEN NEW.node_key = 'topology:chunk:topology:snapshot:snap-bad:2' "
+                          "BEGIN SELECT RAISE(ABORT, 'injected chunk failure'); END;");
+    });
+    REQUIRE(injected.has_value());
+    CHECK_FALSE(store.storeBatch(makeWideBatch(fixture, "snap-bad", 200, false)).has_value());
+
+    // The chunk transaction rolled back: no orphan chunks and no manifest for the bad snapshot.
+    CHECK(chunkCountFor(fixture, "topology:snapshot:snap-bad") == 0);
+    auto badNode = fixture.kgStore->getNodeByKey("topology:snapshot:snap-bad");
+    REQUIRE(badNode.has_value());
+    CHECK_FALSE(badNode.value().has_value());
+
+    MetadataKgTopologyArtifactStore reopened(fixture.repository, fixture.kgStore);
+    auto latest = reopened.loadLatestShared();
+    REQUIRE(latest.has_value());
+    REQUIRE(latest.value());
+    CHECK(latest.value()->snapshotId == "snap-good");
+    CHECK(latest.value()->memberships.size() == good.memberships.size());
+}
+
+TEST_CASE("MetadataKgTopologyArtifactStore clamps the chunk size to the value ceiling",
+          "[unit][topology][store][chunks]") {
+    TestFixture fixture;
+    fixture.addDocument("hash_a", "/repo/a.md");
+    fixture.addDocument("hash_b", "/repo/b.md");
+    MetadataKgTopologyArtifactStore store(fixture.repository, fixture.kgStore);
+    store.setPayloadChunkBytesForTesting(std::size_t{4} << 30U);
+    REQUIRE(store.storeBatch(makeTwoDocBatch("snap-1", 1)).has_value());
+    CHECK(manifestOf(fixture, "topology:snapshot:snap-1").at("chunk_bytes").get<std::size_t>() ==
+          MetadataKgTopologyArtifactStore::kMaxStoredValueBytes);
 }

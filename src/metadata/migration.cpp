@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -225,6 +226,34 @@ Result<std::vector<MigrationHistory>> MigrationManager::getHistory() {
     }
 
     return history;
+}
+
+std::string MigrationManager::describePendingFailure() {
+    auto current = getCurrentVersion();
+    auto history = getHistory();
+    if (!current || !history) {
+        return {};
+    }
+    const MigrationHistory* failed = nullptr;
+    for (const auto& entry : history.value()) {
+        if (!entry.success && entry.version > current.value() &&
+            (failed == nullptr || entry.version < failed->version)) {
+            failed = &entry;
+        }
+    }
+    if (failed == nullptr) {
+        return {};
+    }
+    std::string text = "migration " + std::to_string(failed->version) + " (" + failed->name +
+                       ") failed: " + failed->error;
+    // sqlite3_errstr(SQLITE_TOOBIG). A value past SQLITE_LIMIT_LENGTH cannot be read, so any
+    // migration that rebuilds an index over that column stops on it.
+    if (failed->error.find("string or blob too big") != std::string::npos) {
+        text += ". A stored value larger than SQLite's length limit (usually a knowledge-graph "
+                "property) blocks this migration; back up yams.db and see \"Metadata migration "
+                "failed\" in docs/guide.md";
+    }
+    return text;
 }
 
 Result<void> MigrationManager::verifyIntegrity() {
@@ -3467,6 +3496,174 @@ Migration YamsMetadataMigrations::resetGrepTrigramIndex() {
     return m;
 }
 
+namespace {
+
+// Topology payloads larger than this are dropped before v47 rebuilds its indexes. SQLite
+// refuses to read a value past SQLITE_LIMIT_LENGTH (1e9 bytes by default), so a snapshot that
+// grew past it fails every index build and every UPDATE or DELETE of its row. 256 MiB stays
+// well clear of that limit; a snapshot this large is also too slow to load to be useful.
+constexpr std::int64_t kOversizedTopologyPayloadBytes = std::int64_t{256} * 1024 * 1024;
+
+// Node keys and types written by src/topology/topology_metadata_store.cpp. Every one is a
+// rebuildable cache: the next post-ingest topology build writes them again.
+constexpr std::string_view kTopologySnapshotPrefix = "topology:snapshot:";
+constexpr std::string_view kTopologyRoadsPrefix = "topology:roads:";
+constexpr std::string_view kTopologyRouteFitPrefix = "topology:routefit:";
+constexpr std::string_view kTopologyLatestKey = "topology:snapshot:latest";
+
+/// Delete topology snapshots whose payload (or a sidecar's) is too large to read, with their
+/// sidecars and the latest pointer when it names one of them. Sizes come from
+/// octet_length(properties), which SQLite answers from the record header without loading the
+/// value. Deleting a row also maintains every expression index over properties, which does
+/// load it, so the kg_nodes indexes in `kgNodeIndexes` are dropped first; the caller recreates
+/// them. A store with no oversized payload is left untouched.
+Result<void> purgeOversizedTopologyPayloads(Database& db,
+                                            const std::vector<const char*>& kgNodeIndexes) {
+    std::int64_t threshold = kOversizedTopologyPayloadBytes;
+    if (db.rawHandle() != nullptr) {
+        // A connection with a lower limit cannot read rows between it and the constant either.
+        const int limit = sqlite3_limit(db.rawHandle(), SQLITE_LIMIT_LENGTH, -1);
+        if (limit > 0) {
+            threshold = std::min<std::int64_t>(threshold, limit);
+        }
+    }
+
+    std::vector<std::string> snapshotIds;
+    bool haveOctetLength = true;
+    {
+        static constexpr const char* kTopologyRows =
+            "SELECT node_key FROM kg_nodes WHERE type IN ('topology_snapshot', "
+            "'topology_road_snapshot', 'topology_route_fit_snapshot')";
+        auto stmt = db.prepare(std::string(kTopologyRows) + " AND octet_length(properties) > ?");
+        if (stmt) {
+            if (auto bound = stmt.value().bind(1, threshold); !bound) {
+                return bound.error();
+            }
+        } else {
+            // octet_length() needs SQLite 3.43. Without it no size check avoids loading the
+            // value, so treat every snapshot as oversized: topology is a cache.
+            spdlog::warn("octet_length() unavailable ({}); removing every topology snapshot",
+                         stmt.error().message);
+            haveOctetLength = false;
+            stmt = db.prepare(kTopologyRows);
+            if (!stmt) {
+                return stmt.error();
+            }
+        }
+        while (true) {
+            auto row = stmt.value().step();
+            if (!row) {
+                return row.error();
+            }
+            if (!row.value()) {
+                break;
+            }
+            const std::string key = stmt.value().getString(0);
+            for (const auto prefix :
+                 {kTopologySnapshotPrefix, kTopologyRoadsPrefix, kTopologyRouteFitPrefix}) {
+                if (key.size() > prefix.size() && key.compare(0, prefix.size(), prefix) == 0) {
+                    snapshotIds.push_back(key.substr(prefix.size()));
+                    break;
+                }
+            }
+        }
+    }
+    if (snapshotIds.empty()) {
+        return {};
+    }
+    std::sort(snapshotIds.begin(), snapshotIds.end());
+    snapshotIds.erase(std::unique(snapshotIds.begin(), snapshotIds.end()), snapshotIds.end());
+
+    spdlog::warn("Removing {} topology snapshot(s) with a payload over {} bytes; they are a "
+                 "cache and rebuild after the next ingest",
+                 snapshotIds.size(), threshold);
+    for (const auto* index : kgNodeIndexes) {
+        if (auto dropped = db.execute(std::string("DROP INDEX IF EXISTS ") + index); !dropped) {
+            return dropped.error();
+        }
+    }
+
+    // The pointer is a small JSON object; reading it is safe once the indexes are gone.
+    std::string latestId;
+    {
+        auto stmt = db.prepare("SELECT CASE WHEN json_valid(properties) THEN "
+                               "json_extract(properties, '$.snapshot_id') END "
+                               "FROM kg_nodes WHERE node_key = ?");
+        if (!stmt) {
+            return stmt.error();
+        }
+        if (auto bound = stmt.value().bind(1, kTopologyLatestKey); !bound) {
+            return bound.error();
+        }
+        auto row = stmt.value().step();
+        if (!row) {
+            return row.error();
+        }
+        if (row.value() && !stmt.value().isNull(0)) {
+            latestId = stmt.value().getString(0);
+        }
+    }
+
+    std::vector<std::string> keys;
+    for (const auto& id : snapshotIds) {
+        for (const auto prefix :
+             {kTopologySnapshotPrefix, kTopologyRoadsPrefix, kTopologyRouteFitPrefix}) {
+            keys.push_back(std::string(prefix) + id);
+        }
+    }
+    if (!latestId.empty() && std::binary_search(snapshotIds.begin(), snapshotIds.end(), latestId)) {
+        keys.emplace_back(kTopologyLatestKey);
+    }
+
+    std::int64_t rows = 0;
+    std::int64_t bytes = 0;
+    for (const auto& key : keys) {
+        std::int64_t size = 0;
+        bool found = false;
+        {
+            auto stmt = db.prepare(haveOctetLength ? "SELECT octet_length(properties) FROM "
+                                                     "kg_nodes WHERE node_key = ?"
+                                                   : "SELECT 0 FROM kg_nodes WHERE node_key = ?");
+            if (!stmt) {
+                return stmt.error();
+            }
+            if (auto bound = stmt.value().bind(1, key); !bound) {
+                return bound.error();
+            }
+            auto row = stmt.value().step();
+            if (!row) {
+                return row.error();
+            }
+            if (row.value()) {
+                found = true;
+                size = stmt.value().isNull(0) ? 0 : stmt.value().getInt64(0);
+            }
+        }
+        if (!found) {
+            continue;
+        }
+        auto stmt = db.prepare("DELETE FROM kg_nodes WHERE node_key = ?");
+        if (!stmt) {
+            return stmt.error();
+        }
+        if (auto bound = stmt.value().bind(1, key); !bound) {
+            return bound.error();
+        }
+        if (auto deleted = stmt.value().execute(); !deleted) {
+            return deleted.error();
+        }
+        ++rows;
+        bytes += size;
+        spdlog::info("Removed topology node {} ({} bytes)", key, size);
+    }
+    spdlog::warn("Removed {} topology node(s), {} bytes of payload, for {} snapshot(s){}", rows,
+                 bytes, snapshotIds.size(),
+                 keys.back() == kTopologyLatestKey ? " and the latest pointer" : "");
+    return {};
+}
+
+} // namespace
+
 Migration YamsMetadataMigrations::rebuildUnguardedGraphCleanupIndexes() {
     Migration m;
     m.version = 47;
@@ -3490,6 +3687,17 @@ Migration YamsMetadataMigrations::rebuildUnguardedGraphCleanupIndexes() {
         {"idx_kg_edges_source_file", "kg_edges", "$.source_file"},
     }};
     m.upFunc = [](Database& db) -> Result<void> {
+        // A topology snapshot past SQLite's length limit makes every rebuild below fail with
+        // "string or blob too big". Remove such snapshots first, without reading them.
+        std::vector<const char*> kgNodeIndexes;
+        for (const auto& index : kIndexes) {
+            if (std::string_view(index.table) == "kg_nodes") {
+                kgNodeIndexes.push_back(index.name);
+            }
+        }
+        if (auto purged = purgeOversizedTopologyPayloads(db, kgNodeIndexes); !purged) {
+            return purged.error();
+        }
         for (const auto& index : kIndexes) {
             std::string definition;
             {

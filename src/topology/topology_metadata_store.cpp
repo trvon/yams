@@ -1,3 +1,4 @@
+#include <yams/common/crc32.h>
 #include <yams/profiling.h>
 #include <yams/topology/topology_codec.h>
 #include <yams/topology/topology_metadata_store.h>
@@ -6,6 +7,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <span>
 
 #include <chrono>
 #include <cstdint>
@@ -57,38 +59,134 @@ std::string routeFitSidecarNodeKey(std::string_view snapshotId) {
            std::string(snapshotId);
 }
 
-/// Delete the node stored under `nodeKey` if one exists.
-Result<void> deleteNodeByKey(metadata::KnowledgeGraphStore& kgStore, const std::string& nodeKey) {
-    auto node = kgStore.getNodeByKey(nodeKey);
-    if (!node) {
-        return node.error();
-    }
-    if (!node.value().has_value()) {
-        return {};
-    }
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-    if (auto removed = kgStore.deleteNodeById(node.value()->id); !removed) {
-        return removed.error();
+using Store = MetadataKgTopologyArtifactStore;
+
+// A manifest is a few hundred bytes; anything larger is a legacy payload and is never parsed
+// twice to find that out.
+constexpr std::size_t kMaxManifestBytes = 64 * 1024;
+
+std::string chunkKeyPrefix(std::string_view ownerKey) {
+    return std::string(Store::kPayloadChunkNodePrefix) + std::string(ownerKey) + ":";
+}
+
+std::string chunkNodeKey(std::string_view ownerKey, std::size_t index) {
+    return chunkKeyPrefix(ownerKey) + std::to_string(index);
+}
+
+std::uint32_t payloadCrc32(std::string_view payload) {
+    return common::crc32(std::as_bytes(std::span<const char>(payload.data(), payload.size())));
+}
+
+Result<void> checkStoredValueSize(std::string_view nodeKey, std::size_t bytes) {
+    if (bytes > Store::kMaxStoredValueBytes) {
+        return Error{ErrorCode::InvalidArgument,
+                     "topology store refuses to write " + std::to_string(bytes) +
+                         " bytes to node '" + std::string(nodeKey) + "': exceeds the " +
+                         std::to_string(Store::kMaxStoredValueBytes) + "-byte value ceiling"};
     }
     return {};
+}
+
+struct ChunkedNode {
+    std::string nodeKey;
+    std::string label;
+    std::string type;
+    /// Inspection fields copied into the manifest (e.g. counts), readable without the payload.
+    json inspection = json::object();
+};
+
+/// Write `payload` as the chunk nodes of `owner` plus its manifest node, in one transaction.
+/// The owner's previous chunks are removed first, so replacing a node (or storing a snapshot id
+/// again) never leaves stale chunks, and a failure rolls everything back to the prior state.
+Result<void> storeChunkedNode(metadata::KnowledgeGraphStore& kgStore, const ChunkedNode& owner,
+                              std::string_view payload, std::size_t chunkBytes,
+                              std::int64_t nowSecs) {
+    YAMS_ZONE_SCOPED_N("topology::store::storeChunkedNode");
+    if (chunkBytes == 0) {
+        return Error{ErrorCode::InvalidArgument, "topology payload chunk size must be positive"};
+    }
+    if (auto guarded = checkStoredValueSize(chunkNodeKey(owner.nodeKey, 0),
+                                            std::min(chunkBytes, payload.size()));
+        !guarded) {
+        return guarded.error();
+    }
+    const std::size_t chunkCount = (payload.size() + chunkBytes - 1) / chunkBytes;
+    json manifest = owner.inspection.is_object() ? owner.inspection : json::object();
+    manifest["format"] = std::string(Store::kChunkedPayloadFormat);
+    manifest["chunk_count"] = chunkCount;
+    manifest["chunk_bytes"] = chunkBytes;
+    manifest["total_bytes"] = payload.size();
+    manifest["crc32"] = payloadCrc32(payload);
+    std::string manifestText = manifest.dump();
+    if (auto guarded = checkStoredValueSize(owner.nodeKey, manifestText.size()); !guarded) {
+        return guarded.error();
+    }
+
+    auto writeBatch = kgStore.beginWriteBatch();
+    if (!writeBatch) {
+        return writeBatch.error();
+    }
+    auto& wb = *writeBatch.value();
+    if (auto removed = wb.deleteNodesByKeyPrefix(chunkKeyPrefix(owner.nodeKey), owner.nodeKey);
+        !removed) {
+        return removed.error();
+    }
+    for (std::size_t i = 0; i < chunkCount; ++i) {
+        metadata::KGNode chunk;
+        chunk.nodeKey = chunkNodeKey(owner.nodeKey, i);
+        chunk.label = owner.nodeKey;
+        chunk.type = std::string(Store::kPayloadChunkNodeType);
+        chunk.createdTime = nowSecs;
+        chunk.updatedTime = nowSecs;
+        chunk.properties = std::string(payload.substr(i * chunkBytes, chunkBytes));
+        if (auto stored = wb.upsertNode(chunk); !stored) {
+            return stored.error();
+        }
+    }
+    metadata::KGNode node;
+    node.nodeKey = owner.nodeKey;
+    node.label = owner.label;
+    node.type = owner.type;
+    node.createdTime = nowSecs;
+    node.updatedTime = nowSecs;
+    node.properties = std::move(manifestText);
+    if (auto stored = wb.upsertNode(node); !stored) {
+        return stored.error();
+    }
+    return wb.commit();
+}
+
+/// Delete `nodeKey` and its chunk nodes, if any, in one transaction. Legacy single-value nodes
+/// simply have no chunks.
+Result<void> deleteChunkedNode(metadata::KnowledgeGraphStore& kgStore, const std::string& nodeKey) {
+    auto writeBatch = kgStore.beginWriteBatch();
+    if (!writeBatch) {
+        return writeBatch.error();
+    }
+    auto& wb = *writeBatch.value();
+    if (auto removed = wb.deleteNodesByKeyPrefix(chunkKeyPrefix(nodeKey), nodeKey); !removed) {
+        return removed.error();
+    }
+    if (auto removed = wb.deleteNodeByKey(nodeKey); !removed) {
+        return removed.error();
+    }
+    return wb.commit();
 }
 
 /// Delete the road sidecar of `snapshotId` if one exists. Used when a snapshot is pruned and
 /// when a snapshot id is re-stored without roads.
 Result<void> deleteRoadSidecar(metadata::KnowledgeGraphStore& kgStore,
                                std::string_view snapshotId) {
-    auto node = kgStore.getNodeByKey(roadSidecarNodeKey(snapshotId));
-    if (!node) {
-        return node.error();
+    return deleteChunkedNode(kgStore, roadSidecarNodeKey(snapshotId));
+}
+
+Result<std::size_t> manifestUnsigned(const json& manifest, const char* key) {
+    auto it = manifest.find(key);
+    if (it == manifest.end() || !it->is_number_unsigned()) {
+        return Error{ErrorCode::InvalidData,
+                     std::string("topology chunk manifest field '") + key + "' missing or invalid"};
     }
-    if (!node.value().has_value()) {
-        return {};
-    }
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-    if (auto removed = kgStore.deleteNodeById(node.value()->id); !removed) {
-        return removed.error();
-    }
-    return {};
+    return it->get<std::size_t>();
 }
 
 float unitWeight(double value) {
@@ -223,8 +321,8 @@ Result<void> materializeClusterGraph(metadata::KnowledgeGraphStore& kgStore,
 }
 
 /// Keep the newest kRetainedSnapshots snapshot nodes (by insertion order) plus the one the
-/// latest pointer names; older compressed snapshots are removed together with their road
-/// sidecars.
+/// latest pointer names; older snapshots are removed together with their payload chunks and
+/// their road and route-fit sidecars (and those sidecars' chunks).
 Result<void> pruneSnapshotNodes(metadata::KnowledgeGraphStore& kgStore, std::size_t retain,
                                 std::string_view latestSnapshotId) {
     YAMS_ZONE_SCOPED_N("topology::store::pruneSnapshotNodes");
@@ -252,10 +350,11 @@ Result<void> pruneSnapshotNodes(metadata::KnowledgeGraphStore& kgStore, std::siz
         if (snapshots[i].second == latestKey) {
             continue;
         }
-        if (auto removed = kgStore.deleteNodeById(snapshots[i].first); !removed) {
+        // The snapshot goes with its chunks in one transaction.
+        if (auto removed = deleteChunkedNode(kgStore, snapshots[i].second); !removed) {
             return removed.error();
         }
-        // The sidecar goes with its snapshot; an orphaned one would only be wasted space, but a
+        // The sidecars go with their snapshot; an orphaned one would only be wasted space, but a
         // snapshot id reused later would otherwise find stale roads.
         const std::string_view key = snapshots[i].second;
         if (key.starts_with(kSnapshotNodePrefix)) {
@@ -263,7 +362,7 @@ Result<void> pruneSnapshotNodes(metadata::KnowledgeGraphStore& kgStore, std::siz
                 !removed) {
                 return removed.error();
             }
-            if (auto removed = deleteNodeByKey(
+            if (auto removed = deleteChunkedNode(
                     kgStore, routeFitSidecarNodeKey(key.substr(kSnapshotNodePrefix.size())));
                 !removed) {
                 return removed.error();
@@ -279,6 +378,81 @@ MetadataKgTopologyArtifactStore::MetadataKgTopologyArtifactStore(
     std::shared_ptr<metadata::IMetadataRepository> metadataRepo,
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore)
     : metadataRepo_(std::move(metadataRepo)), kgStore_(std::move(kgStore)) {}
+
+void MetadataKgTopologyArtifactStore::setPayloadChunkBytesForTesting(std::size_t bytes) {
+    std::lock_guard writeLock(writeMutex_);
+    payloadChunkBytes_ = std::clamp<std::size_t>(bytes, 1, kMaxStoredValueBytes);
+}
+
+Result<std::optional<std::string>>
+MetadataKgTopologyArtifactStore::readStoredPayload(metadata::KnowledgeGraphStore& kgStore,
+                                                   std::string_view nodeKey) {
+    YAMS_ZONE_SCOPED_N("topology::store::readStoredPayload");
+    auto node = kgStore.getNodeByKey(nodeKey);
+    if (!node) {
+        return node.error();
+    }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked in order
+    if (!node.value().has_value() || !node.value()->properties.has_value()) {
+        return std::optional<std::string>{};
+    }
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+    std::string& properties = *node.value()->properties;
+    json manifest;
+    if (properties.size() <= kMaxManifestBytes &&
+        properties.find(kChunkedPayloadFormat) != std::string::npos) {
+        manifest = json::parse(properties, nullptr, false);
+    }
+    const auto format = manifest.is_object() ? manifest.find("format") : manifest.end();
+    const bool chunked = manifest.is_object() && format != manifest.end() && format->is_string() &&
+                         format->get<std::string>() == kChunkedPayloadFormat;
+    if (!chunked) {
+        return std::optional<std::string>{std::move(properties)}; // legacy single value
+    }
+
+    auto chunkCount = manifestUnsigned(manifest, "chunk_count");
+    if (!chunkCount) {
+        return chunkCount.error();
+    }
+    auto totalBytes = manifestUnsigned(manifest, "total_bytes");
+    if (!totalBytes) {
+        return totalBytes.error();
+    }
+    auto expectedCrc = manifestUnsigned(manifest, "crc32");
+    if (!expectedCrc) {
+        return expectedCrc.error();
+    }
+    // Untrusted sizes: every chunk holds at least one byte and at most the value ceiling.
+    if (chunkCount.value() > totalBytes.value() ||
+        totalBytes.value() / kMaxStoredValueBytes > chunkCount.value()) {
+        return Error{ErrorCode::InvalidData, "topology chunk manifest for '" +
+                                                 std::string(nodeKey) + "' has inconsistent sizes"};
+    }
+    std::string payload;
+    payload.reserve(totalBytes.value());
+    for (std::size_t i = 0; i < chunkCount.value(); ++i) {
+        auto chunk = kgStore.getNodeByKey(chunkNodeKey(nodeKey, i));
+        if (!chunk) {
+            return chunk.error();
+        }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked in order
+        if (!chunk.value().has_value() || !chunk.value()->properties.has_value()) {
+            return Error{ErrorCode::InvalidData, "topology payload '" + std::string(nodeKey) +
+                                                     "' is missing chunk " + std::to_string(i) +
+                                                     " of " + std::to_string(chunkCount.value())};
+        }
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+        payload += *chunk.value()->properties;
+        if (payload.size() > totalBytes.value()) {
+            break;
+        }
+    }
+    if (payload.size() != totalBytes.value() || payloadCrc32(payload) != expectedCrc.value()) {
+        return Error{ErrorCode::InvalidData, "topology payload '" + std::string(nodeKey) +
+                                                 "' does not match its chunk manifest"};
+    }
+    return std::optional<std::string>{std::move(payload)};
+}
 
 Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactBatch& batch) {
     YAMS_ZONE_SCOPED_N("topology::store::storeBatch");
@@ -324,30 +498,37 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         }
     }
 
-    // Write order makes the latest pointer the commit point: the snapshot node is written first
-    // (an orphan is harmless if a later step fails), then per-document keys, then the pointer.
-    // A failure before the pointer leaves the previous snapshot authoritative.
+    // Write order makes the latest pointer the commit point: the snapshot node and its payload
+    // chunks are written first, in one transaction (an orphan is harmless if a later step fails
+    // and is pruned later), then the sidecars, per-document keys, and the pointer. A failure
+    // before the pointer leaves the previous snapshot authoritative.
     const auto nowSecs = std::chrono::duration_cast<std::chrono::seconds>(
                              std::chrono::system_clock::now().time_since_epoch())
                              .count();
     if (kgStore_) {
-        metadata::KGNode snapshotNode;
-        snapshotNode.nodeKey = snapshotNodeKey(batch.snapshotId);
-        snapshotNode.label = batch.snapshotId;
-        snapshotNode.type = std::string{"topology_snapshot"};
-        snapshotNode.createdTime = nowSecs;
-        snapshotNode.updatedTime = nowSecs;
         auto compRes = serializeTopologyBatchCompressed(batch);
         if (!compRes) {
             return compRes.error();
         }
         YAMS_PLOT("topology::snapshot_payload_bytes", static_cast<int64_t>(compRes.value().size()));
         YAMS_PLOT("topology::snapshot_memberships", static_cast<int64_t>(batch.memberships.size()));
-        snapshotNode.properties = std::move(compRes.value());
-        auto snapshotResult = kgStore_->upsertNode(snapshotNode);
-        if (!snapshotResult) {
-            return snapshotResult.error();
+        ChunkedNode snapshotNode{
+            .nodeKey = snapshotNodeKey(batch.snapshotId),
+            .label = batch.snapshotId,
+            .type = std::string{kSnapshotNodeType},
+            .inspection = json{{"payload_format", "zstd_binary_v1"},
+                               {"snapshot_id", batch.snapshotId},
+                               {"algorithm", batch.algorithm},
+                               {"topology_epoch", batch.topologyEpoch},
+                               {"cluster_count", batch.clusters.size()},
+                               {"membership_count", batch.memberships.size()},
+                               {"generated_at_unix_seconds", batch.generatedAtUnixSeconds}}};
+        if (auto stored = storeChunkedNode(*kgStore_, snapshotNode, compRes.value(),
+                                           payloadChunkBytes_, nowSecs);
+            !stored) {
+            return stored.error();
         }
+        compRes.value() = std::string{}; // release the payload before the sidecars are built
 
         // Roads and member orders ride in their own node so the snapshot payload above stays a
         // plain v1 payload. Written here, before the pointer, so a visible snapshot never lacks a
@@ -372,14 +553,14 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
             }
             YAMS_PLOT("topology::road_sidecar_payload_bytes",
                       static_cast<int64_t>(sidecarPayload.value().size()));
-            metadata::KGNode roadNode;
-            roadNode.nodeKey = roadSidecarNodeKey(batch.snapshotId);
-            roadNode.label = batch.snapshotId;
-            roadNode.type = std::string{kRoadSidecarNodeType};
-            roadNode.createdTime = nowSecs;
-            roadNode.updatedTime = nowSecs;
-            roadNode.properties = std::move(sidecarPayload.value());
-            if (auto roadResult = kgStore_->upsertNode(roadNode); !roadResult) {
+            ChunkedNode roadNode{.nodeKey = roadSidecarNodeKey(batch.snapshotId),
+                                 .label = batch.snapshotId,
+                                 .type = std::string{kRoadSidecarNodeType},
+                                 .inspection = json{{"payload_format", "topology_roads_zstd_v1"},
+                                                    {"road_count", batch.roads.size()}}};
+            if (auto roadResult = storeChunkedNode(*kgStore_, roadNode, sidecarPayload.value(),
+                                                   payloadChunkBytes_, nowSecs);
+                !roadResult) {
                 return roadResult.error();
             }
         }
@@ -388,7 +569,8 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         // pointer, shed when a snapshot id is re-stored without them.
         auto routeFit = collectTopologyRouteFit(batch);
         if (routeFit.vectors.empty()) {
-            if (auto removed = deleteNodeByKey(*kgStore_, routeFitSidecarNodeKey(batch.snapshotId));
+            if (auto removed =
+                    deleteChunkedNode(*kgStore_, routeFitSidecarNodeKey(batch.snapshotId));
                 !removed) {
                 return removed.error();
             }
@@ -399,14 +581,13 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
             }
             YAMS_PLOT("topology::route_fit_sidecar_payload_bytes",
                       static_cast<int64_t>(routeFitPayload.value().size()));
-            metadata::KGNode routeFitNode;
-            routeFitNode.nodeKey = routeFitSidecarNodeKey(batch.snapshotId);
-            routeFitNode.label = batch.snapshotId;
-            routeFitNode.type = std::string{kRouteFitSidecarNodeType};
-            routeFitNode.createdTime = nowSecs;
-            routeFitNode.updatedTime = nowSecs;
-            routeFitNode.properties = std::move(routeFitPayload.value());
-            if (auto stored = kgStore_->upsertNode(routeFitNode); !stored) {
+            ChunkedNode routeFitNode{.nodeKey = routeFitSidecarNodeKey(batch.snapshotId),
+                                     .label = batch.snapshotId,
+                                     .type = std::string{kRouteFitSidecarNodeType},
+                                     .inspection = json{{"vector_count", routeFit.vectors.size()}}};
+            if (auto stored = storeChunkedNode(*kgStore_, routeFitNode, routeFitPayload.value(),
+                                               payloadChunkBytes_, nowSecs);
+                !stored) {
                 return stored.error();
             }
         }
@@ -531,17 +712,16 @@ MetadataKgTopologyArtifactStore::loadSnapshotById(std::string_view snapshotId) c
     if (!kgStore_) {
         return std::optional<TopologyArtifactBatch>{};
     }
-    auto snapshotNodeResult = kgStore_->getNodeByKey(snapshotNodeKey(snapshotId));
-    if (!snapshotNodeResult) {
-        return snapshotNodeResult.error();
+    auto payload = readStoredPayload(*kgStore_, snapshotNodeKey(snapshotId));
+    if (!payload) {
+        return payload.error();
     }
-    if (!snapshotNodeResult.value().has_value() ||
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-        !snapshotNodeResult.value()->properties.has_value()) {
+    if (!payload.value().has_value()) {
         return std::optional<TopologyArtifactBatch>{};
     }
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-    auto batchResult = deserializeTopologyBatchCompressed(*snapshotNodeResult.value()->properties);
+    auto batchResult = deserializeTopologyBatchCompressed(*payload.value());
+    payload.value().reset();
     if (!batchResult) {
         return batchResult.error();
     }
@@ -565,16 +745,18 @@ MetadataKgTopologyArtifactStore::attachRouteFitSidecar(TopologyArtifactBatch& ba
     if (!kgStore_) {
         return {};
     }
-    auto node = kgStore_->getNodeByKey(routeFitSidecarNodeKey(batch.snapshotId));
-    if (!node) {
-        return node.error();
+    auto payload = readStoredPayload(*kgStore_, routeFitSidecarNodeKey(batch.snapshotId));
+    if (!payload && payload.error().code != ErrorCode::InvalidData) {
+        return payload.error();
     }
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-    if (!node.value().has_value() || !node.value()->properties.has_value()) {
+    if (payload && !payload.value().has_value()) {
         return {}; // this snapshot was never fitted
     }
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-    auto sidecar = deserializeTopologyRouteFitSidecarCompressed(*node.value()->properties);
+    // A chunk set that fails its manifest is as undecodable as a corrupt payload.
+    auto sidecar = payload
+                       // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+                       ? deserializeTopologyRouteFitSidecarCompressed(*payload.value())
+                       : Result<TopologyRouteFitSidecar>{payload.error()};
     if (!sidecar) {
         batch.routeFitUnavailableReason =
             "route_fit_sidecar_undecodable:" + sidecar.error().message;
@@ -609,17 +791,19 @@ MetadataKgTopologyArtifactStore::attachRoadSidecar(TopologyArtifactBatch& batch)
     if (!kgStore_) {
         return {};
     }
-    auto node = kgStore_->getNodeByKey(roadSidecarNodeKey(batch.snapshotId));
-    if (!node) {
-        return node.error();
+    auto payload = readStoredPayload(*kgStore_, roadSidecarNodeKey(batch.snapshotId));
+    if (!payload && payload.error().code != ErrorCode::InvalidData) {
+        return payload.error();
     }
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-    if (!node.value().has_value() || !node.value()->properties.has_value()) {
+    if (payload && !payload.value().has_value()) {
         return {}; // neither roads nor orders were written for this snapshot
     }
 
-    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-    auto sidecar = deserializeTopologyRoadSidecarCompressed(*node.value()->properties);
+    // A chunk set that fails its manifest is as undecodable as a corrupt payload.
+    auto sidecar = payload
+                       // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+                       ? deserializeTopologyRoadSidecarCompressed(*payload.value())
+                       : Result<TopologyRoadSidecar>{payload.error()};
     if (!sidecar) {
         batch.roadUnavailableReason = "road_sidecar_undecodable:" + sidecar.error().message;
         batch.orderUnavailableReason = batch.roadUnavailableReason;

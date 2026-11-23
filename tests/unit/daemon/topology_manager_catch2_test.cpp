@@ -536,6 +536,34 @@ bool hasIssue(const TopologyManager::RebuildStats& stats, const std::string& iss
 
 } // namespace
 
+TEST_CASE("TopologyManager builds the whole corpus when a dirty set arrives with no snapshot",
+          "[daemon][topology-manager][incremental]") {
+    // A fresh store, or one whose snapshot migration 47 removed: the post-ingest drain names
+    // only recent documents, but the first snapshot must cover every document.
+    RebuildFixture fixture;
+    const auto ids = addTwoGroupCorpus(fixture);
+    TopologyManager manager(fixture.dependencies());
+
+    auto result = manager.rebuildArtifacts("post_ingest_drain", false, {"aaa1"}, "connected");
+    INFO((result ? "rebuild succeeded" : result.error().message));
+    REQUIRE(result.has_value());
+    CHECK_FALSE(result.value().skipped);
+    REQUIRE(result.value().stored);
+    CHECK(result.value().fullRebuild);
+    CHECK(result.value().documentsProcessed == ids.size());
+    CHECK(result.value().membershipsBuilt == ids.size());
+
+    const auto clusters = membershipClusters(fixture.latest());
+    CHECK(clusters.size() == ids.size());
+    for (const auto& [hash, id] : ids) {
+        INFO("document=" << hash);
+        CHECK(clusters.contains(hash));
+        auto clusterKey = fixture.repository->getMetadata(id, "topology.cluster_id");
+        REQUIRE(clusterKey.has_value());
+        CHECK(clusterKey.value().has_value());
+    }
+}
+
 TEST_CASE("TopologyManager incremental rebuild keeps the whole corpus for engines without an "
           "incremental path",
           "[daemon][topology-manager][incremental]") {
