@@ -9,6 +9,7 @@
 
 ### Fixed
 
+* **daemon:** `daemon start` with `--socket` or `--data-dir` no longer stops or takes over a daemon serving another store. The explicit socket wins over config and discovery; the PID file and log follow a non-default socket or data dir (new `daemon start --log-file`); start refuses, naming both data dirs, when the target socket belongs to another store.
 * **retrieval:** apply basename and location-metadata filters before pagination; retain distinct current locations for shared-content grep candidates and enforce worktree scope after FTS/semantic projection.
 
 ## [0.23.1](https://github.com/trvon/yams/compare/v0.23.0...v0.23.1) (2026-11-20)
