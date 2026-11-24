@@ -2064,7 +2064,6 @@ if catch2_dep.found()
   catch2_compression_submodule_exe = executable('catch2_compression_submodule',
     files(
       'unit/compression/compression_header_catch2_test.cpp',
-      'unit/compression/compression_monitor_catch2_test.cpp',
       'unit/compression/compression_policy_catch2_test.cpp',
       'unit/compression/framed_payload_catch2_test.cpp',
       'unit/compression/zstandard_compressor_catch2_test.cpp',

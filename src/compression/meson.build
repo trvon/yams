@@ -11,7 +11,6 @@ compression_src = files(
   'framed_payload.cpp',
   'compression_header.cpp',
   'compression_policy.cpp',
-  'compression_monitor.cpp',
 )
 
 yams_compression = static_library('yams_compression',

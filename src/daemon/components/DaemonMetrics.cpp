@@ -26,7 +26,6 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/session_service.hpp>
-#include <yams/compression/compression_monitor.h>
 #include <yams/daemon/components/admission_control.h>
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>

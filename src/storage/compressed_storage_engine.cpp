@@ -15,7 +15,6 @@
 #include <unistd.h>
 #endif
 #include <yams/compression/compression_header.h>
-#include <yams/compression/compression_monitor.h>
 #include <yams/compression/compression_stats.h>
 #include <yams/compression/compression_utils.h>
 #include <yams/compression/compressor_interface.h>
@@ -549,17 +548,6 @@ private:
             stats.algorithmStats[decision.algorithm].recordCompression(compressionResult);
             stats.onDemandCompressions++;
         });
-
-        // Update global statistics for DaemonMetrics visibility
-        {
-            auto& globalStats = compression::CompressionMonitor::getGlobalStats();
-            auto& globalMutex = compression::CompressionMonitor::getGlobalStatsMutex();
-            std::lock_guard lock(globalMutex);
-            globalStats.totalCompressedFiles++;
-            globalStats.totalCompressedBytes += output.size();
-            globalStats.totalUncompressedBytes += data.size();
-            globalStats.totalSpaceSaved += data.size() - output.size();
-        }
 
         return output;
     }

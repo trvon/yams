@@ -7,6 +7,7 @@
 #include <yams/crypto/hasher.h>
 #include <yams/manifest/manifest_manager.h>
 #include <yams/profiling.h>
+#include <yams/storage/compressed_storage_engine.h>
 #include <yams/storage/disk_pressure.h>
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/reference_counter_writer.h>
@@ -1406,6 +1407,15 @@ public:
         }
 
         return currentStats;
+    }
+
+    [[nodiscard]] std::optional<compression::CompressionStats>
+    getCompressionStats() const override {
+        if (const auto* compressed =
+                dynamic_cast<const storage::CompressedStorageEngine*>(storage_.get())) {
+            return compressed->getCompressionStats();
+        }
+        return std::nullopt;
     }
 
     // Check health

@@ -8,7 +8,6 @@
 #include <memory>
 #include <span>
 #include <vector>
-#include <yams/compression/compression_monitor.h>
 #include <yams/profiling.h>
 
 namespace yams::compression {
@@ -242,39 +241,13 @@ ZstandardCompressor::~ZstandardCompressor() = default;
 Result<CompressionResult> ZstandardCompressor::compress(std::span<const std::byte> data,
                                                         uint8_t level) {
     YAMS_ZONE_SCOPED_N("ZstandardCompressor::compress");
-
-    // Start tracking
-    CompressionTracker tracker(CompressionAlgorithm::Zstandard, data.size());
-
-    auto result = pImpl->compress(data, level);
-
-    // Record result
-    if (result.has_value()) {
-        tracker.complete(result.value());
-    } else {
-        tracker.failed();
-    }
-
-    return result;
+    return pImpl->compress(data, level);
 }
 
 Result<std::vector<std::byte>> ZstandardCompressor::decompress(std::span<const std::byte> data,
                                                                size_t expectedSize) {
     YAMS_ZONE_SCOPED_N("ZstandardCompressor::decompress");
-
-    // Start tracking
-    DecompressionTracker tracker(CompressionAlgorithm::Zstandard, data.size());
-
-    auto result = pImpl->decompress(data, expectedSize);
-
-    // Record result
-    if (result.has_value()) {
-        tracker.complete(result.value().size());
-    } else {
-        tracker.failed();
-    }
-
-    return result;
+    return pImpl->decompress(data, expectedSize);
 }
 
 std::unique_ptr<IStreamingCompressor> ZstandardCompressor::createStreamCompressor(uint8_t level) {
