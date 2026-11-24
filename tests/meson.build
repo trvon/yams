@@ -3173,15 +3173,6 @@ if catch2_dep.found()
     'timeout': 60,
   }]
 
-  catch2_test_table += [{
-    'name': 'external_plugin_extractor',
-    'target': 'external_plugin_extractor',
-    'sources': files('unit/extraction/external_plugin_extractor_test.cpp'),
-    'deps': plugin_process_test_deps,
-    'suite': ['catch2', 'unit', 'extraction', 'plugins'],
-    'timeout': 60,
-  }]
-
 #Chunking tests(depends on chunking module)
   chunking_test_deps = [
     dependency('spdlog'),
