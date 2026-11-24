@@ -5,9 +5,9 @@
 #include <yams/vector/simeon_embedding_backend.h>
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -450,4 +450,59 @@ TEST_CASE("The daemon's data dir hint does not select a static table", "[vector]
     std::error_code ec;
     std::filesystem::remove_all(daemonDir, ec);
     std::filesystem::remove_all(otherDir, ec);
+}
+
+TEST_CASE("SimeonBackend normalized_v2 profile produces case-insensitive L2-normalized embeddings",
+          "[vector][simeon][normalized_v2]") {
+    const auto dir = uniqueTempDir("yams_simeon_normalized_v2_");
+    const auto cfgPath = dir / "config.toml";
+    yams::test::ScopedEnvVar cfgEnv{"YAMS_CONFIG", cfgPath.string()};
+    yams::test::ScopedEnvVar compatEnv{"YAMS_CONFIG_PATH", std::nullopt};
+    std::vector<yams::test::ScopedEnvVar> clearEnv;
+    for (const char* name :
+         {"YAMS_SIMEON_NGRAM_MODE", "YAMS_SIMEON_NGRAM_MIN", "YAMS_SIMEON_NGRAM_MAX",
+          "YAMS_SIMEON_SKETCH_DIM", "YAMS_SIMEON_OUTPUT_DIM", "YAMS_SIMEON_PROJECTION",
+          "YAMS_SIMEON_PQ_BYTES"}) {
+        clearEnv.emplace_back(name, std::nullopt);
+    }
+
+    for (const char* profileName : {"normalized_v2", "scientific_hash"}) {
+        DYNAMIC_SECTION("profile=" << profileName) {
+            std::ofstream(cfgPath)
+                << "[embeddings.simeon]\nencoder_profile = \"" << profileName << "\"\n";
+            auto backend = makeSimeonBackend(make_cfg(256));
+            REQUIRE(backend->initialize());
+            CHECK_FALSE(backend->isFallbackEmbeddingSpace());
+            CHECK(backend->getEmbeddingDimension() == 256u);
+            CHECK_THAT(backend->getEmbeddingSpaceIdentity(), StartsWith("simeon-normalized-v2:"));
+
+            auto mixedCase =
+                backend->generateEmbedding("Interleukin-6 Inhibits mRNA Expression in T-Cells");
+            auto lowerCase =
+                backend->generateEmbedding("interleukin-6 inhibits mrna expression in t-cells");
+            REQUIRE(mixedCase);
+            REQUIRE(lowerCase);
+            REQUIRE(mixedCase.value().size() == 256u);
+            CHECK(mixedCase.value() == lowerCase.value());
+
+            double normSq = 0.0;
+            for (float v : mixedCase.value()) {
+                normSq += static_cast<double>(v) * static_cast<double>(v);
+            }
+            CHECK(std::fabs(std::sqrt(normSq) - 1.0) < 1e-4);
+        }
+    }
+
+    // Verify normalized_v2 differs from the legacy configurable profile on mixed-case text.
+    std::ofstream(cfgPath) << "[embeddings.simeon]\nencoder_profile = \"configurable\"\n";
+    auto legacy = makeSimeonBackend(make_cfg(256));
+    REQUIRE(legacy->initialize());
+    auto legacyMixed = legacy->generateEmbedding("Interleukin-6 Inhibits mRNA Expression");
+    auto legacyLower = legacy->generateEmbedding("interleukin-6 inhibits mrna expression");
+    REQUIRE(legacyMixed);
+    REQUIRE(legacyLower);
+    CHECK(legacyMixed.value() != legacyLower.value());
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
 }

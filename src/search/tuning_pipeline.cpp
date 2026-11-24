@@ -287,10 +287,15 @@ void applyCommunityLayer(std::optional<TuningState> communityState, TuningState 
     const TunedParams target = getTunedParams(*communityState);
     constexpr float kBlend = 0.60f;
 
-    // Slotted fields: 60% toward target, pinned slots unmodified (set() is a no-op when pinned)
+    // Slotted fields: 60% toward target, pinned slots unmodified (set() is a no-op when pinned).
+    // Profiles that omit simeonText (0.0) must not starve an active simeonText weight when a
+    // SCIENTIFIC query is routed through a code/media community override (e.g. CamelCase bio
+    // terms).
     blendSlot(params.weights.text, target.weights.text.value, kBlend, TuningLayer::Community);
-    blendSlot(params.weights.simeonText, target.weights.simeonText.value, kBlend,
-              TuningLayer::Community);
+    if (target.weights.simeonText.value > 0.0f) {
+        blendSlot(params.weights.simeonText, target.weights.simeonText.value, kBlend,
+                  TuningLayer::Community);
+    }
     blendSlot(params.weights.vector, target.weights.vector.value, kBlend, TuningLayer::Community);
     blendSlot(params.weights.entityVector, target.weights.entityVector.value, kBlend,
               TuningLayer::Community);
