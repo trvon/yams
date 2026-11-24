@@ -384,3 +384,60 @@ TEST_CASE("semantic budget lexical guard judges strength on the raw bm25 scale",
         CHECK_FALSE(isStrongSemanticBudgetLexical(components));
     }
 }
+
+TEST_CASE("scoreLexicalBatch scales divisor dynamically on strong queries without boosting weak",
+          "[search][lexical][catch2]") {
+    SECTION("weak queries below bm25NormDivisor preserve exact existing scores") {
+        std::vector<SearchResult> rows = {
+            makeSearchResult("a", "/docs/a.txt", "a.txt", -15.0),
+            makeSearchResult("b", "/docs/b.txt", "b.txt", -10.0),
+            makeSearchResult("c", "/docs/c.txt", "c.txt", -5.0),
+        };
+        LexicalScoringInputs inputs;
+        inputs.candidates = std::span<const SearchResult>{rows};
+        inputs.query = "nomatch";
+        inputs.applyFilenameBoost = false;
+        inputs.bm25NormDivisor = 25.0f;
+
+        auto out = scoreLexicalBatch(inputs);
+        REQUIRE(out.results.size() == 3);
+        REQUIRE(out.results[0].has_value());
+        REQUIRE(out.results[1].has_value());
+        REQUIRE(out.results[2].has_value());
+        REQUIRE(out.results[0]->absoluteLexicalScore.has_value());
+        REQUIRE(out.results[1]->absoluteLexicalScore.has_value());
+        REQUIRE(out.results[2]->absoluteLexicalScore.has_value());
+        CHECK(*out.results[0]->absoluteLexicalScore == Approx(15.0f / 25.0f));
+        CHECK(*out.results[1]->absoluteLexicalScore == Approx(10.0f / 25.0f));
+        CHECK(*out.results[2]->absoluteLexicalScore == Approx(5.0f / 25.0f));
+    }
+
+    SECTION("strong queries above bm25NormDivisor preserve strictly decreasing scores") {
+        std::vector<SearchResult> rows = {
+            makeSearchResult("a", "/docs/a.txt", "a.txt", -60.0),
+            makeSearchResult("b", "/docs/b.txt", "b.txt", -45.0),
+            makeSearchResult("c", "/docs/c.txt", "c.txt", -30.0),
+        };
+        LexicalScoringInputs inputs;
+        inputs.candidates = std::span<const SearchResult>{rows};
+        inputs.query = "nomatch";
+        inputs.applyFilenameBoost = false;
+        inputs.bm25NormDivisor = 25.0f;
+
+        auto out = scoreLexicalBatch(inputs);
+        REQUIRE(out.results.size() == 3);
+        REQUIRE(out.results[0].has_value());
+        REQUIRE(out.results[1].has_value());
+        REQUIRE(out.results[2].has_value());
+        REQUIRE(out.results[0]->absoluteLexicalScore.has_value());
+        REQUIRE(out.results[1]->absoluteLexicalScore.has_value());
+        REQUIRE(out.results[2]->absoluteLexicalScore.has_value());
+        CHECK(*out.results[0]->absoluteLexicalScore == Approx(1.0f));
+        CHECK(*out.results[1]->absoluteLexicalScore == Approx(45.0f / 60.0f));
+        CHECK(*out.results[2]->absoluteLexicalScore == Approx(30.0f / 60.0f));
+        CHECK(*out.results[0]->absoluteLexicalScore > *out.results[1]->absoluteLexicalScore);
+        CHECK(*out.results[1]->absoluteLexicalScore > *out.results[2]->absoluteLexicalScore);
+        CHECK(out.results[0]->score > out.results[1]->score);
+        CHECK(out.results[1]->score > out.results[2]->score);
+    }
+}

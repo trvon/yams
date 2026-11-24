@@ -1169,12 +1169,37 @@ TEST_CASE("applyCommunityLayer: env-pinned weight survives blend",
 TEST_CASE("applyCommunityLayer: SCIENTIFIC → Code blend keeps sub-phrase off",
           "[unit][search_tuner][community]") {
     auto params = getTunedParams(TuningState::SCIENTIFIC);
+    const float simeonBefore = params.weights.simeonText.value;
     CHECK((params.enableSubPhraseRescoring == false));
 
     applyCommunityLayer(TuningState::SMALL_CODE, TuningState::SCIENTIFIC, params);
 
     // Both profiles leave sub-phrase rescoring off; OR stays false.
     CHECK((params.enableSubPhraseRescoring == false));
+    // SMALL_CODE omits simeonText (0.0), so community blending must not starve SCIENTIFIC's weight.
+    CHECK((params.weights.simeonText.value == Approx(simeonBefore)));
+}
+
+TEST_CASE("resolveQueryPolicy: SCIENTIFIC CamelCase query preserves simeonText share",
+          "[unit][search_tuner][community][simeon_text]") {
+    CorpusStats stats;
+    stats.docCount = 5000;
+    stats.proseRatio = 1.0f;
+    stats.pathRelativeDepthAvg = 0.5;
+    stats.embeddingCoverage = 1.0f;
+    SearchTuner tuner(stats, TuningState::SCIENTIFIC);
+    const auto snap = tuner.snapshot();
+
+    // Real SciFact-style claim with CamelCase protein token (triggers Code intent + SMALL_CODE).
+    const auto resolution =
+        resolveQueryPolicy("The DdrB protein from Deinococcus radiodurans is an alternative SSB.",
+                           snap.config, snap.params, snap.state, /*semanticOnly=*/false);
+
+    REQUIRE(resolution.routeDecision.intent.label == QueryIntent::Code);
+    REQUIRE(resolution.communityOverride == TuningState::SMALL_CODE);
+    CHECK(resolution.config.simeonTextWeight > 0.25f);
+    CHECK(resolution.config.simeonTextWeight == Approx(0.3024f).margin(0.01f));
+    CHECK(resolution.config.textWeight == Approx(0.5108f).margin(0.01f));
 }
 
 TEST_CASE("applyCommunityLayer: nullopt is no-op", "[unit][search_tuner][community]") {

@@ -488,6 +488,24 @@ void WriteCoordinator::recordSourceApply(const std::string& source, std::uint64_
     stats_.maxBatchApplyMs = std::max(stats_.maxBatchApplyMs, applyMs);
 }
 
+std::size_t WriteCoordinator::pressureAdjustedBatchLimit(std::size_t requestedMax,
+                                                         ResourcePressureLevel level,
+                                                         bool stopping) noexcept {
+    if (requestedMax <= 1 || stopping) {
+        return requestedMax;
+    }
+    switch (level) {
+        case ResourcePressureLevel::Normal:
+        case ResourcePressureLevel::Warning:
+            return requestedMax;
+        case ResourcePressureLevel::Critical:
+            return std::max<std::size_t>(1, requestedMax / 4);
+        case ResourcePressureLevel::Emergency:
+            return 1;
+    }
+    return requestedMax;
+}
+
 boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
     // No thread name here: this coroutine runs on the shared WorkCoordinator executor and can
     // resume on any of its workers, so naming "this thread" would mislabel a pool worker.
@@ -498,24 +516,32 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
         std::vector<std::unique_ptr<WriteBatch>> batchesToProcess;
         {
             std::lock_guard<std::mutex> lock(queueMutex_);
-            if (stop_.load(std::memory_order_acquire) && pendingBatches_.empty() &&
+            const bool stopping = stop_.load(std::memory_order_acquire);
+            if (stopping && pendingBatches_.empty() &&
                 inFlight_.load(std::memory_order_acquire) == 0) {
                 break;
             }
 
-            std::size_t effectiveMax = std::min(config_.maxBatchSize, kMaxBatchesPerIteration);
-            std::size_t count = std::min(pendingBatches_.size(), effectiveMax);
+            const std::size_t baseMax = std::min(config_.maxBatchSize, kMaxBatchesPerIteration);
+            const auto pressureLevel = config_.pressureLevelProvider
+                                           ? config_.pressureLevelProvider()
+                                           : ResourcePressureLevel::Normal;
+            const std::size_t effectiveMax =
+                pressureAdjustedBatchLimit(baseMax, pressureLevel, stopping);
+            YAMS_DCHECK(effectiveMax > 0, "WriteCoordinator effectiveMax must remain positive");
+            const std::size_t count = std::min(pendingBatches_.size(), effectiveMax);
             if (count > 0) {
                 YAMS_ZONE_SCOPED_N("WriteCoordinator::dequeue");
                 YAMS_PLOT("wc.dequeue.batch_count", static_cast<int64_t>(count));
+                YAMS_PLOT("wc.dequeue.effective_max", static_cast<int64_t>(effectiveMax));
                 YAMS_PLOT("wc.queue.depth_after_dequeue",
                           static_cast<int64_t>(pendingBatches_.size() - count));
                 inFlight_.store(count, std::memory_order_release);
                 batchesToProcess.reserve(count);
-                for (std::size_t i = 0; i < count; ++i)
-                    batchesToProcess.push_back(std::move(pendingBatches_[i]));
-                pendingBatches_.erase(pendingBatches_.begin(),
-                                      pendingBatches_.begin() + static_cast<long>(count));
+                for (std::size_t i = 0; i < count; ++i) {
+                    batchesToProcess.push_back(std::move(pendingBatches_.front()));
+                    pendingBatches_.pop_front();
+                }
                 drainCv_.notify_all();
             }
         }

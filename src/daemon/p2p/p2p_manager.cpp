@@ -3,6 +3,7 @@
 
 #define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 // pi-lens-ignore: fatal error
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/p2p/p2p_manager.h>
 #include <yams/profiling.h>
 #undef YAMS_DAEMON_TEST_HOOKS_IMPL
@@ -623,6 +624,14 @@ private:
                 invokeReconnectLoopHook();
 #endif
                 YAMS_ZONE_SCOPED_N("p2p.reconnect.cycle");
+                const auto& governor = ResourceGovernor::instance();
+                if (governor.getPressureLevel() >= ResourcePressureLevel::Critical ||
+                    !governor.canAdmitWork()) {
+                    spdlog::debug("[p2p] deferring reconnect cycle under {} pressure",
+                                  pressureLevelName(governor.getPressureLevel()));
+                    waitLock.lock();
+                    continue;
+                }
                 auto records = registry_->listPeers();
                 if (records) {
                     for (const auto& peer : records.value()) {

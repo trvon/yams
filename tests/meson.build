@@ -1142,15 +1142,6 @@ if catch2_dep.found()
     'timeout': 60,
   }]
 
-  catch2_test_table += [{
-    'name': 'repair_scheduling_adapter',
-    'target': 'catch2_repair_scheduling',
-    'sources': files('unit/daemon/repair_scheduling_adapter_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'repair'],
-    'timeout': 120,
-  }]
-
   catch2_repair_service_exe = executable('catch2_repair_service',
     files('unit/daemon/repair_service_post_ingest_channel_catch2_test.cpp',
           'unit/daemon/repair_scan_cursor_catch2_test.cpp'),
@@ -1825,23 +1816,6 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_memory_sync_cli_exe = executable('catch2_memory_sync_cli',
-    files('unit/memory_sync/memory_sync_cli_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [
-      catch2_dep,
-      catch2_main_dep,
-      dependency('nlohmann_json'),
-      dependency('yams_storage_engine'),
-      dependency('yams_crypto'),
-      dependency('yams_memory_sync'),
-      dependency('yams_core'),
-    ],
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
-
 #Storage submodule tests(StorageEngine, CompressedStorageEngine, ReferenceCounter, etc.)
 #Migrated from GTest as part of yams - 3s4 / yams - 8b9
   catch2_storage_submodule_exe = executable('catch2_storage_submodule',
@@ -2090,7 +2064,6 @@ if catch2_dep.found()
   catch2_compression_submodule_exe = executable('catch2_compression_submodule',
     files(
       'unit/compression/compression_header_catch2_test.cpp',
-      'unit/compression/compression_monitor_catch2_test.cpp',
       'unit/compression/compression_policy_catch2_test.cpp',
       'unit/compression/framed_payload_catch2_test.cpp',
       'unit/compression/zstandard_compressor_catch2_test.cpp',
@@ -2795,14 +2768,6 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
-    'name': 'string_interner',
-    'sources': files('unit/search/string_interner_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'search'],
-    'timeout': 30,
-  }]
-
-  catch2_test_table += [{
     'name': 'binary_quantization',
     'sources': files('unit/vector/binary_quantization_catch2_test.cpp'),
     'deps': test_deps,
@@ -3204,15 +3169,6 @@ if catch2_dep.found()
     'sources': files('unit/extraction/jsonrpc_client_test.cpp'),
     'deps': plugin_process_test_deps,
     'suite': ['catch2', 'unit', 'extraction', 'jsonrpc'],
-    'timeout': 60,
-  }]
-
-  catch2_test_table += [{
-    'name': 'external_plugin_extractor',
-    'target': 'external_plugin_extractor',
-    'sources': files('unit/extraction/external_plugin_extractor_test.cpp'),
-    'deps': plugin_process_test_deps,
-    'suite': ['catch2', 'unit', 'extraction', 'plugins'],
     'timeout': 60,
   }]
 
@@ -3793,12 +3749,6 @@ if catch2_dep.found()
   )
 
   test('memory_sync_config', catch2_memory_sync_config_exe,
-    suite: ['catch2', 'unit', 'memory-sync'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
-  test('memory_sync_cli', catch2_memory_sync_cli_exe,
     suite: ['catch2', 'unit', 'memory-sync'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60

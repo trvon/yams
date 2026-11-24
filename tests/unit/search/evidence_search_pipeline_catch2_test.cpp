@@ -238,3 +238,58 @@ TEST_CASE("EvidenceSearchPipeline removes candidates only at the final top-k bou
     CHECK(run.value().trace.finalCandidates == 2);
     CHECK(run.value().results.size() == 2);
 }
+
+TEST_CASE("EvidenceSearchPipeline ConvexMinMax preserves score margins and handles flat pools",
+          "[search][evidence_pipeline][convex][catch2]") {
+    SearchEngineConfig config;
+    config.fusionStrategy = SearchEngineConfig::FusionStrategy::ConvexMinMax;
+    config.textWeight = 0.60F;
+    config.vectorWeight = 0.40F;
+    config.lexicalFloorBoost = 0.20F; // ignored in ConvexMinMax mode
+    config.lexicalFloorTopN = 12;
+
+    // doc-runaway is #1 lexical with a huge margin (10.0 vs 1.0) and absent from vector.
+    // doc-tie is #2 lexical (weak score 1.0) and #2 vector (weak score 0.1 vs #1 0.9).
+    const std::vector<ComponentResult> components{
+        makeComponent("doc-runaway", 10.0F, ComponentResult::Source::Text, 0),
+        makeComponent("doc-tie", 1.0F, ComponentResult::Source::Text, 1),
+        makeComponent("doc-vec-top", 0.9F, ComponentResult::Source::Vector, 0),
+        makeComponent("doc-tie", 0.1F, ComponentResult::Source::Vector, 1),
+    };
+
+    EvidenceSearchPipeline pipeline;
+    auto run = pipeline.execute(components, {}, config, 10);
+    REQUIRE(run);
+    REQUIRE(run.value().results.size() == 3);
+    // doc-runaway: 0.60 * 1.0 = 0.60
+    // doc-vec-top: 0.40 * 1.0 = 0.40
+    // doc-tie:     0.60 * 0.0 + 0.40 * 0.0 = 0.00
+    CHECK(run.value().results[0].document.sha256Hash == "doc-runaway");
+    CHECK(run.value().results[1].document.sha256Hash == "doc-vec-top");
+    CHECK(run.value().results[2].document.sha256Hash == "doc-tie");
+}
+
+TEST_CASE("SearchEngineConfig::applyExecutionPolicyFrom preserves fusion and rerank settings",
+          "[search][config]") {
+    SearchEngineConfig tuned;
+    tuned.fusionStrategy = SearchEngineConfig::FusionStrategy::Rrf;
+    tuned.rerankTopK = 8;
+    tuned.rerankSnippetMaxChars = 256;
+
+    SearchEngineConfig configured;
+    configured.fusionStrategy = SearchEngineConfig::FusionStrategy::ConvexMinMax;
+    configured.rerankTopK = 20;
+    configured.rerankSnippetMaxChars = 512;
+
+    tuned.applyExecutionPolicyFrom(configured);
+    CHECK(tuned.fusionStrategy == SearchEngineConfig::FusionStrategy::ConvexMinMax);
+    CHECK(tuned.rerankTopK == 20);
+    CHECK(tuned.rerankSnippetMaxChars == 512);
+
+    // Default rerankTopK in configured must not clobber a tuned preset rerankTopK.
+    SearchEngineConfig tunedPreset;
+    tunedPreset.rerankTopK = 8;
+    SearchEngineConfig defaultConfigured;
+    tunedPreset.applyExecutionPolicyFrom(defaultConfigured);
+    CHECK(tunedPreset.rerankTopK == 8);
+}

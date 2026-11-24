@@ -606,6 +606,30 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             opts.config.rrfK = std::clamp(*tp.rrfK, 1.0f, 10000.0f);
             spdlog::info("SearchEngine rrfK applied via config: {:.3f}", opts.config.rrfK);
         }
+        if (tp.fusionStrategy) {
+            std::string mode = *tp.fusionStrategy;
+            std::transform(mode.begin(), mode.end(), mode.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (mode == "convex_min_max" || mode == "convex") {
+                opts.config.fusionStrategy =
+                    yams::search::SearchEngineConfig::FusionStrategy::ConvexMinMax;
+            } else {
+                opts.config.fusionStrategy = yams::search::SearchEngineConfig::FusionStrategy::Rrf;
+            }
+            spdlog::info("SearchEngine fusionStrategy applied via config: {}",
+                         yams::search::SearchEngineConfig::fusionStrategyToString(
+                             opts.config.fusionStrategy));
+        }
+        if (tp.rerankTopK) {
+            opts.config.rerankTopK = *tp.rerankTopK;
+            spdlog::info("SearchEngine rerankTopK applied via config: {}", opts.config.rerankTopK);
+        }
+        if (tp.rerankSnippetMaxChars) {
+            opts.config.rerankSnippetMaxChars =
+                std::clamp<std::size_t>(*tp.rerankSnippetMaxChars, 64, 4096);
+            spdlog::info("SearchEngine rerankSnippetMaxChars applied via config: {}",
+                         opts.config.rerankSnippetMaxChars);
+        }
     }
 
     if (!vectorEnabled) {

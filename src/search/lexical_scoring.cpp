@@ -117,6 +117,18 @@ LexicalScoringOutput scoreLexicalBatch(const LexicalScoringInputs& inputs) {
 
     const auto range = computeBm25Range(rows);
 
+    float maxAbsRawScore = 0.0f;
+    for (const auto& sr : rows) {
+        const float absRaw = static_cast<float>(std::abs(sr.score));
+        if (std::isfinite(absRaw)) {
+            maxAbsRawScore = std::max(maxAbsRawScore, absRaw);
+        }
+    }
+    const float effectiveDivisor = (std::isfinite(inputs.bm25NormDivisor) &&
+                                    inputs.bm25NormDivisor > 0.0f && maxAbsRawScore > 0.0f)
+                                       ? std::max(inputs.bm25NormDivisor, maxAbsRawScore)
+                                       : inputs.bm25NormDivisor;
+
     const float nonCodeFileMultiplier =
         inputs.applyIntentAdaptiveWeighting ? intentAdaptiveNonCodeMultiplier(inputs.intent) : 1.0f;
 
@@ -139,7 +151,7 @@ LexicalScoringOutput scoreLexicalBatch(const LexicalScoringInputs& inputs) {
 
         const float rawScore = static_cast<float>(sr.score);
         const float normalized =
-            normalizedBm25Score(rawScore, inputs.bm25NormDivisor, range.minScore, range.maxScore);
+            normalizedBm25Score(rawScore, effectiveDivisor, range.minScore, range.maxScore);
         const float finalScore = std::clamp(scoreMultiplier * normalized, 0.0f, 1.0f);
 
         if (inputs.admissionMinScore && finalScore < *inputs.admissionMinScore) {
@@ -156,10 +168,12 @@ LexicalScoringOutput scoreLexicalBatch(const LexicalScoringInputs& inputs) {
         cr.rank = inputs.startRank + rank;
         cr.snippet = sr.snippet.empty() ? std::nullopt : std::optional<std::string>(sr.snippet);
         cr.debugInfo["score_multiplier"] = fmt::format("{:.3f}", scoreMultiplier);
-        // Absolute scale: the single-hit branch of normalizedBm25Score (no batch range).
-        cr.absoluteLexicalScore = std::clamp(
-            scoreMultiplier * normalizedBm25Score(rawScore, inputs.bm25NormDivisor, 0.0, 0.0), 0.0f,
-            1.0f);
+        // Absolute scale: single-hit branch of normalizedBm25Score, with effectiveDivisor
+        // expanding above bm25NormDivisor on strong queries so top hits keep relative margins
+        // instead of saturating at 1.0.
+        cr.absoluteLexicalScore =
+            std::clamp(scoreMultiplier * normalizedBm25Score(rawScore, effectiveDivisor, 0.0, 0.0),
+                       0.0f, 1.0f);
 
         out.results.emplace_back(std::move(cr));
     }

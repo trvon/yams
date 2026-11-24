@@ -6,7 +6,6 @@
 #include <yams/daemon/components/thread_pool_naming.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/resource/plugin_content_extractor_adapter.h>
-#include <yams/extraction/external_plugin_extractor.hpp>
 #include <yams/manifest/manifest_manager.h>
 #include <yams/metadata/document_metadata.h>
 
@@ -1404,9 +1403,6 @@ std::string RepairService::extractorFingerprint(
                 dynamic_cast<const PluginContentExtractorAdapter*>(extractor.get());
             plugin && !plugin->name().empty()) {
             names.push_back("plugin:" + plugin->name());
-        } else if (const auto* external =
-                       dynamic_cast<const extraction::ExternalPluginExtractor*>(extractor.get())) {
-            names.push_back("external:" + external->name());
         } else {
             const auto& self = *extractor;
             names.emplace_back(typeid(self).name());

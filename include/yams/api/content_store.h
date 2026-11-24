@@ -4,6 +4,7 @@
 #include <yams/api/content_metadata.h>
 #include <yams/api/progress_reporter.h>
 #include <yams/compression/compression_header.h>
+#include <yams/compression/compression_stats.h>
 #include <yams/core/types.h>
 
 #include <chrono>
@@ -136,6 +137,9 @@ public:
 
     // Statistics and health
     virtual ContentStoreStats getStats() const = 0;
+    [[nodiscard]] virtual std::optional<compression::CompressionStats> getCompressionStats() const {
+        return std::nullopt;
+    }
     virtual HealthStatus checkHealth() const = 0;
 
     // Maintenance operations

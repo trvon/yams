@@ -1058,6 +1058,15 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.rrf_k"); it != kv.end()) {
                 policy.rrfK = parseFloat(it->second);
             }
+            if (auto it = kv.find("search.fusion_strategy"); it != kv.end()) {
+                policy.fusionStrategy = std::string(trimView(it->second));
+            }
+            if (auto it = kv.find("search.rerank_top_k"); it != kv.end()) {
+                policy.rerankTopK = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.rerank_snippet_max_chars"); it != kv.end()) {
+                policy.rerankSnippetMaxChars = parseSize(it->second);
+            }
         }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for topology routing policy: {}", e.what());

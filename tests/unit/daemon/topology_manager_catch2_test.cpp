@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TopologyManager.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -888,4 +889,34 @@ TEST_CASE("TopologyManager fits route vectors on a full rebuild and stores them 
         CHECK(rebuilt.value().routeFitSkipReason == "cancelled_under_pressure");
         CHECK(fittedClusterCount(fixture.latest()) == 0u);
     }
+}
+
+TEST_CASE("TopologyManager runRebuild defers under critical resource pressure",
+          "[daemon][topology-manager][catch2]") {
+    struct GovernorPressureGuard {
+        std::chrono::steady_clock::time_point prevStartup;
+        GovernorPressureGuard()
+            : prevStartup(ResourceGovernor::instance().testing_endStartupGrace()) {
+            ResourceGovernor::instance().testing_setPressureState(ResourcePressureLevel::Critical,
+                                                                  std::chrono::steady_clock::now());
+        }
+        ~GovernorPressureGuard() {
+            ResourceGovernor::instance().testing_setPressureState(ResourcePressureLevel::Normal,
+                                                                  std::chrono::steady_clock::now());
+            ResourceGovernor::instance().testing_restoreStartupTime(prevStartup);
+        }
+    };
+
+    RebuildFixture fixture(RouteFitCorpus::kDim);
+    RouteFitCorpus corpus(fixture);
+    GovernorPressureGuard guard;
+
+    TopologyManager manager(corpus.dependencies(fixture));
+    auto rebuilt = manager.rebuildArtifacts("pressure_defer_test", false, {}, "connected");
+    REQUIRE(rebuilt.has_value());
+    CHECK(rebuilt.value().skipped);
+    CHECK_FALSE(rebuilt.value().stored);
+    REQUIRE_FALSE(rebuilt.value().issues.empty());
+    CHECK(rebuilt.value().issues.front().find("resource pressure") != std::string::npos);
+    CHECK(manager.publishedEpoch() == 0);
 }
