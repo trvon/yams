@@ -4,6 +4,7 @@
 #pragma once
 
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
+#include <yams/daemon/components/HostPressure.h>
 
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -49,6 +50,11 @@ public:
     /// repair queue, and no repair in progress. Open connections do not count; agents keep them
     /// open while idle.
     static bool autoRepairMayRun(const DaemonStats& stats, bool repairInProgress) noexcept;
+
+    /// Whether deferrable periodic maintenance (orphan scan, storage GC, graph prune,
+    /// document retention, scheduled auto-repair) is admitted by ResourceGovernor.
+    static bool
+    periodicMaintenanceAdmitted(DeferrableWork kind = DeferrableWork::RepairScan) noexcept;
 
     /**
      * @brief Dependency injection structure for BackgroundTaskManager.

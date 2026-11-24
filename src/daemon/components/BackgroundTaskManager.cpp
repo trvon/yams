@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <yams/app/services/services.hpp>
+#include <yams/core/assert.hpp>
 #include <yams/daemon/components/BackgroundTaskManager.h>
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -9,12 +10,14 @@
 #include <yams/daemon/components/repair/repair_health_probe.h>
 #include <yams/daemon/components/repair/repair_plan_builder.h>
 #include <yams/daemon/components/RepairService.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/profiling.h>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -442,10 +445,15 @@ void BackgroundTaskManager::launchOrphanScanTask() {
                 }
 
                 while (!stopFlag->load(std::memory_order_acquire)) {
-                    if (auto meta = self->getMetadataRepo(); meta) {
+                    if (!periodicMaintenanceAdmitted()) {
+                        spdlog::debug("[OrphanScan] Deferred by ResourceGovernor");
+                    } else if (auto meta = self->getMetadataRepo(); meta) {
                         spdlog::debug("[OrphanScan] Starting scan");
 
-                        auto fts5IdsRes = meta->getAllFts5IndexedDocumentIds();
+                        auto fts5IdsRes = [&]() {
+                            YAMS_ZONE_SCOPED_N("BackgroundTask::orphanScanQuery");
+                            return meta->getAllFts5IndexedDocumentIds();
+                        }();
                         if (!fts5IdsRes) {
                             spdlog::warn("[OrphanScan] Query failed: {}",
                                          fts5IdsRes.error().message);
@@ -594,14 +602,18 @@ void BackgroundTaskManager::launchStorageGcTask() {
                     "storage_gc_jobs", kChannelCapacity);
 
                 while (!stopFlag->load(std::memory_order_acquire)) {
-                    Bus::StorageGcJob job{};
-                    if (channel->try_push(job)) {
-                        Bus::instance().incGcQueued();
-                        TuningManager::notifyWakeup();
-                        spdlog::debug("[StorageGC] Enqueued GC job");
+                    if (!periodicMaintenanceAdmitted()) {
+                        spdlog::debug("[StorageGC] Deferred by ResourceGovernor");
                     } else {
-                        Bus::instance().incGcDropped();
-                        spdlog::debug("[StorageGC] Channel full, skipping cycle");
+                        Bus::StorageGcJob job{};
+                        if (channel->try_push(job)) {
+                            Bus::instance().incGcQueued();
+                            TuningManager::notifyWakeup();
+                            spdlog::debug("[StorageGC] Enqueued GC job");
+                        } else {
+                            Bus::instance().incGcDropped();
+                            spdlog::debug("[StorageGC] Channel full, skipping cycle");
+                        }
                     }
 
                     if (!co_await coWaitForDelay(timer, interval)) {
@@ -735,8 +747,10 @@ void BackgroundTaskManager::launchGraphPruneTask() {
                 }
 
                 while (!stopFlag->load(std::memory_order_acquire)) {
-                    auto kg = self->getKgStore();
-                    if (kg) {
+                    if (!periodicMaintenanceAdmitted()) {
+                        spdlog::debug("[GraphPrune] Deferred by ResourceGovernor");
+                    } else if (auto kg = self->getKgStore(); kg) {
+                        YAMS_ZONE_SCOPED_N("BackgroundTask::graphPrune");
                         yams::metadata::GraphVersionPruneConfig pruneCfg;
                         pruneCfg.keepLatestPerCanonical = keepLatest;
                         auto res = kg->pruneVersionNodes(pruneCfg);
@@ -799,16 +813,21 @@ void BackgroundTaskManager::launchDocumentRetentionTask() {
                 }
 
                 while (!stopFlag->load(std::memory_order_acquire)) {
-                    auto documentService =
-                        app::services::makeDocumentService(self->getAppContext());
-                    auto result = documentService->pruneVersions(
-                        {.keepLatest = keepLatest, .seriesKey = std::nullopt, .dryRun = false});
-                    if (!result) {
-                        spdlog::warn("[DocumentRetention] prune failed: {}",
-                                     result.error().message);
-                    } else if (result.value().count > 0) {
-                        spdlog::info("[DocumentRetention] pruned {} superseded version(s)",
-                                     result.value().deleted.size());
+                    if (!periodicMaintenanceAdmitted()) {
+                        spdlog::debug("[DocumentRetention] Deferred by ResourceGovernor");
+                    } else {
+                        YAMS_ZONE_SCOPED_N("BackgroundTask::documentRetention");
+                        auto documentService =
+                            app::services::makeDocumentService(self->getAppContext());
+                        auto result = documentService->pruneVersions(
+                            {.keepLatest = keepLatest, .seriesKey = std::nullopt, .dryRun = false});
+                        if (!result) {
+                            spdlog::warn("[DocumentRetention] prune failed: {}",
+                                         result.error().message);
+                        } else if (result.value().count > 0) {
+                            spdlog::info("[DocumentRetention] pruned {} superseded version(s)",
+                                         result.value().deleted.size());
+                        }
                     }
                     if (!co_await coWaitForDelay(timer, interval)) {
                         break;
@@ -829,6 +848,15 @@ bool BackgroundTaskManager::autoRepairMayRun(const DaemonStats& stats,
     // block scheduled repair.
     return stats.activeNonHealthRequests.load(std::memory_order_relaxed) == 0 &&
            stats.repairQueueDepth.load(std::memory_order_relaxed) == 0 && !repairInProgress;
+}
+
+bool BackgroundTaskManager::periodicMaintenanceAdmitted(DeferrableWork kind) noexcept {
+    auto& governor = ResourceGovernor::instance();
+    if (governor.getPressureLevel() >= ResourcePressureLevel::Critical ||
+        !governor.canAdmitWork()) {
+        return false;
+    }
+    return governor.admitDeferrable(kind);
 }
 
 void BackgroundTaskManager::launchAutoRepairTask() {
@@ -935,7 +963,8 @@ void BackgroundTaskManager::launchAutoRepairTask() {
 
                     const auto& state = self->getState();
                     auto canRunAuto = [&]() {
-                        return autoRepairMayRun(state.stats, rs->isRepairInProgress());
+                        return autoRepairMayRun(state.stats, rs->isRepairInProgress()) &&
+                               periodicMaintenanceAdmitted(DeferrableWork::RepairScan);
                     };
 
                     auto runPlan = [&](const std::string& tier,
