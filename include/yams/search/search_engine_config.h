@@ -372,6 +372,8 @@ struct SearchEngineConfig {
 
     bool enableIntentAdaptiveWeighting = true;
     size_t lexicalFloorTopN = 0;
+    std::optional<size_t> lexicalFloorTopNOverride;
+    std::optional<float> vectorWeightOverride;
     float lexicalFloorBoost = 0.0f;
     bool enableLexicalTieBreak = false;
     float lexicalTieBreakEpsilon = 0.0f;
@@ -606,6 +608,14 @@ struct SearchEngineConfig {
             rerankTopK = source.rerankTopK;
         }
         rerankSnippetMaxChars = source.rerankSnippetMaxChars;
+        if (source.lexicalFloorTopNOverride.has_value()) {
+            lexicalFloorTopN = *source.lexicalFloorTopNOverride;
+            lexicalFloorTopNOverride = source.lexicalFloorTopNOverride;
+        }
+        if (source.vectorWeightOverride.has_value()) {
+            vectorWeight = *source.vectorWeightOverride;
+            vectorWeightOverride = source.vectorWeightOverride;
+        }
     }
 };
 

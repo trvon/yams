@@ -145,6 +145,14 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
         // seedRuntimeConfig re-applies dead-source gates; push the gated view
         // back into cfg so the engine and tuner share one weight package.
         cfg = runtimeTuner->getConfig();
+        if (options.config.lexicalFloorTopNOverride.has_value()) {
+            cfg.lexicalFloorTopN = *options.config.lexicalFloorTopNOverride;
+            cfg.lexicalFloorTopNOverride = options.config.lexicalFloorTopNOverride;
+        }
+        if (options.config.vectorWeightOverride.has_value() && !environmentPins.vector) {
+            cfg.vectorWeight = *options.config.vectorWeightOverride;
+            cfg.vectorWeightOverride = options.config.vectorWeightOverride;
+        }
         if (!options.tunerStatePath.empty()) {
             auto loaded = runtimeTuner->loadAdaptiveState(options.tunerStatePath);
             if (!loaded) {

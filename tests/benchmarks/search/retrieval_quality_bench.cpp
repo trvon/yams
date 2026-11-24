@@ -6597,10 +6597,16 @@ struct BenchFixture {
                         yams::config::getenv_optional("YAMS_BENCH_RERANK_TOP_K");
                     const auto benchRerankSnippetChars =
                         yams::config::getenv_optional("YAMS_BENCH_RERANK_SNIPPET_MAX_CHARS");
+                    const auto benchLexicalFloorTopN =
+                        yams::config::getenv_optional("YAMS_BENCH_LEXICAL_FLOOR_TOP_N");
+                    const auto benchVectorWeight =
+                        yams::config::getenv_optional("YAMS_BENCH_VECTOR_WEIGHT");
                     if (envSet(simeonOuterMaxSimEnv) ||
                         (benchFusionStrategy && !benchFusionStrategy->empty()) ||
                         (benchRerankTopK && !benchRerankTopK->empty()) ||
-                        (benchRerankSnippetChars && !benchRerankSnippetChars->empty())) {
+                        (benchRerankSnippetChars && !benchRerankSnippetChars->empty()) ||
+                        (benchLexicalFloorTopN && !benchLexicalFloorTopN->empty()) ||
+                        (benchVectorWeight && !benchVectorWeight->empty())) {
                         configOut << "\n[search]\n";
                         if (envSet(simeonOuterMaxSimEnv)) {
                             configOut
@@ -6617,6 +6623,12 @@ struct BenchFixture {
                         if (benchRerankSnippetChars && !benchRerankSnippetChars->empty()) {
                             configOut << "rerank_snippet_max_chars = " << *benchRerankSnippetChars
                                       << "\n";
+                        }
+                        if (benchLexicalFloorTopN && !benchLexicalFloorTopN->empty()) {
+                            configOut << "lexical_floor_top_n = " << *benchLexicalFloorTopN << "\n";
+                        }
+                        if (benchVectorWeight && !benchVectorWeight->empty()) {
+                            configOut << "vector_weight = " << *benchVectorWeight << "\n";
                         }
                     }
                     configOut << "\n[vector_database]\n";

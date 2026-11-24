@@ -289,7 +289,32 @@ TEST_CASE("SearchEngineConfig::applyExecutionPolicyFrom preserves fusion and rer
     // Default rerankTopK in configured must not clobber a tuned preset rerankTopK.
     SearchEngineConfig tunedPreset;
     tunedPreset.rerankTopK = 8;
+    tunedPreset.lexicalFloorTopN = 12;
+    tunedPreset.vectorWeight = 0.25F;
     SearchEngineConfig defaultConfigured;
     tunedPreset.applyExecutionPolicyFrom(defaultConfigured);
     CHECK(tunedPreset.rerankTopK == 8);
+    CHECK(tunedPreset.lexicalFloorTopN == 12);
+    CHECK(tunedPreset.vectorWeight == Catch::Approx(0.25F));
+    CHECK_FALSE(tunedPreset.lexicalFloorTopNOverride.has_value());
+    CHECK_FALSE(tunedPreset.vectorWeightOverride.has_value());
+
+    // Explicit lexicalFloorTopNOverride / vectorWeightOverride override tuned presets (even to 0).
+    SearchEngineConfig explicitOverride;
+    explicitOverride.lexicalFloorTopNOverride = 0;
+    explicitOverride.vectorWeightOverride = 0.0F;
+    tunedPreset.applyExecutionPolicyFrom(explicitOverride);
+    CHECK(tunedPreset.lexicalFloorTopN == 0);
+    CHECK(tunedPreset.vectorWeight == Catch::Approx(0.0F));
+    REQUIRE(tunedPreset.lexicalFloorTopNOverride.has_value());
+    CHECK(*tunedPreset.lexicalFloorTopNOverride == 0);
+    REQUIRE(tunedPreset.vectorWeightOverride.has_value());
+    CHECK(*tunedPreset.vectorWeightOverride == Catch::Approx(0.0F));
+
+    SearchEngineConfig nonZeroOverride;
+    nonZeroOverride.lexicalFloorTopNOverride = 5;
+    nonZeroOverride.vectorWeightOverride = 0.15F;
+    tunedPreset.applyExecutionPolicyFrom(nonZeroOverride);
+    CHECK(tunedPreset.lexicalFloorTopN == 5);
+    CHECK(tunedPreset.vectorWeight == Catch::Approx(0.15F));
 }

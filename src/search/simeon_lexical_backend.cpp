@@ -90,6 +90,22 @@ void reconcileGeomWithBm25(std::vector<float>& geom, const std::vector<float>& b
     }
 }
 
+template <typename Bm25Idx>
+std::vector<float> scoreFragmentGeometryWithBm25(
+    std::string_view query, const Bm25Idx& idx, const simeon::Encoder& enc,
+    std::span<const std::vector<simeon::SemanticFragment>> docFrags,
+    const simeon::FragmentGeometryConfig& cfg, std::span<const float> precomputedBm25) {
+    if constexpr (requires {
+                      simeon::score_fragment_geometry(query, idx, enc, docFrags, cfg,
+                                                      precomputedBm25);
+                  }) {
+        return simeon::score_fragment_geometry(query, idx, enc, docFrags, cfg, precomputedBm25);
+    } else {
+        (void)precomputedBm25;
+        return simeon::score_fragment_geometry(query, idx, enc, docFrags, cfg);
+    }
+}
+
 std::uint64_t rssBytesCurrent() noexcept {
 #if defined(__APPLE__)
     mach_task_basic_info info{};
@@ -868,10 +884,11 @@ SimeonLexicalBackend::score(std::string_view query,
         simeon::score_bm25_variants_rrf(std::span<const simeon::Bm25Index* const>(variants, 2),
                                         query, std::span<float>{full});
     } else if (cfg_.fragment_geometry_enabled && fragment_encoder_ && !doc_frags_.empty()) {
-        full = simeon::score_fragment_geometry(query, *index_, *fragment_encoder_, doc_frags_,
-                                               simeon::FragmentGeometryConfig{});
         lexical.assign(currentDocCount, 0.0f);
         index_->score(query, std::span<float>{lexical});
+        full = scoreFragmentGeometryWithBm25(query, *index_, *fragment_encoder_, doc_frags_,
+                                             simeon::FragmentGeometryConfig{},
+                                             std::span<const float>{lexical});
     } else {
         index_->score(query, std::span<float>{full});
     }
@@ -980,9 +997,9 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
                 geomCfg.doc_scorer_kind = simeon::FragmentGeometryConfig::DocScorerKind::MaxSim;
             }
             recipe_label = simeon::quality_recipe_name(qualityRecipe);
-            full = simeon::score_fragment_geometry(query, *index_, *fragment_encoder_, doc_frags_,
-                                                   geomCfg);
             lexical = score_bm25(*index_);
+            full = scoreFragmentGeometryWithBm25(query, *index_, *fragment_encoder_, doc_frags_,
+                                                 geomCfg, std::span<const float>{lexical});
             // Keep the reranked pool above the BM25 tail (z-blend vs raw-BM25
             // scale mismatch would otherwise bury the candidates).
             reconcileGeomWithBm25(full, lexical);
@@ -1055,10 +1072,10 @@ SimeonLexicalBackend::scoreFragmentGeometry(std::string_view query,
     geometryConfig.top_fragments_per_doc =
         std::max<std::uint32_t>(geometryConfig.top_fragments_per_doc, 8u);
 
-    auto full = simeon::score_fragment_geometry(query, *index_, *fragment_encoder_, doc_frags_,
-                                                geometryConfig);
     std::vector<float> lexical(doc_count_, 0.0f);
     index_->score(query, std::span<float>{lexical});
+    auto full = scoreFragmentGeometryWithBm25(query, *index_, *fragment_encoder_, doc_frags_,
+                                              geometryConfig, std::span<const float>{lexical});
     reconcileGeomWithBm25(full, lexical);
 
     RescoreDecision decision;
