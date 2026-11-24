@@ -786,7 +786,7 @@ public:
         // Enable WAL mode for better concurrency
         sqlite3_exec(db_, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr);
         sqlite3_exec(db_, "PRAGMA synchronous=NORMAL", nullptr, nullptr, nullptr);
-        sqlite3_exec(db_, "PRAGMA cache_size=-2048", nullptr, nullptr, nullptr);
+        sqlite3_exec(db_, "PRAGMA cache_size=-16384", nullptr, nullptr, nullptr);
         sqlite3_exec(db_, "PRAGMA temp_store=MEMORY", nullptr, nullptr, nullptr);
 #ifndef _WIN32
         sqlite3_exec(db_, "PRAGMA mmap_size=268435456", nullptr, nullptr, nullptr); // 256MB
