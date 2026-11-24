@@ -960,6 +960,12 @@ public:
     batchGetDocumentsWithContentPreview(const std::vector<std::string>& hashes,
                                         int maxPreviewChars);
 
+    /// Batch fetch documents with content previews keyed by document id in a single JOIN query
+    /// (chunked for SQLite bind-parameter limits). Avoids N+1 getDocument + getContent loops.
+    Result<std::unordered_map<int64_t, std::pair<DocumentInfo, std::string>>>
+    batchGetDocumentsWithContentPreviewByIds(const std::vector<int64_t>& documentIds,
+                                             int maxPreviewChars);
+
     // Embedding status operations
     /// Starts a new local attempt and invalidates previous readiness/tokens.
     /// Call before reading the input snapshot. Recipe must identify the full derivation policy.

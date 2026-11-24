@@ -630,10 +630,37 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             spdlog::info("SearchEngine rerankSnippetMaxChars applied via config: {}",
                          opts.config.rerankSnippetMaxChars);
         }
+        if (tp.lexicalFloorTopN) {
+            opts.config.lexicalFloorTopN = *tp.lexicalFloorTopN;
+            opts.config.lexicalFloorTopNOverride = *tp.lexicalFloorTopN;
+            spdlog::info("SearchEngine lexicalFloorTopN applied via config: {}",
+                         opts.config.lexicalFloorTopN);
+        }
+        if (tp.vectorWeight) {
+            const float clamped = std::clamp(*tp.vectorWeight, 0.0f, 10.0f);
+            opts.config.vectorWeight = clamped;
+            opts.config.vectorWeightOverride = clamped;
+            spdlog::info("SearchEngine vectorWeight applied via config: {:.3f}",
+                         opts.config.vectorWeight);
+        }
+        if (tp.lexicalRerankDepth) {
+            opts.config.lexicalRerankDepth = *tp.lexicalRerankDepth;
+            opts.config.lexicalRerankDepthOverride = *tp.lexicalRerankDepth;
+            spdlog::info("SearchEngine lexicalRerankDepth applied via config: {}",
+                         opts.config.lexicalRerankDepth);
+        }
+        if (tp.lexicalRerankWeight) {
+            const float clamped = std::clamp(*tp.lexicalRerankWeight, 0.0f, 1.0f);
+            opts.config.lexicalRerankWeight = clamped;
+            opts.config.lexicalRerankWeightOverride = clamped;
+            spdlog::info("SearchEngine lexicalRerankWeight applied via config: {:.3f}",
+                         opts.config.lexicalRerankWeight);
+        }
     }
 
     if (!vectorEnabled) {
         opts.config.vectorWeight = 0.0f;
+        opts.config.vectorWeightOverride.reset();
         opts.config.vectorMaxResults = 0;
     }
 

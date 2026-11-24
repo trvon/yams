@@ -176,6 +176,10 @@ public:
         std::optional<std::string> fusionStrategy;
         std::optional<std::size_t> rerankTopK;
         std::optional<std::size_t> rerankSnippetMaxChars;
+        std::optional<std::size_t> lexicalFloorTopN;
+        std::optional<float> vectorWeight;
+        std::optional<std::size_t> lexicalRerankDepth;
+        std::optional<float> lexicalRerankWeight;
     };
 
     struct TopologyEnginePolicy {

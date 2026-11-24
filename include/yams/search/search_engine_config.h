@@ -372,6 +372,8 @@ struct SearchEngineConfig {
 
     bool enableIntentAdaptiveWeighting = true;
     size_t lexicalFloorTopN = 0;
+    std::optional<size_t> lexicalFloorTopNOverride;
+    std::optional<float> vectorWeightOverride;
     float lexicalFloorBoost = 0.0f;
     bool enableLexicalTieBreak = false;
     float lexicalTieBreakEpsilon = 0.0f;
@@ -428,6 +430,8 @@ struct SearchEngineConfig {
     // before the cross rerank. 0 disables it.
     size_t lexicalRerankDepth = 20;
     float lexicalRerankWeight = 0.5f;
+    std::optional<size_t> lexicalRerankDepthOverride;
+    std::optional<float> lexicalRerankWeightOverride;
     // With a static embedding table loaded: rerank the fused top-N by
     // (1 - wl - ws) * z(fused) + wl * z(bm25) + ws * z(static cosine). 0 disables the static part.
     size_t staticRerankDepth = 50;
@@ -606,6 +610,22 @@ struct SearchEngineConfig {
             rerankTopK = source.rerankTopK;
         }
         rerankSnippetMaxChars = source.rerankSnippetMaxChars;
+        if (source.lexicalFloorTopNOverride.has_value()) {
+            lexicalFloorTopN = *source.lexicalFloorTopNOverride;
+            lexicalFloorTopNOverride = source.lexicalFloorTopNOverride;
+        }
+        if (source.vectorWeightOverride.has_value()) {
+            vectorWeight = *source.vectorWeightOverride;
+            vectorWeightOverride = source.vectorWeightOverride;
+        }
+        if (source.lexicalRerankDepthOverride.has_value()) {
+            lexicalRerankDepth = *source.lexicalRerankDepthOverride;
+            lexicalRerankDepthOverride = source.lexicalRerankDepthOverride;
+        }
+        if (source.lexicalRerankWeightOverride.has_value()) {
+            lexicalRerankWeight = *source.lexicalRerankWeightOverride;
+            lexicalRerankWeightOverride = source.lexicalRerankWeightOverride;
+        }
     }
 };
 

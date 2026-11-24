@@ -154,27 +154,35 @@ std::optional<yams::metadata::SearchResults> makeDirectSimeonLexicalResults(
         expansionStats->simeonDirectRawHitCount += decision.value().candidates.size();
     }
 
+    constexpr int kSnippetChars = 240;
+    std::vector<int64_t> candidateIds;
+    candidateIds.reserve(decision.value().candidates.size());
+    for (const auto& candidate : decision.value().candidates) {
+        candidateIds.push_back(candidate.document_id);
+    }
+
+    auto fetchedResult =
+        metadataRepo->batchGetDocumentsWithContentPreviewByIds(candidateIds, kSnippetChars);
+    if (!fetchedResult) {
+        spdlog::debug("[simeon-lexical] batch candidate hydration failed: {}",
+                      fetchedResult.error().message);
+        return std::nullopt;
+    }
+    auto& fetched = fetchedResult.value();
+
     yams::metadata::SearchResults direct;
     direct.query = query;
     direct.results.reserve(decision.value().candidates.size());
     for (const auto& candidate : decision.value().candidates) {
-        auto docResult = metadataRepo->getDocument(candidate.document_id);
-        if (!docResult || !docResult.value()) {
+        auto it = fetched.find(candidate.document_id);
+        if (it == fetched.end()) {
             continue;
         }
 
         yams::metadata::SearchResult row;
-        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-        row.document = *docResult.value();
+        row.document = it->second.first;
         row.score = -static_cast<double>(candidate.score);
-
-        auto contentResult = metadataRepo->getContent(candidate.document_id);
-        if (contentResult && contentResult.value()) {
-            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-            const auto& text = contentResult.value()->contentText;
-            constexpr size_t kSnippetChars = 240;
-            row.snippet = text.substr(0, std::min(kSnippetChars, text.size()));
-        }
+        row.snippet = it->second.second;
         direct.results.push_back(std::move(row));
     }
 

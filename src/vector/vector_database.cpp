@@ -540,6 +540,7 @@ public:
                 VectorSearchDiagnostics localDiagnostics;
                 auto& diagnostics =
                     params.diagnostics != nullptr ? *params.diagnostics : localDiagnostics;
+                diagnostics.searchSnippetOnly = params.search_snippet_only;
                 return documentStore->searchDocumentCandidatesWithDiagnostics(
                     query_embedding, params.k, params.similarity_threshold, params.candidate_hashes,
                     diagnostics);
@@ -573,12 +574,18 @@ public:
                     query_embedding, params.k, params.similarity_threshold, params.candidate_hashes,
                     diagnostics);
             }
-            if (params.diagnostics != nullptr) {
+            if (params.diagnostics != nullptr || params.search_snippet_only ||
+                params.deduplicate_by_document) {
                 if (auto* diagnosticStore = dynamic_cast<IDiagnosticVectorStore*>(backend_.get())) {
+                    VectorSearchDiagnostics localDiagnostics;
+                    auto& diagnostics =
+                        params.diagnostics != nullptr ? *params.diagnostics : localDiagnostics;
+                    diagnostics.searchSnippetOnly = params.search_snippet_only;
+                    diagnostics.deduplicateByDocument = params.deduplicate_by_document;
                     return diagnosticStore->searchSimilarWithDiagnostics(
                         query_embedding, params.k, params.similarity_threshold,
                         params.document_hash, params.candidate_hashes, params.metadata_filters,
-                        *params.diagnostics);
+                        diagnostics);
                 }
             }
             return backend_->searchSimilar(query_embedding, params.k, params.similarity_threshold,

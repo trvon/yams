@@ -3403,9 +3403,60 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 return detail::staticEmbeddingScores(*table, *repo, q, hashes);
             };
         }
+        auto* simeonLex = simeonLexical_.get();
         auto lexical = detail::applyLexicalDeepRerank(
             response.results, query, workingConfig,
-            [repo](const std::vector<std::string>& terms, const std::vector<std::string>& hashes) {
+            [repo, simeonLex, &query, &results = response.results,
+             arm = workingConfig.simeonBanditArm](const std::vector<std::string>& terms,
+                                                  const std::vector<std::string>& hashes)
+                -> Result<std::unordered_map<std::string, double>> {
+                // Prefer the in-RAM Simeon lexical index (reusing the cached query score vector
+                // from queryFullTextPipeline) to avoid SQLite FTS5's full posting-list scan in
+                // bm25ForDocuments. Fall back to FTS5 if Simeon is unavailable or any doc id is
+                // unpopulated.
+                if (simeonLex && simeonLex->ready() && !hashes.empty()) {
+                    std::vector<std::int64_t> docIds(hashes.size(), 0);
+                    std::vector<std::string> missingHashes;
+                    std::vector<std::size_t> missingIndices;
+                    for (std::size_t i = 0; i < hashes.size(); ++i) {
+                        if (i < results.size() && results[i].document.sha256Hash == hashes[i] &&
+                            results[i].document.id > 0) {
+                            docIds[i] = results[i].document.id;
+                        } else {
+                            missingHashes.push_back(hashes[i]);
+                            missingIndices.push_back(i);
+                        }
+                    }
+                    if (!missingHashes.empty()) {
+                        auto resolved = repo->batchGetDocumentsByHash(missingHashes);
+                        if (resolved) {
+                            const auto& docMap = resolved.value();
+                            for (std::size_t m = 0; m < missingHashes.size(); ++m) {
+                                if (auto it = docMap.find(missingHashes[m]);
+                                    it != docMap.end() && it->second.id > 0) {
+                                    docIds[missingIndices[m]] = it->second.id;
+                                }
+                            }
+                        }
+                    }
+                    const bool allResolved = std::all_of(docIds.begin(), docIds.end(),
+                                                         [](std::int64_t id) { return id > 0; });
+                    if (allResolved) {
+                        SimeonLexicalBackend::QuerySession session(*simeonLex, query, arm);
+                        auto scored = session.score(docIds);
+                        if (scored && scored.value().scores.size() == docIds.size()) {
+                            std::unordered_map<std::string, double> out;
+                            out.reserve(docIds.size());
+                            for (std::size_t i = 0; i < docIds.size(); ++i) {
+                                if (scored.value().scores[i] > 0.0f) {
+                                    out.emplace(hashes[i],
+                                                static_cast<double>(scored.value().scores[i]));
+                                }
+                            }
+                            return out;
+                        }
+                    }
+                }
                 return repo->bm25ForDocuments(terms, hashes);
             },
             semanticScorer);
