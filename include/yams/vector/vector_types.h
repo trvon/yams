@@ -189,6 +189,12 @@ struct VectorSearchDiagnostics {
     bool usedExactScan = false;
     bool usedCandidateIndexCache = false;
     bool collectVisitedDocumentHashes = false;
+    /// Input request hint: materialize only search-snippet fields (chunk_id, document_hash,
+    /// truncated content, level), skipping embedding blobs and metadata JSON.
+    bool searchSnippetOnly = false;
+    /// Input request hint: deduplicate unfiltered ANN selection by document_hash inside the
+    /// index so a single pass returns up to k unique documents.
+    bool deduplicateByDocument = false;
     bool rowsVisitedObserved = false;
     bool exactDistanceEvaluationsObserved = false;
     bool annCandidateBudgetObserved = false;
@@ -229,6 +235,8 @@ struct VectorSearchParams {
     std::map<std::string, std::string> metadata_filters;
     CandidateFilterMode candidate_filter_mode = CandidateFilterMode::BackendDefault;
     bool include_embeddings = false;
+    bool search_snippet_only = false;
+    bool deduplicate_by_document = false;
     VectorSearchDiagnostics* diagnostics = nullptr;
 };
 

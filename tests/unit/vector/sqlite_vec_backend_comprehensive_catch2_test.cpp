@@ -3497,3 +3497,55 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
         CHECK_FALSE(r.embedding.empty());
     }
 }
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend SPQ snippet projection and single-pass document dedup",
+                 "[vector][backend][spq][snippet_dedup][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 64;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 16;
+    config.simeon_pq_rerank_factor = 2;
+
+    SqliteVecBackend backend(config);
+    REQUIRE(backend.initialize(createTempDbPath()).has_value());
+    REQUIRE(backend.createTables(64).has_value());
+
+    // 40 unique docs x 3 chunks each = 120 vectors (> 16 centroids so PQ trains).
+    std::vector<VectorRecord> batch;
+    batch.reserve(120);
+    const std::string longContent(600, 'z');
+    for (int d = 0; d < 40; ++d) {
+        for (int c = 0; c < 3; ++c) {
+            auto rec = createVectorRecord("sd_" + std::to_string(d) + "_" + std::to_string(c),
+                                          createEmbedding(64, float(d * 5 + c + 1)));
+            rec.document_hash = "doc_sd_" + std::to_string(d);
+            rec.content = longContent;
+            rec.metadata["path"] = "/docs/" + std::to_string(d);
+            batch.push_back(std::move(rec));
+        }
+    }
+    REQUIRE(backend.insertVectorsBatch(batch).has_value());
+    REQUIRE(backend.buildIndex().has_value());
+
+    auto query = createEmbedding(64, 1.0f);
+    VectorSearchDiagnostics diag;
+    diag.searchSnippetOnly = true;
+    diag.deduplicateByDocument = true;
+
+    auto res = backend.searchSimilarWithDiagnostics(query, 20, -1.0f, std::nullopt, {}, {}, diag);
+    REQUIRE(res.has_value());
+    REQUIRE(res.value().size() == 20);
+
+    std::unordered_set<std::string> seenDocs;
+    for (const auto& r : res.value()) {
+        CHECK(seenDocs.insert(r.document_hash).second);
+        CHECK(r.embedding.empty());
+        CHECK(r.metadata.empty());
+        CHECK(r.content.size() == 204);
+        CHECK_FALSE(r.chunk_id.empty());
+    }
+}
