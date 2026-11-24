@@ -601,6 +601,11 @@ struct SearchEngineConfig {
     /// weights. These switches define which implementation runs and are not tuning outputs.
     void applyExecutionPolicyFrom(const SearchEngineConfig& source) {
         applyTopologyPolicyFrom(source);
+        fusionStrategy = source.fusionStrategy;
+        if (source.rerankTopK != SearchEngineConfig{}.rerankTopK) {
+            rerankTopK = source.rerankTopK;
+        }
+        rerankSnippetMaxChars = source.rerankSnippetMaxChars;
     }
 };
 

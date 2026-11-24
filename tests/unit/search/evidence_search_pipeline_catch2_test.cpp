@@ -268,3 +268,28 @@ TEST_CASE("EvidenceSearchPipeline ConvexMinMax preserves score margins and handl
     CHECK(run.value().results[1].document.sha256Hash == "doc-vec-top");
     CHECK(run.value().results[2].document.sha256Hash == "doc-tie");
 }
+
+TEST_CASE("SearchEngineConfig::applyExecutionPolicyFrom preserves fusion and rerank settings",
+          "[search][config]") {
+    SearchEngineConfig tuned;
+    tuned.fusionStrategy = SearchEngineConfig::FusionStrategy::Rrf;
+    tuned.rerankTopK = 8;
+    tuned.rerankSnippetMaxChars = 256;
+
+    SearchEngineConfig configured;
+    configured.fusionStrategy = SearchEngineConfig::FusionStrategy::ConvexMinMax;
+    configured.rerankTopK = 20;
+    configured.rerankSnippetMaxChars = 512;
+
+    tuned.applyExecutionPolicyFrom(configured);
+    CHECK(tuned.fusionStrategy == SearchEngineConfig::FusionStrategy::ConvexMinMax);
+    CHECK(tuned.rerankTopK == 20);
+    CHECK(tuned.rerankSnippetMaxChars == 512);
+
+    // Default rerankTopK in configured must not clobber a tuned preset rerankTopK.
+    SearchEngineConfig tunedPreset;
+    tunedPreset.rerankTopK = 8;
+    SearchEngineConfig defaultConfigured;
+    tunedPreset.applyExecutionPolicyFrom(defaultConfigured);
+    CHECK(tunedPreset.rerankTopK == 8);
+}
