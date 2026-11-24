@@ -1073,6 +1073,12 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.vector_weight"); it != kv.end()) {
                 policy.vectorWeight = parseFloat(it->second);
             }
+            if (auto it = kv.find("search.lexical_rerank_depth"); it != kv.end()) {
+                policy.lexicalRerankDepth = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.lexical_rerank_weight"); it != kv.end()) {
+                policy.lexicalRerankWeight = parseFloat(it->second);
+            }
         }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for topology routing policy: {}", e.what());

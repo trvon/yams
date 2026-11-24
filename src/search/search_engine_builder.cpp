@@ -153,6 +153,14 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
             cfg.vectorWeight = *options.config.vectorWeightOverride;
             cfg.vectorWeightOverride = options.config.vectorWeightOverride;
         }
+        if (options.config.lexicalRerankDepthOverride.has_value()) {
+            cfg.lexicalRerankDepth = *options.config.lexicalRerankDepthOverride;
+            cfg.lexicalRerankDepthOverride = options.config.lexicalRerankDepthOverride;
+        }
+        if (options.config.lexicalRerankWeightOverride.has_value()) {
+            cfg.lexicalRerankWeight = *options.config.lexicalRerankWeightOverride;
+            cfg.lexicalRerankWeightOverride = options.config.lexicalRerankWeightOverride;
+        }
         if (!options.tunerStatePath.empty()) {
             auto loaded = runtimeTuner->loadAdaptiveState(options.tunerStatePath);
             if (!loaded) {

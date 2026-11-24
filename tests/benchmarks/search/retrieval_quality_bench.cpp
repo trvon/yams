@@ -6601,12 +6601,18 @@ struct BenchFixture {
                         yams::config::getenv_optional("YAMS_BENCH_LEXICAL_FLOOR_TOP_N");
                     const auto benchVectorWeight =
                         yams::config::getenv_optional("YAMS_BENCH_VECTOR_WEIGHT");
+                    const auto benchLexicalRerankDepth =
+                        yams::config::getenv_optional("YAMS_BENCH_LEXICAL_RERANK_DEPTH");
+                    const auto benchLexicalRerankWeight =
+                        yams::config::getenv_optional("YAMS_BENCH_LEXICAL_RERANK_WEIGHT");
                     if (envSet(simeonOuterMaxSimEnv) ||
                         (benchFusionStrategy && !benchFusionStrategy->empty()) ||
                         (benchRerankTopK && !benchRerankTopK->empty()) ||
                         (benchRerankSnippetChars && !benchRerankSnippetChars->empty()) ||
                         (benchLexicalFloorTopN && !benchLexicalFloorTopN->empty()) ||
-                        (benchVectorWeight && !benchVectorWeight->empty())) {
+                        (benchVectorWeight && !benchVectorWeight->empty()) ||
+                        (benchLexicalRerankDepth && !benchLexicalRerankDepth->empty()) ||
+                        (benchLexicalRerankWeight && !benchLexicalRerankWeight->empty())) {
                         configOut << "\n[search]\n";
                         if (envSet(simeonOuterMaxSimEnv)) {
                             configOut
@@ -6629,6 +6635,14 @@ struct BenchFixture {
                         }
                         if (benchVectorWeight && !benchVectorWeight->empty()) {
                             configOut << "vector_weight = " << *benchVectorWeight << "\n";
+                        }
+                        if (benchLexicalRerankDepth && !benchLexicalRerankDepth->empty()) {
+                            configOut << "lexical_rerank_depth = " << *benchLexicalRerankDepth
+                                      << "\n";
+                        }
+                        if (benchLexicalRerankWeight && !benchLexicalRerankWeight->empty()) {
+                            configOut << "lexical_rerank_weight = " << *benchLexicalRerankWeight
+                                      << "\n";
                         }
                     }
                     configOut << "\n[vector_database]\n";

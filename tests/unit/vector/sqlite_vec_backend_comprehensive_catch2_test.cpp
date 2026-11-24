@@ -1379,6 +1379,52 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
     CHECK((diagnostics.returnedRows == routedDocuments.size()));
 }
 
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend SimeonPqAdc batches multi-chunk final materialization",
+                 "[vector][backend][search][spq][batch][catch2]") {
+    skipIfNeeded();
+
+    constexpr size_t kDim = 64;
+    constexpr int kNumVectors = 160; // > 2 * kRerankBatchSize (64) to span multiple batches
+    constexpr size_t kTopK = 80;     // spans 2 full 64-rowid materialization batches
+    SqliteVecBackend::Config config;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.embedding_dim = kDim;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 16;
+    config.simeon_pq_rerank_factor = 2;
+    SqliteVecBackend backend(config);
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(kDim).has_value()));
+
+    std::vector<std::vector<float>> embeddings;
+    embeddings.reserve(kNumVectors);
+    for (int i = 0; i < kNumVectors; ++i) {
+        embeddings.push_back(createEmbedding(kDim, static_cast<float>(i + 1)));
+        auto rec = createVectorRecord("spq_batch_" + std::to_string(i), embeddings.back(),
+                                      "batch_doc_" + std::to_string(i));
+        rec.content = "payload_" + std::to_string(i);
+        rec.metadata["idx"] = std::to_string(i);
+        REQUIRE((backend.insertVector(rec).has_value()));
+    }
+    REQUIRE((backend.buildIndex().has_value()));
+
+    VectorSearchDiagnostics diagnostics;
+    auto results = backend.searchSimilarWithDiagnostics(embeddings[42], kTopK, -1.0F, std::nullopt,
+                                                        {}, {}, diagnostics);
+    REQUIRE((results.has_value()));
+    REQUIRE((results.value().size() == kTopK));
+    CHECK((results.value().front().chunk_id == "chunk_spq_batch_42"));
+    CHECK((results.value().front().content == "payload_42"));
+    CHECK((results.value().front().metadata.at("idx") == "42"));
+    CHECK((diagnostics.materializedRows == kTopK));
+    CHECK((diagnostics.returnedRows == kTopK));
+    for (size_t i = 1; i < results.value().size(); ++i) {
+        CHECK((results.value()[i - 1].relevance_score >= results.value()[i].relevance_score));
+        CHECK_FALSE(results.value()[i].content.empty());
+    }
+}
+
 TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend searchSimilar with metadata_filters",
                  "[vector][backend][search][filter][catch2]") {
     skipIfNeeded();

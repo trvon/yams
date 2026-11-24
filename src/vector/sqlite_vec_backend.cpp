@@ -478,6 +478,19 @@ constexpr const char* kSelectRerankBatchByRowid =
     "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
     "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
+constexpr const char* kSelectFullBatchByRowid = R"sql(
+SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
+       start_offset, end_offset, metadata,
+       model_id, model_version, embedding_version, content_hash,
+       created_at, embedded_at, is_stale, level,
+       source_chunk_ids, parent_document_hash, child_document_hashes
+FROM vectors WHERE rowid IN (
+?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+)sql";
+
 constexpr const char* kSelectByDocumentHash = R"sql(
 SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
@@ -3329,6 +3342,53 @@ private:
         return std::nullopt;
     }
 
+    // Batch-fetch full VectorRecords by rowid in sorted 64-rowid chunks (assumes lock held).
+    std::unordered_map<int64_t, VectorRecord>
+    getVectorsByRowidsUnlocked(const std::vector<int64_t>& rowids) const {
+        std::unordered_map<int64_t, VectorRecord> results;
+        if (rowids.empty()) {
+            return results;
+        }
+        results.reserve(rowids.size());
+
+        std::vector<int64_t> sortedRowids = rowids;
+        std::sort(sortedRowids.begin(), sortedRowids.end());
+        sortedRowids.erase(std::unique(sortedRowids.begin(), sortedRowids.end()),
+                           sortedRowids.end());
+
+        std::lock_guard stmt_lock(stmt_mutex_);
+        if (sortedRowids.size() > 1 && stmt_select_full_batch_by_rowid_ != nullptr) {
+            for (std::size_t base = 0; base < sortedRowids.size(); base += kRerankBatchSize) {
+                const std::size_t end = std::min(sortedRowids.size(), base + kRerankBatchSize);
+                sqlite3_reset(stmt_select_full_batch_by_rowid_);
+                StmtResetGuard guard(stmt_select_full_batch_by_rowid_);
+                for (std::size_t slot = 0; slot < kRerankBatchSize; ++slot) {
+                    const int64_t bindRowid = (base + slot < end) ? sortedRowids[base + slot] : -1;
+                    sqlite3_bind_int64(stmt_select_full_batch_by_rowid_, static_cast<int>(slot + 1),
+                                       bindRowid);
+                }
+                while (sqlite3_step(stmt_select_full_batch_by_rowid_) == SQLITE_ROW) {
+                    const int64_t rowid = sqlite3_column_int64(stmt_select_full_batch_by_rowid_, 0);
+                    results.emplace(rowid, recordFromStatement(stmt_select_full_batch_by_rowid_));
+                }
+            }
+            return results;
+        }
+
+        if (!stmt_select_by_rowid_) {
+            return results;
+        }
+        for (const int64_t rowid : sortedRowids) {
+            sqlite3_reset(stmt_select_by_rowid_);
+            StmtResetGuard guard(stmt_select_by_rowid_);
+            sqlite3_bind_int64(stmt_select_by_rowid_, 1, rowid);
+            if (sqlite3_step(stmt_select_by_rowid_) == SQLITE_ROW) {
+                results.emplace(rowid, recordFromStatement(stmt_select_by_rowid_));
+            }
+        }
+        return results;
+    }
+
     // Build VectorRecord from statement (current row)
     VectorRecord recordFromStatement(sqlite3_stmt* stmt) const {
         VectorRecord record;
@@ -3405,6 +3465,7 @@ private:
         prepare(kSelectByRowid, stmt_select_by_rowid_);
         prepare(kSelectRerankByRowid, stmt_select_rerank_by_rowid_);
         prepare(kSelectRerankBatchByRowid, stmt_select_rerank_batch_by_rowid_);
+        prepare(kSelectFullBatchByRowid, stmt_select_full_batch_by_rowid_);
         prepare(kSelectByDocumentHash, stmt_select_by_doc_);
         prepare(kDeleteByChunkId, stmt_delete_by_chunk_id_);
         prepare(kDeleteByDocumentHash, stmt_delete_by_doc_);
@@ -3426,6 +3487,8 @@ private:
             sqlite3_finalize(stmt_select_rerank_by_rowid_);
         if (stmt_select_rerank_batch_by_rowid_)
             sqlite3_finalize(stmt_select_rerank_batch_by_rowid_);
+        if (stmt_select_full_batch_by_rowid_)
+            sqlite3_finalize(stmt_select_full_batch_by_rowid_);
         if (stmt_select_by_doc_)
             sqlite3_finalize(stmt_select_by_doc_);
         if (stmt_delete_by_chunk_id_)
@@ -3444,6 +3507,7 @@ private:
         stmt_select_by_rowid_ = nullptr;
         stmt_select_rerank_by_rowid_ = nullptr;
         stmt_select_rerank_batch_by_rowid_ = nullptr;
+        stmt_select_full_batch_by_rowid_ = nullptr;
         stmt_select_by_doc_ = nullptr;
         stmt_delete_by_chunk_id_ = nullptr;
         stmt_delete_by_doc_ = nullptr;
@@ -4700,25 +4764,32 @@ private:
                 candidates.resize(k);
             }
 
+            std::vector<int64_t> winnerRowids;
+            winnerRowids.reserve(candidates.size());
+            for (const auto& cand : candidates) {
+                winnerRowids.push_back(cand.rowid);
+            }
+            const auto materializationStart = std::chrono::steady_clock::now();
+            auto fetchedRecords = getVectorsByRowidsUnlocked(winnerRowids);
+            if (diagnostics != nullptr) {
+                diagnostics->resultMaterializationNanoseconds += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - materializationStart)
+                        .count());
+            }
+
             std::vector<VectorRecord> records;
             records.reserve(candidates.size());
             for (const auto& cand : candidates) {
-                const auto materializationStart = std::chrono::steady_clock::now();
-                auto record_opt = getVectorByRowidUnlocked(cand.rowid);
-                if (diagnostics != nullptr) {
-                    diagnostics->resultMaterializationNanoseconds += static_cast<std::uint64_t>(
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            std::chrono::steady_clock::now() - materializationStart)
-                            .count());
-                }
-                if (!record_opt) {
+                auto found = fetchedRecords.find(cand.rowid);
+                if (found == fetchedRecords.end()) {
                     continue;
                 }
                 if (diagnostics != nullptr) {
                     ++diagnostics->materializedRows;
                 }
-                record_opt->relevance_score = cand.similarity;
-                records.push_back(std::move(*record_opt));
+                found->second.relevance_score = cand.similarity;
+                records.push_back(std::move(found->second));
             }
             YAMS_DCHECK(records.size() <= k, "SPQ search must not exceed requested top-k");
             if (diagnostics != nullptr) {
@@ -4727,29 +4798,36 @@ private:
             return records;
         }
 
+        std::vector<int64_t> targetRowids;
+        targetRowids.reserve(scores.size());
+        for (const auto& [_, idx] : scores) {
+            targetRowids.push_back(static_cast<int64_t>(it->second->rowids[idx]));
+        }
+        const auto materializationStart = std::chrono::steady_clock::now();
+        auto fetchedRecords = getVectorsByRowidsUnlocked(targetRowids);
+        if (diagnostics != nullptr) {
+            diagnostics->resultMaterializationNanoseconds += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - materializationStart)
+                    .count());
+        }
+
         std::vector<VectorRecord> records;
         records.reserve(scores.size());
         for (const auto& [approxScore, idx] : scores) {
-            const auto materializationStart = std::chrono::steady_clock::now();
-            auto record_opt =
-                getVectorByRowidUnlocked(static_cast<int64_t>(it->second->rowids[idx]));
-            if (diagnostics != nullptr) {
-                diagnostics->resultMaterializationNanoseconds += static_cast<std::uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now() - materializationStart)
-                        .count());
-            }
-            if (!record_opt) {
+            const int64_t rowid = static_cast<int64_t>(it->second->rowids[idx]);
+            auto found = fetchedRecords.find(rowid);
+            if (found == fetchedRecords.end()) {
                 continue;
             }
             if (diagnostics != nullptr) {
                 ++diagnostics->materializedRows;
             }
             float similarity = approxScore;
-            if (!record_opt->embedding.empty()) {
+            if (!found->second.embedding.empty()) {
                 const auto rerankStart = std::chrono::steady_clock::now();
-                similarity = static_cast<float>(
-                    vector_utils::computeCosineSimilarity(query_embedding, record_opt->embedding));
+                similarity = static_cast<float>(vector_utils::computeCosineSimilarity(
+                    query_embedding, found->second.embedding));
                 if (diagnostics != nullptr) {
                     ++diagnostics->exactDistanceEvaluations;
                     diagnostics->exactRerankNanoseconds += static_cast<std::uint64_t>(
@@ -4761,8 +4839,8 @@ private:
             if (similarity < similarity_threshold) {
                 continue;
             }
-            record_opt->relevance_score = similarity;
-            records.push_back(std::move(*record_opt));
+            found->second.relevance_score = similarity;
+            records.push_back(std::move(found->second));
         }
         std::sort(records.begin(), records.end(), [](const auto& a, const auto& b) {
             if (a.relevance_score != b.relevance_score) {
@@ -5227,27 +5305,10 @@ ORDER BY rowid
                               -1, SQLITE_TRANSIENT);
         }
 
-        std::vector<VectorRecord> records;
-        records.reserve(k);
+        std::vector<int64_t> nodeIds;
+        nodeIds.reserve(k);
         while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-            const auto node_id = sqlite3_column_int64(stmt, 0);
-            auto record_opt = getVectorByRowidUnlocked(node_id);
-            if (!record_opt) {
-                continue;
-            }
-
-            float similarity = static_cast<float>(
-                vector_utils::computeCosineSimilarity(query_embedding, record_opt->embedding));
-            if (similarity < similarity_threshold) {
-                continue;
-            }
-
-            record_opt->relevance_score = similarity;
-            records.push_back(std::move(*record_opt));
-            if (records.size() >= k) {
-                rc = SQLITE_DONE;
-                break;
-            }
+            nodeIds.push_back(sqlite3_column_int64(stmt, 0));
         }
         sqlite3_finalize(stmt);
 
@@ -5257,6 +5318,28 @@ ORDER BY rowid
             return Error{ErrorCode::DatabaseError,
                          "vec0 search iteration failed rc=" + std::to_string(rc) + ": " +
                              std::string(sqlite3_errmsg(db_))};
+        }
+
+        auto fetchedRecords = getVectorsByRowidsUnlocked(nodeIds);
+        std::vector<VectorRecord> records;
+        records.reserve(std::min(k, nodeIds.size()));
+        for (const int64_t node_id : nodeIds) {
+            auto found = fetchedRecords.find(node_id);
+            if (found == fetchedRecords.end()) {
+                continue;
+            }
+
+            float similarity = static_cast<float>(
+                vector_utils::computeCosineSimilarity(query_embedding, found->second.embedding));
+            if (similarity < similarity_threshold) {
+                continue;
+            }
+
+            found->second.relevance_score = similarity;
+            records.push_back(std::move(found->second));
+            if (records.size() >= k) {
+                break;
+            }
         }
 
         // Unit L2 order and cosine order agree up to float rounding in vec0's distance; order
@@ -5291,6 +5374,7 @@ ORDER BY rowid
     sqlite3_stmt* stmt_select_by_rowid_ = nullptr;
     sqlite3_stmt* stmt_select_rerank_by_rowid_ = nullptr;
     sqlite3_stmt* stmt_select_rerank_batch_by_rowid_ = nullptr;
+    sqlite3_stmt* stmt_select_full_batch_by_rowid_ = nullptr;
     sqlite3_stmt* stmt_select_by_doc_ = nullptr;
     sqlite3_stmt* stmt_delete_by_chunk_id_ = nullptr;
     sqlite3_stmt* stmt_delete_by_doc_ = nullptr;
