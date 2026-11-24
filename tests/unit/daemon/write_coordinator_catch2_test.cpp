@@ -1715,3 +1715,25 @@ TEST_CASE("WriteCoordinator: graph ops without a KG store fail with a KG error",
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().message == "Knowledge graph store unavailable");
 }
+
+TEST_CASE("WriteCoordinator: pressureAdjustedBatchLimit scales down under pressure and drains on "
+          "stop",
+          "[unit][daemon][write-coordinator][resource-governor]") {
+    using yams::daemon::ResourcePressureLevel;
+    using yams::daemon::WriteCoordinator;
+
+    CHECK(WriteCoordinator::pressureAdjustedBatchLimit(64, ResourcePressureLevel::Normal, false) ==
+          64);
+    CHECK(WriteCoordinator::pressureAdjustedBatchLimit(64, ResourcePressureLevel::Warning, false) ==
+          64);
+    CHECK(WriteCoordinator::pressureAdjustedBatchLimit(64, ResourcePressureLevel::Critical,
+                                                       false) == 16);
+    CHECK(WriteCoordinator::pressureAdjustedBatchLimit(64, ResourcePressureLevel::Emergency,
+                                                       false) == 1);
+    // Forward progress floor even for small base limits.
+    CHECK(WriteCoordinator::pressureAdjustedBatchLimit(2, ResourcePressureLevel::Critical, false) ==
+          1);
+    // Shutdown drain keeps full batch speed.
+    CHECK(WriteCoordinator::pressureAdjustedBatchLimit(64, ResourcePressureLevel::Emergency,
+                                                       true) == 64);
+}

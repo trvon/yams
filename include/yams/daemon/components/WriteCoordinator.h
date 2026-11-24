@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 #include <future>
 #include <memory>
@@ -20,6 +21,7 @@
 
 #include <yams/core/types.h>
 #include <yams/daemon/components/knowledge_graph_completion.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
@@ -415,6 +417,12 @@ public:
     std::size_t inFlight() const { return inFlight_.load(); }
     Stats getStats() const;
 
+    /// Compute the dequeue batch limit under current ResourceGovernor pressure.
+    /// Always preserves forward progress (>= 1) and full drain speed when stopping.
+    [[nodiscard]] static std::size_t pressureAdjustedBatchLimit(std::size_t requestedMax,
+                                                                ResourcePressureLevel level,
+                                                                bool stopping) noexcept;
+
 #if defined(YAMS_TESTING)
     // Runs on the writer right before the KG batch commits; an error is treated exactly like a
     // failed commit (the batch rolls back). Install before work is enqueued.
@@ -504,7 +512,7 @@ private:
 
     mutable std::mutex queueMutex_;
     mutable std::condition_variable drainCv_;
-    std::vector<std::unique_ptr<WriteBatch>> pendingBatches_;
+    std::deque<std::unique_ptr<WriteBatch>> pendingBatches_;
     std::vector<std::weak_ptr<EmbeddingAcknowledgementState>> embeddingAcknowledgements_;
     std::optional<Error> lastApplyError_;
 
