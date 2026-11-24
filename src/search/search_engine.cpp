@@ -12,6 +12,7 @@
 #include "search_lexical_pipeline_internal.h"
 #include "search_vector_pipeline_internal.h"
 #include "search_vector_stage.h"
+#include <yams/core/assert.hpp>
 #include <yams/core/cpp23_features.hpp>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/crypto/hasher.h>
@@ -2954,9 +2955,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
         response.results = std::move(fused.value());
     }
-    if (!response.results.empty()) {
-        postFusionSnapshot = response.results;
-    }
+    const std::size_t postFusionResultCount = response.results.size();
+    std::vector<std::string> postFusionAllDocIds = collectRankedResultDocIds(response.results);
+    YAMS_DCHECK(postFusionAllDocIds.size() == postFusionResultCount,
+                "post-fusion doc ID count must match result count");
+    YAMS_PLOT("search.post_fusion_results", postFusionResultCount);
     if (!topologyMedoidHashes.empty() && workingConfig.topologyMedoidBoost > 0.0f &&
         !response.results.empty()) {
         bool needsSort = false;
@@ -2977,6 +2980,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
     if (stageTraceEnabled) {
         postFusionSnapshot = response.results;
+        postFusionAllDocIds = collectRankedResultDocIds(postFusionSnapshot);
         std::vector<ComponentResult> graphlessComponentResults;
         graphlessComponentResults.reserve(allComponentResults.size());
         for (const auto& comp : allComponentResults) {
@@ -3504,7 +3508,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
     response.debugStats["compact_pre_fusion_count"] = std::to_string(preFusionDocIds.size());
     response.debugStats["compact_post_fusion_count"] = std::to_string(
-        postFusionSnapshot.empty() ? response.results.size() : postFusionSnapshot.size());
+        postFusionResultCount == 0 ? response.results.size() : postFusionResultCount);
     response.debugStats["compact_rerank_window_count"] = std::to_string(compactRerankWindow);
     response.debugStats["compact_final_count"] = std::to_string(response.results.size());
     response.debugStats["compact_effective_vector_max_results"] =
@@ -3997,8 +4001,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     };
     observability.applyComponentStatus(response);
 
-    const std::vector<std::string> postFusionAllDocIds =
-        collectRankedResultDocIds(postFusionSnapshot);
     const std::vector<std::string> fusionDroppedDocIds =
         setDifferenceIds(preFusionDocIds, postFusionAllDocIds);
     fusionDroppedDocCount = fusionDroppedDocIds.size();
