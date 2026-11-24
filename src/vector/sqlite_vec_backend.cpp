@@ -470,6 +470,14 @@ FROM vectors WHERE rowid = ?
 constexpr const char* kSelectRerankByRowid =
     "SELECT chunk_id, document_hash, embedding FROM vectors WHERE rowid = ?";
 
+constexpr std::size_t kRerankBatchSize = 64;
+constexpr const char* kSelectRerankBatchByRowid =
+    "SELECT rowid, chunk_id, document_hash, embedding FROM vectors WHERE rowid IN ("
+    "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
+    "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
+    "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
+    "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+
 constexpr const char* kSelectByDocumentHash = R"sql(
 SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
@@ -3396,6 +3404,7 @@ private:
         prepare(kSelectByChunkId, stmt_select_by_chunk_id_);
         prepare(kSelectByRowid, stmt_select_by_rowid_);
         prepare(kSelectRerankByRowid, stmt_select_rerank_by_rowid_);
+        prepare(kSelectRerankBatchByRowid, stmt_select_rerank_batch_by_rowid_);
         prepare(kSelectByDocumentHash, stmt_select_by_doc_);
         prepare(kDeleteByChunkId, stmt_delete_by_chunk_id_);
         prepare(kDeleteByDocumentHash, stmt_delete_by_doc_);
@@ -3415,6 +3424,8 @@ private:
             sqlite3_finalize(stmt_select_by_rowid_);
         if (stmt_select_rerank_by_rowid_)
             sqlite3_finalize(stmt_select_rerank_by_rowid_);
+        if (stmt_select_rerank_batch_by_rowid_)
+            sqlite3_finalize(stmt_select_rerank_batch_by_rowid_);
         if (stmt_select_by_doc_)
             sqlite3_finalize(stmt_select_by_doc_);
         if (stmt_delete_by_chunk_id_)
@@ -3432,6 +3443,7 @@ private:
         stmt_select_by_chunk_id_ = nullptr;
         stmt_select_by_rowid_ = nullptr;
         stmt_select_rerank_by_rowid_ = nullptr;
+        stmt_select_rerank_batch_by_rowid_ = nullptr;
         stmt_select_by_doc_ = nullptr;
         stmt_delete_by_chunk_id_ = nullptr;
         stmt_delete_by_doc_ = nullptr;
@@ -4490,14 +4502,130 @@ private:
                 std::lock_guard stmt_lock(stmt_mutex_);
                 std::vector<float> embeddingScratch;
                 embeddingScratch.reserve(query_embedding.size());
-                for (const auto& [approxScore, idx] : scores) {
-                    const int64_t rowid = static_cast<int64_t>(it->second->rowids[idx]);
-                    const auto fetchStart = std::chrono::steady_clock::now();
-                    sqlite3_reset(stmt_select_rerank_by_rowid_);
-                    StmtResetGuard guard(stmt_select_rerank_by_rowid_);
-                    sqlite3_bind_int64(stmt_select_rerank_by_rowid_, 1, rowid);
-                    const bool found = (sqlite3_step(stmt_select_rerank_by_rowid_) == SQLITE_ROW);
-                    if (!found) {
+
+                if (stmt_select_rerank_batch_by_rowid_ != nullptr) {
+                    std::vector<std::pair<int64_t, float>> orderedRowids;
+                    orderedRowids.reserve(scores.size());
+                    for (const auto& [approxScore, idx] : scores) {
+                        orderedRowids.emplace_back(static_cast<int64_t>(it->second->rowids[idx]),
+                                                   approxScore);
+                    }
+                    std::sort(orderedRowids.begin(), orderedRowids.end(),
+                              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+                    for (std::size_t base = 0; base < orderedRowids.size();
+                         base += kRerankBatchSize) {
+                        const std::size_t end =
+                            std::min(orderedRowids.size(), base + kRerankBatchSize);
+                        const auto fetchStart = std::chrono::steady_clock::now();
+                        sqlite3_reset(stmt_select_rerank_batch_by_rowid_);
+                        StmtResetGuard guard(stmt_select_rerank_batch_by_rowid_);
+                        for (std::size_t slot = 0; slot < kRerankBatchSize; ++slot) {
+                            const int64_t bindRowid =
+                                (base + slot < end) ? orderedRowids[base + slot].first : -1;
+                            sqlite3_bind_int64(stmt_select_rerank_batch_by_rowid_,
+                                               static_cast<int>(slot + 1), bindRowid);
+                        }
+
+                        std::uint64_t batchExactRerankNs = 0;
+                        while (sqlite3_step(stmt_select_rerank_batch_by_rowid_) == SQLITE_ROW) {
+                            const int64_t rowid =
+                                sqlite3_column_int64(stmt_select_rerank_batch_by_rowid_, 0);
+                            const void* blob =
+                                sqlite3_column_blob(stmt_select_rerank_batch_by_rowid_, 3);
+                            const int blobSize =
+                                sqlite3_column_bytes(stmt_select_rerank_batch_by_rowid_, 3);
+                            const bool hasEmbedding = (blob != nullptr && blobSize > 0);
+                            float similarity = 0.0f;
+                            if (hasEmbedding) {
+                                const std::size_t numFloats =
+                                    static_cast<std::size_t>(blobSize) / sizeof(float);
+                                embeddingScratch.resize(numFloats);
+                                std::memcpy(embeddingScratch.data(), blob,
+                                            static_cast<std::size_t>(blobSize));
+                                const auto rerankStart = std::chrono::steady_clock::now();
+                                similarity =
+                                    static_cast<float>(vector_utils::computeCosineSimilarity(
+                                        query_embedding, embeddingScratch));
+                                const auto rerankNs = static_cast<std::uint64_t>(
+                                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now() - rerankStart)
+                                        .count());
+                                batchExactRerankNs += rerankNs;
+                                if (diagnostics != nullptr) {
+                                    ++diagnostics->exactDistanceEvaluations;
+                                    diagnostics->exactRerankNanoseconds += rerankNs;
+                                }
+                            } else {
+                                auto foundPair = std::lower_bound(
+                                    orderedRowids.begin() + static_cast<std::ptrdiff_t>(base),
+                                    orderedRowids.begin() + static_cast<std::ptrdiff_t>(end), rowid,
+                                    [](const auto& entry, int64_t target) {
+                                        return entry.first < target;
+                                    });
+                                if (foundPair !=
+                                        orderedRowids.begin() + static_cast<std::ptrdiff_t>(end) &&
+                                    foundPair->first == rowid) {
+                                    similarity = foundPair->second;
+                                }
+                            }
+                            if (similarity < similarity_threshold) {
+                                continue;
+                            }
+                            const char* chunkIdTxt = reinterpret_cast<const char*>(
+                                sqlite3_column_text(stmt_select_rerank_batch_by_rowid_, 1));
+                            const char* docHashTxt = reinterpret_cast<const char*>(
+                                sqlite3_column_text(stmt_select_rerank_batch_by_rowid_, 2));
+                            candidates.push_back(RerankCandidate{rowid, similarity,
+                                                                 chunkIdTxt ? chunkIdTxt : "",
+                                                                 docHashTxt ? docHashTxt : ""});
+                        }
+                        if (diagnostics != nullptr) {
+                            const auto batchTotalNs = static_cast<std::uint64_t>(
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now() - fetchStart)
+                                    .count());
+                            diagnostics->resultMaterializationNanoseconds +=
+                                batchTotalNs > batchExactRerankNs
+                                    ? (batchTotalNs - batchExactRerankNs)
+                                    : 0;
+                        }
+                    }
+                } else {
+                    for (const auto& [approxScore, idx] : scores) {
+                        const int64_t rowid = static_cast<int64_t>(it->second->rowids[idx]);
+                        const auto fetchStart = std::chrono::steady_clock::now();
+                        sqlite3_reset(stmt_select_rerank_by_rowid_);
+                        StmtResetGuard guard(stmt_select_rerank_by_rowid_);
+                        sqlite3_bind_int64(stmt_select_rerank_by_rowid_, 1, rowid);
+                        const bool found =
+                            (sqlite3_step(stmt_select_rerank_by_rowid_) == SQLITE_ROW);
+                        if (!found) {
+                            if (diagnostics != nullptr) {
+                                diagnostics->resultMaterializationNanoseconds +=
+                                    static_cast<std::uint64_t>(
+                                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            std::chrono::steady_clock::now() - fetchStart)
+                                            .count());
+                            }
+                            continue;
+                        }
+                        const char* chunkIdTxt = reinterpret_cast<const char*>(
+                            sqlite3_column_text(stmt_select_rerank_by_rowid_, 0));
+                        const char* docHashTxt = reinterpret_cast<const char*>(
+                            sqlite3_column_text(stmt_select_rerank_by_rowid_, 1));
+                        const void* blob = sqlite3_column_blob(stmt_select_rerank_by_rowid_, 2);
+                        const int blobSize = sqlite3_column_bytes(stmt_select_rerank_by_rowid_, 2);
+                        std::string chunkId = chunkIdTxt ? chunkIdTxt : "";
+                        std::string docHash = docHashTxt ? docHashTxt : "";
+                        const bool hasEmbedding = (blob != nullptr && blobSize > 0);
+                        if (hasEmbedding) {
+                            const std::size_t numFloats =
+                                static_cast<std::size_t>(blobSize) / sizeof(float);
+                            embeddingScratch.resize(numFloats);
+                            std::memcpy(embeddingScratch.data(), blob,
+                                        static_cast<std::size_t>(blobSize));
+                        }
                         if (diagnostics != nullptr) {
                             diagnostics->resultMaterializationNanoseconds +=
                                 static_cast<std::uint64_t>(
@@ -4505,49 +4633,26 @@ private:
                                         std::chrono::steady_clock::now() - fetchStart)
                                         .count());
                         }
-                        continue;
-                    }
-                    const char* chunkIdTxt = reinterpret_cast<const char*>(
-                        sqlite3_column_text(stmt_select_rerank_by_rowid_, 0));
-                    const char* docHashTxt = reinterpret_cast<const char*>(
-                        sqlite3_column_text(stmt_select_rerank_by_rowid_, 1));
-                    const void* blob = sqlite3_column_blob(stmt_select_rerank_by_rowid_, 2);
-                    const int blobSize = sqlite3_column_bytes(stmt_select_rerank_by_rowid_, 2);
-                    std::string chunkId = chunkIdTxt ? chunkIdTxt : "";
-                    std::string docHash = docHashTxt ? docHashTxt : "";
-                    const bool hasEmbedding = (blob != nullptr && blobSize > 0);
-                    if (hasEmbedding) {
-                        const std::size_t numFloats =
-                            static_cast<std::size_t>(blobSize) / sizeof(float);
-                        embeddingScratch.resize(numFloats);
-                        std::memcpy(embeddingScratch.data(), blob,
-                                    static_cast<std::size_t>(blobSize));
-                    }
-                    if (diagnostics != nullptr) {
-                        diagnostics->resultMaterializationNanoseconds += static_cast<std::uint64_t>(
-                            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                std::chrono::steady_clock::now() - fetchStart)
-                                .count());
-                    }
 
-                    float similarity = approxScore;
-                    if (hasEmbedding) {
-                        const auto rerankStart = std::chrono::steady_clock::now();
-                        similarity = static_cast<float>(vector_utils::computeCosineSimilarity(
-                            query_embedding, embeddingScratch));
-                        if (diagnostics != nullptr) {
-                            ++diagnostics->exactDistanceEvaluations;
-                            diagnostics->exactRerankNanoseconds += static_cast<std::uint64_t>(
-                                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                    std::chrono::steady_clock::now() - rerankStart)
-                                    .count());
+                        float similarity = approxScore;
+                        if (hasEmbedding) {
+                            const auto rerankStart = std::chrono::steady_clock::now();
+                            similarity = static_cast<float>(vector_utils::computeCosineSimilarity(
+                                query_embedding, embeddingScratch));
+                            if (diagnostics != nullptr) {
+                                ++diagnostics->exactDistanceEvaluations;
+                                diagnostics->exactRerankNanoseconds += static_cast<std::uint64_t>(
+                                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now() - rerankStart)
+                                        .count());
+                            }
                         }
+                        if (similarity < similarity_threshold) {
+                            continue;
+                        }
+                        candidates.push_back(RerankCandidate{rowid, similarity, std::move(chunkId),
+                                                             std::move(docHash)});
                     }
-                    if (similarity < similarity_threshold) {
-                        continue;
-                    }
-                    candidates.push_back(
-                        RerankCandidate{rowid, similarity, std::move(chunkId), std::move(docHash)});
                 }
             }
 
@@ -5185,6 +5290,7 @@ ORDER BY rowid
     sqlite3_stmt* stmt_select_by_chunk_id_ = nullptr;
     sqlite3_stmt* stmt_select_by_rowid_ = nullptr;
     sqlite3_stmt* stmt_select_rerank_by_rowid_ = nullptr;
+    sqlite3_stmt* stmt_select_rerank_batch_by_rowid_ = nullptr;
     sqlite3_stmt* stmt_select_by_doc_ = nullptr;
     sqlite3_stmt* stmt_delete_by_chunk_id_ = nullptr;
     sqlite3_stmt* stmt_delete_by_doc_ = nullptr;
