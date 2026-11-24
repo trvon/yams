@@ -332,6 +332,10 @@ public:
         // How long a graph ingest/remove request waits for its op to be settled before it
         // reports the outcome as unknown.
         std::chrono::milliseconds graphOpResultTimeout{std::chrono::seconds{60}};
+        // Optional pressure provider wired by daemon ServiceManager (keeps
+        // libyams_write_coordinator decoupled from libyams_daemon when linked by standalone tools
+        // like yams-mcp-server).
+        std::function<ResourcePressureLevel()> pressureLevelProvider{};
     };
 
     struct Stats {

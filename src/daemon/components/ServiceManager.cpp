@@ -2492,6 +2492,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             if (wcTuning.kgDedupMaxEdges.has_value()) {
                 wcConfig.kgDedupMaxEdges = *wcTuning.kgDedupMaxEdges;
             }
+            wcConfig.pressureLevelProvider = []() {
+                return ResourceGovernor::instance().getPressureLevel();
+            };
             writeCoordinator_ = std::make_unique<WriteCoordinator>(
                 *workCoordinator_->getIOContext(), kgStore, getMetadataRepo(), wcConfig);
             writeCoordinator_->start();

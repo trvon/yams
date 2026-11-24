@@ -523,7 +523,9 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
             }
 
             const std::size_t baseMax = std::min(config_.maxBatchSize, kMaxBatchesPerIteration);
-            const auto pressureLevel = ResourceGovernor::instance().getPressureLevel();
+            const auto pressureLevel = config_.pressureLevelProvider
+                                           ? config_.pressureLevelProvider()
+                                           : ResourcePressureLevel::Normal;
             const std::size_t effectiveMax =
                 pressureAdjustedBatchLimit(baseMax, pressureLevel, stopping);
             YAMS_DCHECK(effectiveMax > 0, "WriteCoordinator effectiveMax must remain positive");
