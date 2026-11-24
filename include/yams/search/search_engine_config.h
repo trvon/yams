@@ -340,6 +340,23 @@ struct SearchEngineConfig {
     }
 
     bool bypassCorpusWarmingGate = false;
+    enum class FusionStrategy {
+        Rrf,          // Reciprocal Rank Fusion weighted by component weight + raw score factor
+        ConvexMinMax, // Convex combination over per-query min-max normalized scores (Bruch et al.
+                      // 2023)
+    } fusionStrategy = FusionStrategy::Rrf;
+
+    [[nodiscard]] static constexpr const char*
+    fusionStrategyToString(FusionStrategy strategy) noexcept {
+        switch (strategy) {
+            case FusionStrategy::Rrf:
+                return "rrf";
+            case FusionStrategy::ConvexMinMax:
+                return "convex_min_max";
+        }
+        return "rrf";
+    }
+
     float rrfK = 12.0f;
     float bm25NormDivisor = 25.0f;
     bool enableAdaptiveFusion = false;

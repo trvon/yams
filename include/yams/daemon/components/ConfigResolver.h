@@ -172,6 +172,10 @@ public:
         /// GraphNeighbors seed ANN k; 0 disables (Tier-1 seeds only).
         std::optional<std::size_t> graphVectorSeedProbe;
         std::optional<float> rrfK;
+        // rrf | convex_min_max
+        std::optional<std::string> fusionStrategy;
+        std::optional<std::size_t> rerankTopK;
+        std::optional<std::size_t> rerankSnippetMaxChars;
     };
 
     struct TopologyEnginePolicy {

@@ -6591,11 +6591,33 @@ struct BenchFixture {
                     }
                     yams::bench::writeTopologyDisabledEmbeddingSelection(configOut,
                                                                          topologyDisabled);
-                    if (envSet(simeonOuterMaxSimEnv)) {
+                    const auto benchFusionStrategy =
+                        yams::config::getenv_optional("YAMS_BENCH_FUSION_STRATEGY");
+                    const auto benchRerankTopK =
+                        yams::config::getenv_optional("YAMS_BENCH_RERANK_TOP_K");
+                    const auto benchRerankSnippetChars =
+                        yams::config::getenv_optional("YAMS_BENCH_RERANK_SNIPPET_MAX_CHARS");
+                    if (envSet(simeonOuterMaxSimEnv) ||
+                        (benchFusionStrategy && !benchFusionStrategy->empty()) ||
+                        (benchRerankTopK && !benchRerankTopK->empty()) ||
+                        (benchRerankSnippetChars && !benchRerankSnippetChars->empty())) {
                         configOut << "\n[search]\n";
-                        configOut << "simeon_rerank_outer_maxsim = "
-                                  << (envTruthy(simeonOuterMaxSimEnv->c_str()) ? "true" : "false")
-                                  << "\n";
+                        if (envSet(simeonOuterMaxSimEnv)) {
+                            configOut
+                                << "simeon_rerank_outer_maxsim = "
+                                << (envTruthy(simeonOuterMaxSimEnv->c_str()) ? "true" : "false")
+                                << "\n";
+                        }
+                        if (benchFusionStrategy && !benchFusionStrategy->empty()) {
+                            configOut << "fusion_strategy = \"" << *benchFusionStrategy << "\"\n";
+                        }
+                        if (benchRerankTopK && !benchRerankTopK->empty()) {
+                            configOut << "rerank_top_k = " << *benchRerankTopK << "\n";
+                        }
+                        if (benchRerankSnippetChars && !benchRerankSnippetChars->empty()) {
+                            configOut << "rerank_snippet_max_chars = " << *benchRerankSnippetChars
+                                      << "\n";
+                        }
                     }
                     configOut << "\n[vector_database]\n";
                     configOut << "search_engine = \"" << g_benchmark_search_engine << "\"\n";
