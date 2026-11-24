@@ -1,8 +1,9 @@
 #pragma once
 
-// Isolates every path a daemon or the CLI could resolve to a shared location: HOME, XDG_*, and
-// the YAMS_* path variables all point into (or are cleared under) one temp directory. Tests
-// that resolve or launch daemons use it so nothing touches the user's daemon, store or log.
+// Isolates every path a daemon or the CLI could resolve to a shared location: HOME, USERPROFILE,
+// APPDATA, LOCALAPPDATA, XDG_*, and the YAMS_* path variables all point into (or are cleared
+// under) one temp directory. Tests that resolve or launch daemons use it so nothing touches the
+// user's daemon, store or log.
 
 #include <chrono>
 #include <filesystem>
@@ -32,6 +33,9 @@ public:
             fs::create_directories(root_ / dir);
         }
         set("HOME", root_ / "home");
+        set("USERPROFILE", root_ / "home");
+        set("APPDATA", root_ / "config");
+        set("LOCALAPPDATA", root_ / "data");
         set("XDG_CONFIG_HOME", root_ / "config");
         set("XDG_DATA_HOME", root_ / "data");
         set("XDG_STATE_HOME", root_ / "state");
