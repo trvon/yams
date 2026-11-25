@@ -937,10 +937,8 @@ else
   subdir('src/memory_sync')
   subdir('src/manifest')
   subdir('src/metadata')
-  subdir('src/integrity')
   subdir('src/extraction')
   subdir('src/detection')
-  subdir('src/content')
   subdir('src/downloader')
   if get_option('build-plugins')
     subdir('src/plugins')
@@ -962,9 +960,6 @@ else
   subdir('src/daemon')
   if get_option('enable-mobile-bindings')
     subdir('src/mobile')
-  endif
-  if get_option('build-benchmarks')
-    subdir('src/benchmarks')
   endif
 
   if get_option('build-mcp-server')

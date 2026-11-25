@@ -16,21 +16,21 @@ endif
 
 api_bench = executable('yams_api_benchmarks', files('api_benchmarks.cpp'),
   include_directories: incs,
-  dependencies: [test_deps, dependency('yams_benchmarks')] + yams_tracy_deps,
+  dependencies: [test_deps] + yams_tracy_deps,
   cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
 
 search_bench = executable('yams_search_benchmarks', files('search_benchmarks.cpp'),
   include_directories: incs,
-  dependencies: [test_deps, dependency('yams_benchmarks')] + yams_tracy_deps,
+  dependencies: [test_deps] + yams_tracy_deps,
   cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
 
 core_bench = executable('yams_core_benchmarks', files('core_benchmarks.cpp'),
   include_directories: incs,
-  dependencies: [test_deps, dependency('yams_benchmarks')] + yams_tracy_deps,
+  dependencies: [test_deps] + yams_tracy_deps,
   cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
@@ -65,7 +65,7 @@ alias_target('bench_topology_routing_recall', topology_routing_recall_bench)
 
 grep_bench = executable('yams_grep_benchmarks', files('grep_benchmarks.cpp'),
   include_directories: incs,
-  dependencies: [test_deps, dependency('yams_benchmarks')] + yams_tracy_deps,
+  dependencies: [test_deps] + yams_tracy_deps,
   cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,
   install: false,
 )
@@ -113,7 +113,6 @@ alias_target('bench_vector_persistence_warm_start', vector_persistence_warm_star
 if benchmark_dep.found()
   large_scale_ingestion_bench_deps = tune_advisor_testing_link + [
     test_deps,
-    dependency('yams_benchmarks'),
     benchmark_dep,
   ] + yams_tracy_deps
 
@@ -131,7 +130,7 @@ else
 endif
 
 if benchmark_dep.found()
-  storage_bench_deps = [test_deps, dependency('yams_benchmarks'), benchmark_dep] + yams_tracy_deps
+  storage_bench_deps = [test_deps, benchmark_dep] + yams_tracy_deps
 
   storage_bench = executable('yams_storage_throughput_benchmarks',
     files('storage_throughput_bench.cpp'),
@@ -145,7 +144,7 @@ else
 endif
 
 if benchmark_dep.found()
-  retrieval_bench_deps = [test_deps, dependency('yams_benchmarks')] + yams_tracy_deps + [benchmark_dep]
+  retrieval_bench_deps = [test_deps] + yams_tracy_deps + [benchmark_dep]
 
   retrieval_bench = executable('yams_retrieval_service_benchmarks',
     files('retrieval_service_benchmarks.cpp'),
@@ -343,7 +342,6 @@ ingestion_bench = executable('ingestion_throughput_bench', files('ingestion_thro
   include_directories: incs,
   dependencies: [
     boost_dep,
-    dependency('yams_benchmarks'),
     dependency('yams_api'),
     dependency('yams_app_services'),
     dependency('yams_metadata'),
@@ -362,7 +360,6 @@ alias_target('bench_ingest', ingestion_bench)
 tree_diff_bench = executable('tree_diff_benchmarks', files('tree_diff_benchmarks.cpp'),
   include_directories: incs,
   dependencies: [
-    dependency('yams_benchmarks'),
     dependency('yams_metadata'),
     dependency('yams_storage_engine'),
     dependency('nlohmann_json'),
@@ -376,7 +373,6 @@ alias_target('bench_tree_diff', tree_diff_bench)
 tree_build_bench = executable('tree_build_bench', files('tree_build_bench.cpp'),
   include_directories: incs,
   dependencies: [
-    dependency('yams_benchmarks'),
     dependency('yams_metadata'),
     dependency('yams_storage_engine'),
     dependency('nlohmann_json'),
@@ -391,7 +387,6 @@ alias_target('bench_tree_build', tree_build_bench)
 ipc_stream_bench = executable('ipc_stream_bench', files('ipc_streaming_bench.cpp'),
   include_directories: incs,
   dependencies: [
-    dependency('yams_benchmarks'),
     dependency('yams_daemon'),
     dependency('nlohmann_json'),
     dependency('tl-expected'),
@@ -410,8 +405,7 @@ if _catch2_with_main_dep_bench.found()
     dependencies: [
       _catch2_with_main_dep_bench,
       test_deps,
-      dependency('yams_benchmarks'),
-      dependency('yams_daemon'),
+        dependency('yams_daemon'),
       dependency('nlohmann_json'),
     ] + yams_tracy_deps,
     cpp_args: ['-DYAMS_TESTING=1'] + yams_tracy_args,

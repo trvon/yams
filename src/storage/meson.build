@@ -29,7 +29,6 @@ yams_storage_engine = static_library('yams_storage_engine',
     'url_backend.cpp',
     's3_signer.cpp',
     'object_storage_plugin_loader.cpp',
-    '../storage/object_storage_adapter.cpp',
   ],
   include_directories: include_directories('../../include'),
   dependencies: [

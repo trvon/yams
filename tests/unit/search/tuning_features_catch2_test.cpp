@@ -11,7 +11,6 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/search/tuning_features.h>
-#include <yams/search/tuning_reward.h>
 
 #include <cmath>
 #include <optional>
@@ -179,74 +178,4 @@ TEST_CASE("bucketize: media flag triggers on binary-heavy corpora", "[unit][tuni
     CHECK(bucketize(ctx).find("m0") != std::string::npos);
     ctx.binaryRatio = 0.5;
     CHECK(bucketize(ctx).find("m1") != std::string::npos);
-}
-
-// =============================================================================
-// combineReward()
-// =============================================================================
-
-TEST_CASE("combineReward: no labels falls back to proxy", "[unit][tuning_reward]") {
-    ProxyRewardInputs p;
-    p.kgUtility = 0.5;
-    p.freshnessBoost = 0.5;
-    p.agreementBoost = 0.5;
-    const auto r = combineReward(std::nullopt, p);
-    CHECK(r.source == RewardSource::Proxy);
-    // 0.6*0.5 + 0.2*0.5 + 0.2*0.5 = 0.5
-    CHECK(r.value == Approx(0.5));
-}
-
-TEST_CASE("combineReward: labels dominate proxy", "[unit][tuning_reward]") {
-    ProxyRewardInputs p;
-    p.kgUtility = 0.9;
-    const auto r = combineReward(std::optional<double>{0.4}, p);
-    // Proxy is non-zero → source reads as Mixed for explainability, but the
-    // value comes from the label channel.
-    CHECK(r.source == RewardSource::Mixed);
-    CHECK(r.value == Approx(0.4));
-}
-
-TEST_CASE("combineReward: labels without proxy → Labels source", "[unit][tuning_reward]") {
-    ProxyRewardInputs p;
-    const auto r = combineReward(std::optional<double>{0.7}, p);
-    CHECK(r.source == RewardSource::Labels);
-    CHECK(r.value == Approx(0.7));
-}
-
-TEST_CASE("combineReward: latency over budget penalizes", "[unit][tuning_reward]") {
-    ProxyRewardInputs p;
-    p.kgUtility = 0.5;
-    p.latencyOverBudget = 0.2;
-    const auto r = combineReward(std::nullopt, p);
-    // 0.6*0.5 = 0.3; − 0.2 = 0.1
-    CHECK(r.value == Approx(0.1));
-}
-
-TEST_CASE("combineReward: NaN inputs treated as zero", "[unit][tuning_reward]") {
-    ProxyRewardInputs p;
-    p.kgUtility = std::nan("");
-    p.freshnessBoost = std::nan("");
-    p.agreementBoost = std::nan("");
-    p.latencyOverBudget = std::nan("");
-    const auto r = combineReward(std::nullopt, p);
-    CHECK(r.value == Approx(0.0));
-    CHECK(r.source == RewardSource::Proxy);
-}
-
-TEST_CASE("combineReward: output clamped to [0,1]", "[unit][tuning_reward]") {
-    ProxyRewardInputs p;
-    p.kgUtility = 10.0;
-    const auto hi = combineReward(std::nullopt, p);
-    CHECK(hi.value == Approx(1.0));
-
-    p = {};
-    p.latencyOverBudget = 5.0;
-    const auto lo = combineReward(std::nullopt, p);
-    CHECK(lo.value == Approx(0.0));
-}
-
-TEST_CASE("rewardSourceLabel: mapping", "[unit][tuning_reward]") {
-    CHECK(rewardSourceLabel(RewardSource::Labels) == "labels");
-    CHECK(rewardSourceLabel(RewardSource::Proxy) == "proxy");
-    CHECK(rewardSourceLabel(RewardSource::Mixed) == "mixed");
 }

@@ -348,12 +348,10 @@ test_deps = [
   dependency('yams_storage_engine'),
   dependency('yams_reference_counter'),
   dependency('yams_manifest'),
-  dependency('yams_integrity'),
   dependency('yams_metadata'),
   dependency('yams_topology'),
   dependency('yams_extraction'),
   dependency('yams_detection'),
-  dependency('yams_content'),
   dependency('yams_downloader'),
   dependency('yams_vector'),
   dependency('yams_search'),
@@ -1824,7 +1822,6 @@ if catch2_dep.found()
       'unit/storage/compressed_storage_engine_catch2_test.cpp',
       'unit/storage/compressed_storage_stats_catch2_test.cpp',
       'unit/storage/storage_backend_engine_adapter_catch2_test.cpp',
-      'unit/storage/object_storage_adapter_catch2_test.cpp',
       'unit/storage/reference_counter_catch2_test.cpp',
       'unit/storage/reference_counter_stress_catch2_test.cpp',
       'unit/storage/sqlite_retry_catch2_test.cpp',
@@ -1872,7 +1869,6 @@ if catch2_dep.found()
   catch2_test_table += [{
     'name': 'search_submodule',
     'sources': files(
-      'unit/search/chunk_coverage_catch2_test.cpp',
       'unit/search/graph_expansion_catch2_test.cpp',
       'unit/search/kg_scorer_simple_catch2_test.cpp',
       'unit/search/lexical_scoring_catch2_test.cpp',
@@ -3024,63 +3020,14 @@ if catch2_dep.found()
     'timeout': 120,
   }]
 
-#Integrity tests(Catch2 - migrated from GTest)
-  integrity_test_deps = [
-    dependency('spdlog'),
-    dependency('yams_core'),
-    dependency('yams_crypto'),
-    dependency('yams_integrity'),
-    dependency('yams_storage_engine'),
-    dependency('yams_reference_counter'),
-    dependency('yams_metadata'),
-    dependency('yams_search'),
-    dependency('yams_daemon'),
-    dependency('yams_api'),
-  ]
-
-  integrity_catch2_exe = executable('integrity_catch2',
-    files(
-      'unit/integrity/integrity_verifier_catch2_test.cpp',
-      'unit/integrity/block_repairer_catch2_test.cpp',
-      'unit/integrity/verification_monitor_test.cpp',
-      'unit/integrity/verification_scheduler_test.cpp',
-    ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + integrity_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
-
-#Content tests(depends on content, extraction, detection modules)
+#Extraction tests(depends on extraction, detection modules)
   content_test_deps = [
     dependency('spdlog'),
     dependency('yams_core'),
-    dependency('yams_content'),
     dependency('yams_extraction'),
     dependency('yams_detection'),
     dependency('sqlite3'),
   ]
-
-#Content tests
-  catch2_test_table += [{
-    'name': 'content_handlers',
-    'target': 'content_handlers',
-    'sources': files('unit/content/content_handlers_test.cpp'),
-    'deps': content_test_deps,
-    'suite': ['catch2', 'unit', 'content', 'handlers'],
-    'timeout': 60,
-  }]
-
-#Archive content handler tests(formatToString, ProcessingStats, helper functions, canHandle)
-  catch2_test_table += [{
-    'name': 'archive_content_handler',
-    'target': 'archive_content_handler',
-    'sources': files('unit/content/archive_content_handler_catch2_test.cpp'),
-    'deps': content_test_deps,
-    'suite': ['catch2', 'unit', 'content', 'archive'],
-    'timeout': 60,
-  }]
 
   catch2_test_table += [{
     'name': 'html_extractor_robust',
@@ -3394,12 +3341,6 @@ if catch2_dep.found()
     suite: ['unit', 'config', 'link'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30
-  )
-
-  test('integrity_catch2', integrity_catch2_exe,
-    suite: ['catch2', 'unit', 'integrity'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: host_machine.system() == 'windows' ? 600 : 120
   )
 
   test('plugin_process_launcher', plugin_process_launcher_exe,

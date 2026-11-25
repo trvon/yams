@@ -6,7 +6,6 @@ src/config/config_helpers.cpp:findFlatTomlComment
 src/config/config_helpers.cpp:parse_simple_toml
 src/config/config_migration.cpp:parseTomlConfig
 src/config/config_migration.cpp:writeTomlConfig
-src/config/config_resolver_policies.cpp:parseSimpleTomlFlat
 src/config/config_resolver_policies.cpp:parseTomlFloat
 src/config/config_resolver_policies.cpp:parseTomlSize
 src/config/config_resolver_policies.cpp:parseTomlU32

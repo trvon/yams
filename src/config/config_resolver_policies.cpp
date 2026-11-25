@@ -74,11 +74,6 @@ std::filesystem::path ConfigResolver::resolveDefaultConfigPath() {
     return std::filesystem::exists(path) ? path : std::filesystem::path{};
 }
 
-std::map<std::string, std::string>
-ConfigResolver::parseSimpleTomlFlat(const std::filesystem::path& path) {
-    return yams::config::parse_simple_toml(path);
-}
-
 std::string ConfigResolver::resolveEmbeddingBackend(const std::string& defaultValue) {
     if (auto envp = yams::config::getenv_copy("YAMS_EMBED_BACKEND"); !envp.empty()) {
         return normalizeEmbeddingBackend(std::move(envp));

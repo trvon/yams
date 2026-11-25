@@ -373,15 +373,6 @@ public:
     static std::filesystem::path resolveDefaultConfigPath();
 
     /**
-     * @brief Compatibility wrapper around yams::config::parse_simple_toml().
-     *
-     * New code should call the shared config reader directly. This installed API remains available
-     * for source and static-link compatibility.
-     */
-    static std::map<std::string, std::string>
-    parseSimpleTomlFlat(const std::filesystem::path& path);
-
-    /**
      * @brief Read embedding dimension from vector database.
      *
      * Opens the sqlite-vec database and reads stored embedding dimension.

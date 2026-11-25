@@ -1,7 +1,7 @@
 #include <yams/search/search_engine.h>
 
-#include "../../include/yams/search/evidence_search_pipeline.h"
 #include <yams/search/bandit_reward.h>
+#include <yams/search/evidence_search_pipeline.h>
 
 #include <spdlog/spdlog.h>
 #include "concept_boost_internal.h"

@@ -22,7 +22,6 @@
 #include <yams/topology/topology_baseline.h>
 #include <yams/topology/topology_input_extractor.h>
 #include <yams/topology/topology_metadata_store.h>
-#include <yams/topology/topology_offline_analyzer.h>
 #include <yams/topology/topology_representatives.h>
 #include <yams/vector/vector_database.h>
 
@@ -1451,19 +1450,13 @@ TEST_CASE("Topology extractor and offline analyzer use real stores",
     CHECK(aExtracted->metadata.contains("mime_type"));
 
     auto engine = std::make_shared<ConnectedComponentTopologyEngine>();
-    TopologyOfflineAnalyzer analyzer(extractor, engine);
-    auto analysis = analyzer.analyze(
-        TopologyExtractionConfig{.limit = 10,
-                                 .maxNeighborsPerDocument = 8,
-                                 .includeEmbeddings = true,
-                                 .includeMetadata = true,
-                                 .requireEmbeddings = true,
-                                 .requireGraphNode = true},
-        TopologyBuildConfig{.inputKind = TopologyInputKind::Hybrid, .reciprocalOnly = true});
-    REQUIRE(analysis.has_value());
-    CHECK((analysis.value().artifacts.clusters.size() == 2));
-    CHECK(analysis.value().artifacts.embeddingSpaceIdentity == "test-space-v1");
-    CHECK((analysis.value().extractionStats.documentsReturned == 3));
+    TopologyBuildConfig buildConfig{.inputKind = TopologyInputKind::Hybrid, .reciprocalOnly = true};
+    buildConfig.embeddingSpaceIdentity = extractionStats.embeddingSpaceIdentity;
+    auto built = engine->buildArtifacts(extracted.value(), buildConfig);
+    REQUIRE(built.has_value());
+    CHECK((built.value().clusters.size() == 2));
+    CHECK(built.value().embeddingSpaceIdentity == "test-space-v1");
+    CHECK((extractionStats.documentsReturned == 3));
 }
 
 TEST_CASE("Topology update replaces removed cluster memberships consistently",

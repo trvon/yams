@@ -70,7 +70,6 @@ plugins/ort_runtime/ort_runtime_loader.cpp:140:portability/env-read # reviewed r
 plugins/ort_runtime/ort_runtime_loader.cpp:148:portability/env-read # reviewed raw environment read
 src/app/services/document_service.cpp:1255:portability/env-read # reviewed raw environment read
 src/app/services/search_service.cpp:525:portability/env-read # reviewed raw environment read
-src/benchmarks/internal_event_bus_benchmark.cpp:15:portability/env-read # reviewed raw environment read
 src/cli/commands/add_command.cpp:267:portability/env-read # reviewed raw environment read
 src/cli/commands/search_command.cpp:1091:portability/env-read # reviewed raw environment read
 src/cli/commands/search_command.cpp:1099:portability/env-read # reviewed raw environment read
@@ -293,7 +292,7 @@ tests/unit/search/search_engine_simeon_lexical_catch2_test.cpp:27:portability/en
 tests/unit/search/simeon_bandit_backend_catch2_test.cpp:30:portability/env-read # reviewed raw environment read
 tests/unit/search/simeon_lexical_backend_catch2_test.cpp:29:portability/env-read # reviewed raw environment read
 tests/unit/search/topology_search_test_support.h:40:portability/env-read # reviewed raw environment read
-tests/unit/topology/topology_baseline_catch2_test.cpp:65:portability/env-read # reviewed raw environment read
+tests/unit/topology/topology_baseline_catch2_test.cpp:64:portability/env-read # reviewed raw environment read
 tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:42:portability/env-read # reviewed raw environment read
 tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:48:portability/env-read # reviewed raw environment read
 tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:2574:portability/path-cstr # std::string filename, not filesystem::path
