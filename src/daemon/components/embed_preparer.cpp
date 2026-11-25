@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cctype>
 #include <span>
-#include <unordered_set>
 #include <vector>
 
 #include <yams/crypto/hasher.h>
@@ -34,7 +33,7 @@ bool looksLikeHeading(const std::string& text) {
     if (firstLine.empty()) {
         return false;
     }
-    if (firstLine.rfind("#", 0) == 0 || firstLine.rfind("##", 0) == 0) {
+    if (firstLine.rfind("#", 0) == 0) {
         return true;
     }
     if (firstLine.size() <= 120 && firstLine.back() == ':') {
@@ -140,8 +139,6 @@ prepareEmbedPreparedDoc(const EmbedSourceDoc& src, yams::vector::DocumentChunker
 
     std::size_t selectedCount = 0;
     std::size_t selectedChars = 0;
-    std::unordered_set<std::size_t> picked;
-    picked.reserve(chunks.size());
 
     for (const auto& item : scored) {
         if (effectiveMaxChunks > 0 && selectedCount >= effectiveMaxChunks) {
@@ -169,7 +166,6 @@ prepareEmbedPreparedDoc(const EmbedSourceDoc& src, yams::vector::DocumentChunker
         out.endOffset = chunks[idx].end_offset;
         doc.chunks.push_back(std::move(out));
 
-        picked.insert(idx);
         selectedCount += 1;
         selectedChars += chunkSize;
     }

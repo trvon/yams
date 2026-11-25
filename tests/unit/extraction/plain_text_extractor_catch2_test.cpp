@@ -5,6 +5,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <yams/extraction/plain_text_extractor.h>
+#include <yams/extraction/title_util.h>
 
 #include <algorithm>
 #include <atomic>
@@ -155,4 +156,56 @@ TEST_CASE("PlainTextExtractor: supportedExtensions covers common source/doc form
 TEST_CASE("PlainTextExtractor: name() is stable", "[extraction][plain-text]") {
     PlainTextExtractor ex;
     CHECK(ex.name() == "Plain Text Extractor");
+}
+
+TEST_CASE("title_util: extracts and normalizes HTML, Markdown, code, and plain titles",
+          "[extraction][title-util]") {
+    using namespace yams::extraction::util;
+
+    CHECK(normalizeTitleCandidate("   hello   \t\n  world   ") == "hello world");
+    CHECK(normalizeTitleCandidate("   ").empty());
+    CHECK(normalizeTitleCandidate(std::string(200, 'a')).size() == 120u);
+
+    CHECK(extractHtmlTitle("<html><head><TITLE>  My  Page </title></head></html>") == "My Page");
+    CHECK(extractHtmlTitle("<html><body>no title here</body></html>").empty());
+
+    CHECK(extractMarkdownHeading("\n  ##  Release   Notes \nbody") == "Release Notes");
+    CHECK(extractMarkdownHeading("plain line\nno heading").empty());
+
+    CHECK(extractCodeSignature("// comment\n  class SearchEngine {\n};") == "class SearchEngine {");
+    CHECK(extractCodeSignature("# header\ndef parse_query(x):\n    pass") == "def parse_query(x):");
+    CHECK(extractCodeSignature("/* block */\n* fn run() {}\n*/") == "fn run() {}");
+    CHECK(extractCodeSignature("-- sql\nSELECT 1;").empty());
+
+    CHECK(extractFirstMeaningfulLine("\n  //   First meaningful line \nsecond") ==
+          "First meaningful line");
+    CHECK(extractFirstMeaningfulLine("   \n  \t \n").empty());
+}
+
+TEST_CASE("title_util: detectDocumentSections handles empty, plain, and sectioned text",
+          "[extraction][title-util]") {
+    using namespace yams::extraction::util;
+
+    const auto empty = detectDocumentSections("");
+    CHECK(empty.title.empty());
+    CHECK(empty.body.empty());
+    CHECK(empty.sections.empty());
+
+    const auto plain = detectDocumentSections("Single Document Title\nBody paragraph text here.");
+    CHECK(plain.title == "Single Document Title");
+    CHECK_FALSE(plain.body.empty());
+
+    const std::string sectionedText =
+        "Neural Information Retrieval Study\n"
+        "   \n"
+        "ABSTRACT\n"
+        "This study evaluates hybrid lexical and dense retrieval across biomedical corpora.\n"
+        "   \n"
+        "1. Methods\n"
+        "We compare BM25, vector search, and cross-encoder reranking over standard benchmarks.\n";
+    const auto sectioned = detectDocumentSections(sectionedText);
+    CHECK(sectioned.title == "Neural Information Retrieval Study");
+    CHECK(sectioned.sections.size() >= 2u);
+    CHECK_FALSE(sectioned.abstract.empty());
+    CHECK_FALSE(sectioned.body.empty());
 }
