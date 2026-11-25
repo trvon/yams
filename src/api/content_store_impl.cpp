@@ -1385,6 +1385,8 @@ public:
     ContentStoreStats getStats() const override {
         std::shared_lock lock(statsMutex_);
         ContentStoreStats currentStats = stats_;
+        currentStats.retrieveOperations +=
+            retrieveOperationsAtomic_.load(std::memory_order_relaxed);
 
         if (currentStats.totalObjects == 0 || currentStats.totalBytes == 0) {
             auto storageStats = storage_->getStats();
@@ -1728,6 +1730,7 @@ private:
     // Statistics
     mutable std::shared_mutex statsMutex_;
     ContentStoreStats stats_;
+    std::atomic<uint64_t> retrieveOperationsAtomic_{0};
 
     Result<PreparedBatchStore> prepareBatchStore(const std::filesystem::path& path,
                                                  ContentMetadata metadata) {
@@ -1830,6 +1833,11 @@ private:
     void updateStats(uint64_t bytesStored, uint64_t bytesDeduped,
                      [[maybe_unused]] uint64_t bytesRetrieved, uint64_t objectsAdded,
                      uint64_t storeOps, uint64_t retrieveOps, uint64_t deleteOps) {
+        if (bytesStored == 0 && bytesDeduped == 0 && objectsAdded == 0 && storeOps == 0 &&
+            deleteOps == 0 && retrieveOps > 0) {
+            retrieveOperationsAtomic_.fetch_add(retrieveOps, std::memory_order_relaxed);
+            return;
+        }
         std::unique_lock lock(statsMutex_);
         stats_.totalBytes += bytesStored;
         stats_.deduplicatedBytes += bytesDeduped;
