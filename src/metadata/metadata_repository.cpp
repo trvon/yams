@@ -1557,9 +1557,34 @@ MetadataRepository::findDocumentByExactPath(const std::string& path) {
     // to an older content hash without changing that document's path/timestamp.
     return executeReadQuery<std::optional<DocumentInfo>>(
         [&](Database& db) -> Result<std::optional<DocumentInfo>> {
+            if (hasDocumentPaths_ && hasPathIndexing_) {
+                // Fast O(log N) primary-key lookup on document_path_heads avoids materializing
+                // documentPathQueryCte(true), which SQLite cannot push path predicates through.
+                static constexpr const char* kPathHeadSql =
+                    "SELECT d.id, h.file_path, h.file_name, h.file_extension, d.file_size, "
+                    "d.sha256_hash, d.mime_type, d.created_time, h.modified_time, h.indexed_time, "
+                    "d.content_extracted, d.extraction_status, d.extraction_error, "
+                    "h.path_prefix, h.reverse_path, h.path_hash, h.parent_hash, h.path_depth, "
+                    "d.repair_status, d.repair_attempted_at, d.repair_attempts, h.deleted "
+                    "FROM document_path_heads h "
+                    "LEFT JOIN main.documents d ON d.id = h.document_id "
+                    "WHERE h.file_path = ? LIMIT 1";
+                YAMS_TRY_UNWRAP(headStmt, db.prepareCached(kPathHeadSql));
+                YAMS_TRY(headStmt->bind(1, derived.normalizedPath));
+                YAMS_TRY_UNWRAP(hasHead, headStmt->step());
+                if (hasHead) {
+                    if (headStmt->getInt(21) != 0 || headStmt->isNull(0)) {
+                        return std::optional<DocumentInfo>{};
+                    }
+                    auto doc = mapDocumentRow(*headStmt);
+                    storePathCache(doc);
+                    return std::optional<DocumentInfo>{std::move(doc)};
+                }
+            }
+
             using yams::metadata::sql::QuerySpec;
             QuerySpec spec{};
-            spec.table = "documents";
+            spec.table = hasDocumentPaths_ ? "main.documents" : "documents";
             spec.columns = {documentColumnList(false)};
             spec.conditions = {"path_hash = ?", "file_path = ?"};
             spec.orderBy = "COALESCE((SELECT value FROM metadata WHERE document_id = documents.id "
@@ -1571,13 +1596,8 @@ MetadataRepository::findDocumentByExactPath(const std::string& path) {
             spec.having = std::nullopt;
             spec.limit = 1;
             spec.offset = std::nullopt;
-            const auto prefix =
-                hasDocumentPaths_ ? repository::documentPathQueryCte(true) : std::string{};
-            auto stmtResult = db.prepare(prefix + yams::metadata::sql::buildSelect(spec));
-            if (!stmtResult)
-                return stmtResult.error();
-
-            Statement stmt = std::move(stmtResult).value();
+            YAMS_TRY_UNWRAP(cachedStmt, db.prepareCached(yams::metadata::sql::buildSelect(spec)));
+            auto& stmt = *cachedStmt;
             if (auto bind = stmt.bindAll(derived.pathHash, derived.normalizedPath); !bind)
                 return bind.error();
 

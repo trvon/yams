@@ -726,6 +726,10 @@ public:
     /// False means stale, missing, untracked, or already acknowledged; errors leave it pending.
     Result<bool> completeKnowledgeGraphEnrichment(int64_t documentId, const std::string& token);
 
+    /// Batched KG completion acknowledgement in a single write transaction.
+    Result<size_t>
+    completeKnowledgeGraphEnrichmentBatch(std::span<const std::pair<int64_t, std::string>> items);
+
     // Metadata operations
     Result<void> setMetadata(int64_t documentId, const std::string& key,
                              const MetadataValue& value) override;

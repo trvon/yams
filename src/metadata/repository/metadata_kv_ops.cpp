@@ -65,15 +65,58 @@ Result<bool> MetadataRepository::completeKnowledgeGraphEnrichment(int64_t docume
     if (token.empty())
         return false;
     auto result = executeWriteQuery<bool>([&](Database& db) -> Result<bool> {
-        YAMS_TRY_UNWRAP(stmt, db.prepare("UPDATE metadata SET value = ? WHERE document_id = ? "
+        YAMS_TRY_UNWRAP(stmt,
+                        db.prepareCached("UPDATE metadata SET value = ? WHERE document_id = ? "
                                          "AND key = 'yams:kg_enrichment' AND value = ?"));
-        YAMS_TRY(stmt.bind(1, "complete:" + token));
-        YAMS_TRY(stmt.bind(2, documentId));
-        YAMS_TRY(stmt.bind(3, "pending:" + token));
-        YAMS_TRY(stmt.execute());
+        YAMS_TRY(stmt->bind(1, "complete:" + token));
+        YAMS_TRY(stmt->bind(2, documentId));
+        YAMS_TRY(stmt->bind(3, "pending:" + token));
+        YAMS_TRY(stmt->execute());
         return db.changes() == 1;
     });
     if (result && result.value()) {
+        metadataChangeCounter_.fetch_add(1, std::memory_order_release);
+    }
+    return result;
+}
+
+Result<size_t> MetadataRepository::completeKnowledgeGraphEnrichmentBatch(
+    std::span<const std::pair<int64_t, std::string>> items) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::completeKnowledgeGraphEnrichmentBatch");
+    if (items.empty()) {
+        return size_t{0};
+    }
+    auto result = executeWriteQuery<size_t>([&](Database& db) -> Result<size_t> {
+        YAMS_TRY(beginTransactionWithRetry(db));
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                rollbackIgnoringErrors(db);
+            }
+        });
+        YAMS_TRY_UNWRAP(stmt,
+                        db.prepareCached("UPDATE metadata SET value = ? WHERE document_id = ? "
+                                         "AND key = 'yams:kg_enrichment' AND value = ?"));
+        size_t updated = 0;
+        for (const auto& [documentId, token] : items) {
+            if (token.empty()) {
+                continue;
+            }
+            stmt->reset();
+            stmt->clearBindings();
+            YAMS_TRY(stmt->bind(1, "complete:" + token));
+            YAMS_TRY(stmt->bind(2, documentId));
+            YAMS_TRY(stmt->bind(3, "pending:" + token));
+            YAMS_TRY(stmt->execute());
+            if (db.changes() == 1) {
+                ++updated;
+            }
+        }
+        YAMS_TRY(commitOrRollback(db));
+        committed = true;
+        return updated;
+    });
+    if (result && result.value() > 0) {
         metadataChangeCounter_.fetch_add(1, std::memory_order_release);
     }
     return result;
