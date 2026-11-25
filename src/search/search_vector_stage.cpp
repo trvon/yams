@@ -6,6 +6,8 @@
 #include "search_vector_pipeline_internal.h"
 #include <yams/search/search_tracing.h>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <utility>
 

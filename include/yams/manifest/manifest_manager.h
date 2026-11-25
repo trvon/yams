@@ -290,15 +290,4 @@ std::unique_ptr<IManifestManager> createManifestManager(ManifestManager::Config 
 Result<std::vector<Manifest>> deserializeManifestBatch(std::span<const std::byte> data);
 Result<std::vector<std::byte>> serializeManifestBatch(std::ranges::input_range auto&& manifests);
 
-// Stream processing for large manifests
-template <std::ranges::input_range R>
-requires std::same_as<std::ranges::range_value_t<R>, ChunkRef>
-class ManifestStream {
-public:
-    explicit ManifestStream(R&& chunks) : chunks_(std::forward<R>(chunks)) {}
-
-private:
-    R chunks_;
-};
-
 } // namespace yams::manifest

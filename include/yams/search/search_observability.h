@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "search_models.h"
 #include "search_tracing.h"
 

@@ -9,6 +9,8 @@
 #include <yams/search/query_text_utils.h>
 #include <yams/search/search_tracing.h>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <unordered_map>
 

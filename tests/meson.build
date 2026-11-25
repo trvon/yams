@@ -2199,7 +2199,6 @@ if catch2_dep.found()
     files(
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/doctor_command_catch2_test.cpp',
-      'unit/cli/doctor_repair_renderers_catch2_test.cpp',
       'unit/cli/doctor/db_integrity_catch2_test.cpp',
       'unit/cli/doctor/dim_consistency_catch2_test.cpp',
       'unit/cli/doctor/storage_blob_check_catch2_test.cpp',

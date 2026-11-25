@@ -5,6 +5,8 @@
 #include <yams/search/search_metric_keys.h>
 #include <yams/search/search_tracing.h>
 
+#include <nlohmann/json.hpp>
+
 using yams::search::ComponentResult;
 using yams::search::SearchEngineConfig;
 using yams::search::SearchTraceCollector;

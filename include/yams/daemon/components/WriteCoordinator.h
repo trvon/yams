@@ -479,8 +479,6 @@ private:
     Result<void> applyMetadataOp(UpdateRepairStatusOp& op);
     Result<void> applyMetadataOp(UpsertTreeSnapshotOp& op);
     Result<void> applyMetadataOp(SetMetadataBatchOp& op);
-    Result<void> applyMetadataOp(UpdateExtractionStatusOp& op);
-    Result<void> applyMetadataOp(UpdateEmbeddingStatusByHashOp& op);
     Result<void> applyMetadataOp(UpdateEmbeddingStatusByHashesOp& op);
     Result<EmbeddingCompletionAcknowledgement>
     applyMetadataOp(CompleteDocumentEmbeddingsByHashesOp& op);

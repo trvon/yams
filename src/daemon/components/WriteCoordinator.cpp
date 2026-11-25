@@ -2089,31 +2089,6 @@ Result<void> WriteCoordinator::applyMetadataOp(SetMetadataBatchOp& op) {
     return r;
 }
 
-Result<void> WriteCoordinator::applyMetadataOp(UpdateExtractionStatusOp& op) {
-    if (!meta_)
-        return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
-    metadata::MetadataOpScope opScope("wc_extraction_status");
-    auto r = meta_->updateDocumentExtractionStatus(op.documentId, op.contentExtracted, op.status,
-                                                   op.error);
-    if (r) {
-        std::lock_guard<std::mutex> lock(statsMutex_);
-        stats_.extractionStatusesUpdated++;
-    }
-    return r;
-}
-
-Result<void> WriteCoordinator::applyMetadataOp(UpdateEmbeddingStatusByHashOp& op) {
-    if (!meta_)
-        return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
-    metadata::MetadataOpScope opScope("wc_embedding_status");
-    auto r = meta_->updateDocumentEmbeddingStatusByHash(op.hash, op.embedded, op.modelName);
-    if (r) {
-        std::lock_guard<std::mutex> lock(statsMutex_);
-        stats_.embeddingStatusesUpdated++;
-    }
-    return r;
-}
-
 Result<void> WriteCoordinator::applyMetadataOp(UpdateEmbeddingStatusByHashesOp& op) {
     if (!meta_)
         return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
