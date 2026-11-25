@@ -547,7 +547,11 @@ std::vector<ComponentResult> queryFullTextPipeline(
         applySubPhraseRescoring(metadataRepo, query, config, limit, results, subPhraseGenerator);
     }
 
-    if (!baseFtsSucceeded || baseFtsHitCount == 0 || results.size() < 3) {
+    // Skip aggressive FTS5 fallback clauses when direct Simeon lexical retrieval already
+    // populated a strong candidate pool (avoids 3 extra SQLite FTS5 scans per query).
+    const bool simeonPopulatedPool =
+        session != nullptr && results.size() >= std::max<size_t>(3, config.weakQueryMinTextHits);
+    if (!simeonPopulatedPool && (!baseFtsSucceeded || baseFtsHitCount == 0 || results.size() < 3)) {
         const size_t maxAggressiveClauses = (!baseFtsSucceeded || baseFtsHitCount == 0) ? 10 : 6;
         auto aggressiveClauses = aggressiveClauseGenerator(query, maxAggressiveClauses);
         applyAggressiveFtsFallback(metadataRepo, query, queryIntent, config, limit,
