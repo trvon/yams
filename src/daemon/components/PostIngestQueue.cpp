@@ -1811,9 +1811,13 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
         kgWakeTimer);
 
     cfg.batchMode = true;
+    cfg.batchLimiterPerTask = false;
     cfg.batchSizeFn = [this]() -> std::size_t {
         const std::size_t tuned = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
         return adaptiveStageBatchSize(kgQueueDepth(), tuned, 32u);
+    };
+    cfg.batchCoalesceWindowFn = [this]() {
+        return std::chrono::milliseconds(batchCoalesceMs_.load(std::memory_order_relaxed));
     };
     cfg.batchProcessFn = [this](std::vector<InternalEventBus::KgJob>&& jobs) {
         processKnowledgeGraphBatch(std::move(jobs));
