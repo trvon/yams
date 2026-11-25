@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <functional>
@@ -243,6 +244,15 @@ public:
     createCompressor(CompressionAlgorithm algorithm) const;
 
     /**
+     * @brief Get a reusable thread-local compressor instance for the algorithm.
+     *
+     * Avoids allocating/destroying per-call compression contexts (e.g., ZSTD_CCtx/ZSTD_DCtx)
+     * on hot compress/decompress paths. The returned pointer is owned by thread-local storage
+     * and remains valid until the thread exits or registerCompressor() updates the registry.
+     */
+    [[nodiscard]] ICompressor* getThreadLocalCompressor(CompressionAlgorithm algorithm) const;
+
+    /**
      * @brief Check if an algorithm is available
      * @param algorithm Algorithm to check
      * @return True if the algorithm is registered
@@ -259,6 +269,7 @@ private:
     CompressionRegistry() = default;
     std::unordered_map<CompressionAlgorithm, CompressorFactory> factories_;
     mutable std::mutex mutex_;
+    std::atomic<uint64_t> generation_{0};
 };
 
 } // namespace yams::compression

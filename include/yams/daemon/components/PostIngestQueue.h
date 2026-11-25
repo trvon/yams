@@ -498,7 +498,9 @@ private:
         const std::string& hash, int64_t docId, const std::string& textSnippet,
         const std::string& fallbackTitle, const std::string& filePath, const std::string& language,
         const std::string& mimeType, bool preserveTitle, const std::string& knowledgeGraphToken,
-        const std::shared_ptr<KnowledgeGraphCompletion>& knowledgeGraphCompletion);
+        const std::shared_ptr<KnowledgeGraphCompletion>& knowledgeGraphCompletion,
+        std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>>*
+            pendingTitleUpdates = nullptr);
     std::size_t resolveChannelCapacity() const;
     std::size_t boundedStageChannelCapacity(std::size_t defaultCap) const;
 

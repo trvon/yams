@@ -75,7 +75,8 @@ Result<std::vector<std::byte>> bytesForContentHash(std::span<const std::byte> st
     }
 
     const auto algorithm = static_cast<compression::CompressionAlgorithm>(header->algorithm);
-    auto compressor = compression::CompressionRegistry::instance().createCompressor(algorithm);
+    auto* compressor =
+        compression::CompressionRegistry::instance().getThreadLocalCompressor(algorithm);
     if (!compressor) {
         return Error(ErrorCode::InvalidArgument, "Compressor not available for stored object");
     }

@@ -2231,10 +2231,20 @@ void PostIngestQueue::processTitleExtractionBatch(
     if (jobs.empty()) {
         return;
     }
+    std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> pendingTitleUpdates;
+    pendingTitleUpdates.reserve(jobs.size());
     for (auto& job : jobs) {
         processTitleExtractionStage(job.hash, job.documentId, job.textSnippet, job.fallbackTitle,
                                     job.filePath, job.language, job.mimeType, job.preserveTitle,
-                                    job.knowledgeGraphToken, job.knowledgeGraphCompletion);
+                                    job.knowledgeGraphToken, job.knowledgeGraphCompletion,
+                                    &pendingTitleUpdates);
+    }
+    if (!pendingTitleUpdates.empty() && writeCoordinator_) {
+        auto wb = std::make_unique<WriteBatch>();
+        wb->source = "PostIngestQueue::titleExtraction/title";
+        wb->ops.emplace_back(SetMetadataBatchOp{std::move(pendingTitleUpdates)});
+        enqueueWithBackpressure(*writeCoordinator_, std::move(wb), "title extraction batch update",
+                                stop_);
     }
 }
 
@@ -2242,7 +2252,8 @@ void PostIngestQueue::processTitleExtractionStage(
     const std::string& hash, int64_t docId, const std::string& textSnippet,
     const std::string& fallbackTitle, const std::string& filePath, const std::string& language,
     const std::string& /*mimeType*/, bool preserveTitle, const std::string& knowledgeGraphToken,
-    const std::shared_ptr<KnowledgeGraphCompletion>& knowledgeGraphCompletion) {
+    const std::shared_ptr<KnowledgeGraphCompletion>& knowledgeGraphCompletion,
+    std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>>* pendingTitleUpdates) {
     const auto stageStart = std::chrono::steady_clock::now();
     struct StageTimingGuard {
         PostIngestQueue* self;
@@ -2404,12 +2415,17 @@ void PostIngestQueue::processTitleExtractionStage(
                 if (meta_ && docId >= 0) {
                     Result<void> updateRes;
                     if (writeCoordinator_) {
-                        auto wb = std::make_unique<WriteBatch>();
-                        wb->source = "PostIngestQueue::titleExtraction/title";
-                        wb->ops.emplace_back(SetMetadataBatchOp{
-                            {{docId, "title", metadata::MetadataValue(newTitle)}}});
-                        enqueueWithBackpressure(*writeCoordinator_, std::move(wb),
-                                                "title extraction update", stop_);
+                        if (pendingTitleUpdates != nullptr) {
+                            pendingTitleUpdates->emplace_back(docId, "title",
+                                                              metadata::MetadataValue(newTitle));
+                        } else {
+                            auto wb = std::make_unique<WriteBatch>();
+                            wb->source = "PostIngestQueue::titleExtraction/title";
+                            wb->ops.emplace_back(SetMetadataBatchOp{
+                                {{docId, "title", metadata::MetadataValue(newTitle)}}});
+                            enqueueWithBackpressure(*writeCoordinator_, std::move(wb),
+                                                    "title extraction update", stop_);
+                        }
                     } else {
                         updateRes = Error{ErrorCode::InvalidState, "WriteCoordinator unavailable"};
                     }

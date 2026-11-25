@@ -11,8 +11,8 @@
 namespace yams::compression {
 
 Result<std::vector<std::byte>> encodeFramedPayload(std::span<const std::byte> data) {
-    auto compressor =
-        CompressionRegistry::instance().createCompressor(CompressionAlgorithm::Zstandard);
+    auto* compressor =
+        CompressionRegistry::instance().getThreadLocalCompressor(CompressionAlgorithm::Zstandard);
     if (!compressor) {
         return Error{ErrorCode::InvalidState, "Zstandard compressor unavailable"};
     }
@@ -75,7 +75,7 @@ Result<std::vector<std::byte>> decodeFramedPayload(std::span<const std::byte> fr
     if (algorithm == CompressionAlgorithm::None) {
         out.assign(body.begin(), body.end());
     } else {
-        auto compressor = CompressionRegistry::instance().createCompressor(algorithm);
+        auto* compressor = CompressionRegistry::instance().getThreadLocalCompressor(algorithm);
         if (!compressor) {
             return Error{ErrorCode::NotSupported,
                          std::string("no decoder for compression algorithm ") +

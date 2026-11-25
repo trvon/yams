@@ -3023,15 +3023,9 @@ MetadataRepository::tryAddSymSpellTerms(const std::vector<std::pair<std::string,
         return Result<void>();
     }
 
-    constexpr std::size_t kTermsPerChunk = 512;
+    constexpr std::size_t kTermsPerChunk = 2048;
 
-    for (std::size_t offset = 0; offset < filtered.size(); offset += kTermsPerChunk) {
-        const std::size_t end = std::min(filtered.size(), offset + kTermsPerChunk);
-        std::vector<std::pair<std::string, int64_t>> chunk;
-        chunk.reserve(end - offset);
-        for (std::size_t i = offset; i < end; ++i) {
-            chunk.push_back(std::move(filtered[i]));
-        }
+    auto applyChunk = [&](const std::vector<std::pair<std::string, int64_t>>& chunk) {
         auto result = executeWriteQuery<void>([&](Database& db) -> Result<void> {
             sqlite3* rawDb = db.rawHandle();
             if (!rawDb) {
@@ -3051,6 +3045,22 @@ MetadataRepository::tryAddSymSpellTerms(const std::vector<std::pair<std::string,
         if (!result) {
             spdlog::warn("SymSpell term batch write failed for {} terms: {}", chunk.size(),
                          result.error().message);
+        }
+        return result;
+    };
+
+    if (filtered.size() <= kTermsPerChunk) {
+        return applyChunk(filtered);
+    }
+
+    for (std::size_t offset = 0; offset < filtered.size(); offset += kTermsPerChunk) {
+        const std::size_t end = std::min(filtered.size(), offset + kTermsPerChunk);
+        std::vector<std::pair<std::string, int64_t>> chunk;
+        chunk.reserve(end - offset);
+        for (std::size_t i = offset; i < end; ++i) {
+            chunk.push_back(std::move(filtered[i]));
+        }
+        if (auto result = applyChunk(chunk); !result) {
             return result.error();
         }
     }
