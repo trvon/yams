@@ -1036,8 +1036,8 @@ jobs:
           $ErrorActionPreference = "Stop"
           Write-Host "Building release for Windows x86_64"
 
-          # Set version
-          $env:YAMS_EXTRA_MESON_FLAGS = "-Dyams-version=${{ steps.meta.outputs.version }}"
+          # Set version and disable debug-only YAMS_DCHECK aborts in shipping release binaries
+          $env:YAMS_EXTRA_MESON_FLAGS = "-Dyams-version=${{ steps.meta.outputs.version }} -Denable-dcheck=false"
 
           # Windows hosted runners can lose communication under unbounded Ninja parallelism.
           $env:YAMS_NINJA_JOBS = "2"
@@ -1097,7 +1097,7 @@ jobs:
           export YAMS_CONAN_HOST_PROFILE="$HOST_PROFILE"
           export YAMS_CONAN_ARCH="$ARCH"
           export YAMS_ENABLE_MOBILE_BINDINGS=false
-          export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${{ steps.meta.outputs.version }} -Dwerror=false -Dwarning_level=2 ${{ matrix.meson_args }}"
+          export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${{ steps.meta.outputs.version }} -Denable-dcheck=false -Dwerror=false -Dwarning_level=2 ${{ matrix.meson_args }}"
 
            # Set install prefix: /usr for Linux packages, /usr/local for macOS
            if [ "$RUNNER_OS" = "Linux" ]; then
