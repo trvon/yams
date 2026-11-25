@@ -690,7 +690,8 @@ TEST_CASE("SearchTuner: dead-source gates pin structure weights on SCIENTIFIC",
     CHECK((cfg.kgWeight == Approx(0.0f)));
     // Live fusion legs stay mass-bearing after normalize.
     CHECK((cfg.textWeight > 0.35f));
-    CHECK((cfg.vectorWeight > 0.25f));
+    CHECK((cfg.vectorWeight == Approx(0.20f).margin(0.01f)));
+    CHECK((cfg.simeonTextWeight == Approx(0.32f).margin(0.01f)));
     // Lexical floor / vector-only guardrails retained from MIXED_PRECISION.
     CHECK((cfg.lexicalFloorTopN == 12));
     CHECK((cfg.lexicalFloorBoost == Approx(0.20f)));
@@ -1198,7 +1199,7 @@ TEST_CASE("resolveQueryPolicy: SCIENTIFIC CamelCase query preserves simeonText s
     REQUIRE(resolution.routeDecision.intent.label == QueryIntent::Code);
     REQUIRE(resolution.communityOverride == TuningState::SMALL_CODE);
     CHECK(resolution.config.simeonTextWeight > 0.25f);
-    CHECK(resolution.config.simeonTextWeight == Approx(0.3024f).margin(0.01f));
+    CHECK(resolution.config.simeonTextWeight == Approx(0.3281f).margin(0.01f));
     CHECK(resolution.config.textWeight == Approx(0.5108f).margin(0.01f));
 }
 

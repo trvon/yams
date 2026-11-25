@@ -203,9 +203,10 @@ void appendDirectSimeonLexicalBatch(
     }
 
     const size_t beforeAppend = results.size();
+    // Preserve Simeon's corpus-wide rank (startRank=0) rather than burying full-corpus BM25
+    // hits behind partial implicit-AND FTS5 results.
     appendLexicalBatchAtRank(query, queryIntent, config, *directResults, 1.0f, true, &seenHashes,
-                             ComponentResult::Source::SimeonText, results, expansionStats,
-                             results.size());
+                             ComponentResult::Source::SimeonText, results, expansionStats, 0);
     if (expansionStats != nullptr) {
         expansionStats->simeonDirectAddedCount +=
             results.size() > beforeAppend ? results.size() - beforeAppend : 0;
@@ -522,7 +523,8 @@ std::vector<ComponentResult> queryFullTextPipeline(
 
     const bool weakLexicalPool = baseFtsHitCount < config.weakQueryMinTextHits ||
                                  results.size() < config.weakQueryMinTextHits;
-    if (weakLexicalPool) {
+    const bool underfilledLexicalPool = session != nullptr && baseFtsHitCount < limit;
+    if (weakLexicalPool || underfilledLexicalPool) {
         appendDirectSimeonLexicalBatch(metadataRepo, query, session, lastSimeonRouteRecipe,
                                        queryIntent, config, limit, seenHashes, results,
                                        expansionStats);
