@@ -2201,4 +2201,10 @@ Result<void> WriteCoordinator::applyMetadataOp(AcknowledgeKnowledgeGraphOp& op) 
     return Result<void>();
 }
 
+namespace detail {
+void logWriteBatchCoalescerWarn(std::string_view source, std::string_view message) {
+    spdlog::warn("[WriteBatchCoalescer:{}] {}", source, message);
+}
+} // namespace detail
+
 } // namespace yams::daemon
