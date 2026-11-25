@@ -327,3 +327,44 @@ TEST_CASE("SearchEngine surfaces simeon lexical timing and cache statistics",
     CHECK_FALSE(plainResponse.value().componentTimingMicros.contains(
         std::string(kSimeonLexicalScoreTimingKey)));
 }
+
+TEST_CASE("SearchEngine fills underfilled lexical pools via Simeon and skips aggressive FTS5",
+          "[search][simeon][integration][catch2]") {
+    constexpr std::array<std::pair<std::string_view, std::string_view>, 4> kThreeAlphaCorpus{{
+        {"hash_a", "alpha protocol spec one"},
+        {"hash_b", "alpha protocol spec two"},
+        {"hash_c", "alpha protocol spec three"},
+        {"hash_d", "gamma unrelated entry"},
+    }};
+    auto corpus = makeCorpus(kThreeAlphaCorpus);
+    auto cfg = makeLexicalOnlyConfig();
+    cfg.includeDebugInfo = true;
+    cfg.enableReranking = false;
+    cfg.weakQueryMinTextHits = 1; // 3 FTS hits is NOT weak, but IS underfilled (< limit=10)
+    cfg.textMaxResults = 10;
+    cfg.simeonTextWeight = 1.0F;
+
+    auto engine = makeEngine(corpus, cfg);
+    auto backend = std::make_unique<SimeonLexicalBackend>(SimeonLexicalBackend::Config{});
+    auto* backendRaw = backend.get();
+    engine->setSimeonLexicalBackend(std::move(backend));
+    REQUIRE(waitReady(*backendRaw, std::chrono::seconds(5)));
+
+    SearchParams params;
+    params.limit = 10;
+    // "alpha" matches 3 docs in FTS5 (>= weakQueryMinTextHits=1, < limit=10), so underfilled
+    // pool triggers direct Simeon lexical fill and skips aggressive FTS5 fallback clauses.
+    auto response = engine->searchWithResponse("alpha", params);
+    REQUIRE(response.has_value());
+
+    const auto& debug = response.value().debugStats;
+    REQUIRE(debug.contains("simeon_direct_raw_hit_count"));
+    CHECK(std::stoull(debug.at("simeon_direct_raw_hit_count")) >= 3u);
+    if (auto it = debug.find("aggressive_fts_clause_count"); it != debug.end()) {
+        CHECK(std::stoull(it->second) == 0u);
+    }
+    const auto ids = hashSet(response.value().results);
+    CHECK(ids.count("hash_a") == 1u);
+    CHECK(ids.count("hash_b") == 1u);
+    CHECK(ids.count("hash_c") == 1u);
+}

@@ -179,8 +179,7 @@ TEST_CASE("MetadataRepository: fresh instance over existing DB hydrates counters
             REQUIRE(id.has_value());
             ids.push_back(id.value());
         }
-        REQUIRE(primary
-                    .setMetadata(ids[0], "tag:primary", MetadataValue(std::string("true")))
+        REQUIRE(primary.setMetadata(ids[0], "tag:primary", MetadataValue(std::string("true")))
                     .has_value());
     }
 
@@ -243,6 +242,57 @@ TEST_CASE("MetadataRepositoryCache: concurrent exact path lookups stay coherent"
     }
 
     CHECK((failures.load(std::memory_order_relaxed) == 0));
+
+    pool.shutdown();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}
+
+TEST_CASE("MetadataRepository: searchCandidates matches search top-K and caches independently",
+          "[unit][metadata][search][cache]") {
+    auto dbPath = tempDbPath("repo_search_candidates_catch2_");
+    ConnectionPool pool(dbPath.string());
+    REQUIRE(pool.initialize().has_value());
+    MetadataRepository repo(pool);
+
+    for (int i = 0; i < 6; ++i) {
+        auto doc = mk("/docs/cell_" + std::to_string(i) + ".txt", "SH" + std::to_string(i));
+        auto id = repo.insertDocument(doc);
+        REQUIRE(id.has_value());
+        std::string content =
+            "interleukin cytokine signaling pathway document " + std::to_string(i);
+        REQUIRE(repo.indexDocumentContent(id.value(), doc.sha256Hash, content, "text/plain")
+                    .has_value());
+    }
+
+    auto full = repo.search("cytokine signaling", 3, 0);
+    REQUIRE(full.has_value());
+    REQUIRE(full.value().results.size() == 3);
+    CHECK(full.value().totalCount == 6);
+
+    auto cand = repo.searchCandidates("cytokine signaling", 3, 0);
+    REQUIRE(cand.has_value());
+    REQUIRE(cand.value().results.size() == 3);
+    // searchCandidates skips the bounded COUNT(*) query when returning a full page.
+    CHECK(cand.value().totalCount == 3);
+
+    for (size_t i = 0; i < 3; ++i) {
+        const auto& a = full.value().results[i];
+        const auto& b = cand.value().results[i];
+        CHECK(a.document.id == b.document.id);
+        CHECK(a.document.filePath == b.document.filePath);
+        CHECK(a.document.fileName == b.document.fileName);
+        CHECK(a.document.sha256Hash == b.document.sha256Hash);
+        CHECK(a.snippet == b.snippet);
+        CHECK(a.score == b.score);
+    }
+
+    // Second call exercises the shared_ptr query cache hit path.
+    auto candCached = repo.searchCandidates("cytokine signaling", 3, 0);
+    REQUIRE(candCached.has_value());
+    REQUIRE(candCached.value().results.size() == 3);
+    CHECK(candCached.value().results[0].document.sha256Hash ==
+          cand.value().results[0].document.sha256Hash);
 
     pool.shutdown();
     std::error_code ec;

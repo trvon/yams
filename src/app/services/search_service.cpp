@@ -1964,61 +1964,70 @@ private:
             const size_t effectiveLimit = req.limit > 0 ? req.limit : kMaxProcessableResults;
             const size_t n = std::min({candidates.size(), kMaxProcessableResults, effectiveLimit});
 
-            // Cap worker count to avoid thread explosion
+            // Cap worker count to avoid thread explosion, and avoid spawning OS threads for small
+            // result sets (the common limit=10..50 case copies in microseconds on the caller).
+            constexpr size_t kParallelShapeThreshold = 256;
             constexpr size_t kMaxWorkers = 16;
-            const size_t workers = std::min(recommendedWorkers(n), kMaxWorkers);
+            const size_t workers = n < kParallelShapeThreshold
+                                       ? size_t{1}
+                                       : std::min(recommendedWorkers(n), kMaxWorkers);
             YAMS_PLOT("search_service::candidates", static_cast<double>(n));
 
-            std::atomic<size_t> next{0};
-            std::vector<std::optional<SearchItem>> slots(n);
+            const auto shapeItem = [&](size_t i) -> SearchItem {
+                const auto& r = *candidates[i];
+                SearchItem it;
+                it.id = r.document.id;
+                it.hash = r.document.sha256Hash;
+                it.title = r.document.fileName;
+                it.path = r.document.filePath;
+                it.score = r.score;
+                if (!r.snippet.empty())
+                    it.snippet = r.snippet;
 
-            auto worker = [&]() {
-                YAMS_ZONE_SCOPED_N("search_service::result_shape_worker");
-                while (true) {
-                    const size_t i = next.fetch_add(1);
-                    if (i >= n)
-                        break;
-                    const auto& r = *candidates[i];
-                    SearchItem it;
-                    it.id = r.document.id;
-                    it.hash = r.document.sha256Hash;
-                    it.title = r.document.fileName;
-                    it.path = r.document.filePath;
-                    it.score = r.score;
-                    if (!r.snippet.empty())
-                        it.snippet = r.snippet;
-
-                    // Copy score breakdown if available
-                    it.vectorScore = r.vectorScore;
-                    it.keywordScore = r.keywordScore;
-                    it.kgEntityScore = r.kgScore;
-                    it.structuralScore = r.pathScore;
-
-                    slots[i] = std::move(it);
-                }
+                // Copy score breakdown if available
+                it.vectorScore = r.vectorScore;
+                it.keywordScore = r.keywordScore;
+                it.kgEntityScore = r.kgScore;
+                it.structuralScore = r.pathScore;
+                return it;
             };
 
-            std::vector<std::thread> ths;
-            ths.reserve(workers);
-            for (size_t t = 0; t < workers; ++t)
-                ths.emplace_back(worker);
-            for (auto& th : ths)
-                th.join();
             resp.results.reserve(n);
+            if (workers <= 1) {
+                for (size_t i = 0; i < n; ++i) {
+                    resp.results.push_back(shapeItem(i));
+                }
+            } else {
+                std::atomic<size_t> next{0};
+                std::vector<std::optional<SearchItem>> slots(n);
 
-            for (size_t i = 0; i < n; ++i) {
-                if (slots[i].has_value()) {
-                    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-                    resp.results.push_back(std::move(*slots[i]));
+                auto worker = [&]() {
+                    YAMS_ZONE_SCOPED_N("search_service::result_shape_worker");
+                    while (true) {
+                        const size_t i = next.fetch_add(1);
+                        if (i >= n)
+                            break;
+                        slots[i] = shapeItem(i);
+                    }
+                };
+
+                std::vector<std::thread> ths;
+                ths.reserve(workers);
+                for (size_t t = 0; t < workers; ++t)
+                    ths.emplace_back(worker);
+                for (auto& th : ths)
+                    th.join();
+
+                for (size_t i = 0; i < n; ++i) {
+                    if (slots[i].has_value()) {
+                        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+                        resp.results.push_back(std::move(*slots[i]));
+                    }
                 }
             }
         }
 
-        const auto enriched = annotateResultRelations(resp.results, ctx_.kgStore.get());
-        if (enriched > 0) {
-            resp.searchStats["relation_enriched"] = std::to_string(enriched);
-        }
-
+        // Relation enrichment runs once in search() after hybridSearch() returns.
         applyExtensionFacets(resp);
 
         resp.total = resp.results.size();

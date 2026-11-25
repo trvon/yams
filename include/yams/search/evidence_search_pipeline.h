@@ -54,6 +54,7 @@ deriveTopologyCandidateEvidence(const TopologyRoutingSessionResult& route,
 
 /// Typed evidence accumulated for one document before fusion.
 struct CandidateEvidence {
+    int64_t documentId{0};
     std::string candidateId;
     std::string documentHash;
     std::string filePath;

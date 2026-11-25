@@ -48,6 +48,7 @@ void appendLexicalBatchAtRank(const std::string& query, QueryIntent queryIntent,
     inputs.intent = queryIntent;
     inputs.applyIntentAdaptiveWeighting = config.enableIntentAdaptiveWeighting;
     inputs.applyFilenameBoost = true;
+    inputs.includeDebugInfo = false;
     inputs.bm25NormDivisor = config.bm25NormDivisor;
     inputs.penalty = scorePenalty;
     inputs.sourceTag = source;
@@ -180,16 +181,11 @@ std::optional<yams::metadata::SearchResults> makeDirectSimeonLexicalResults(
         }
 
         yams::metadata::SearchResult row;
-        row.document = it->second.first;
+        row.document = std::move(it->second.first);
         row.score = -static_cast<double>(candidate.score);
-        row.snippet = it->second.second;
+        row.snippet = std::move(it->second.second);
         direct.results.push_back(std::move(row));
     }
-
-    std::sort(direct.results.begin(), direct.results.end(),
-              [](const yams::metadata::SearchResult& a, const yams::metadata::SearchResult& b) {
-                  return a.score < b.score;
-              });
     direct.totalCount = static_cast<int64_t>(direct.results.size());
     return direct;
 }
@@ -207,9 +203,10 @@ void appendDirectSimeonLexicalBatch(
     }
 
     const size_t beforeAppend = results.size();
+    // Preserve Simeon's corpus-wide rank (startRank=0) rather than burying full-corpus BM25
+    // hits behind partial implicit-AND FTS5 results.
     appendLexicalBatchAtRank(query, queryIntent, config, *directResults, 1.0f, true, &seenHashes,
-                             ComponentResult::Source::SimeonText, results, expansionStats,
-                             results.size());
+                             ComponentResult::Source::SimeonText, results, expansionStats, 0);
     if (expansionStats != nullptr) {
         expansionStats->simeonDirectAddedCount +=
             results.size() > beforeAppend ? results.size() - beforeAppend : 0;
@@ -227,7 +224,7 @@ Fts5CandidatePoolStats fetchFts5CandidatePool(
     std::unordered_set<std::string> simeonSeenHashes;
     simeonSeenHashes.reserve(limit * 2);
 
-    auto fts5Results = metadataRepo->search(query, static_cast<int>(limit), 0);
+    auto fts5Results = metadataRepo->searchCandidates(query, static_cast<int>(limit), 0);
     stats.baseFtsSucceeded = static_cast<bool>(fts5Results);
     if (!stats.baseFtsSucceeded) {
         spdlog::debug("FTS5 search failed, continuing with fallback expansion: {}",
@@ -289,7 +286,8 @@ Fts5CandidatePoolStats fetchFts5CandidatePool(
                 expandedQuery += clauses[i];
             }
 
-            auto expandedResults = metadataRepo->search(expandedQuery, static_cast<int>(limit), 0);
+            auto expandedResults =
+                metadataRepo->searchCandidates(expandedQuery, static_cast<int>(limit), 0);
             if (expandedResults) {
                 if (expansionStats != nullptr) {
                     expansionStats->subPhraseFtsHitCount = expandedResults.value().results.size();
@@ -376,7 +374,8 @@ void applyAggressiveFtsFallback(
     size_t totalAggressiveHits = 0;
     const size_t beforeAggressive = results.size();
     for (const auto& clause : aggressiveClauses) {
-        auto clauseResults = metadataRepo->search(clause.query, static_cast<int>(limit), 0);
+        auto clauseResults =
+            metadataRepo->searchCandidates(clause.query, static_cast<int>(limit), 0);
         if (!clauseResults) {
             continue;
         }
@@ -392,15 +391,10 @@ void applyAggressiveFtsFallback(
     }
 
     if (!aggressiveClauses.empty()) {
-        std::vector<std::string> debugClauses;
-        debugClauses.reserve(aggressiveClauses.size());
-        for (const auto& clause : aggressiveClauses) {
-            debugClauses.push_back(clause.query);
-        }
         spdlog::debug("queryFullText aggressive fallback: base_succeeded={} base_hits={} "
-                      "clauses={} added_hits={} query='{}' clauses='{}'",
+                      "clauses={} added_hits={} query='{}'",
                       baseFtsSucceeded ? 1 : 0, baseFtsHitCount, aggressiveClauses.size(),
-                      results.size(), query, debugClauses.size());
+                      results.size(), query);
     }
 }
 
@@ -417,7 +411,7 @@ void applyGraphExpansionTerms(
     size_t totalGraphHits = 0;
     const size_t beforeGraph = results.size();
     for (const auto& term : graphTerms) {
-        auto graphResults = metadataRepo->search(term.text, static_cast<int>(limit), 0);
+        auto graphResults = metadataRepo->searchCandidates(term.text, static_cast<int>(limit), 0);
         if (!graphResults) {
             continue;
         }
@@ -436,15 +430,9 @@ void applyGraphExpansionTerms(
     }
 
     if (!graphTerms.empty()) {
-        std::vector<std::string> debugTerms;
-        debugTerms.reserve(graphTerms.size());
-        for (const auto& term : graphTerms) {
-            debugTerms.push_back(term.text);
-        }
         spdlog::debug("queryFullText graph expansion: base_hits={} graph_terms={} "
-                      "graph_hits={} final_hits={} query='{}' terms='{}'",
-                      baseFtsHitCount, graphTerms.size(), totalGraphHits, results.size(), query,
-                      debugTerms.size());
+                      "graph_hits={} final_hits={} query='{}'",
+                      baseFtsHitCount, graphTerms.size(), totalGraphHits, results.size(), query);
     }
 }
 
@@ -482,7 +470,7 @@ void applySubPhraseRescoring(
         }
         clause += ")";
 
-        auto phraseResults = metadataRepo->search(clause, static_cast<int>(limit), 0);
+        auto phraseResults = metadataRepo->searchCandidates(clause, static_cast<int>(limit), 0);
         if (!phraseResults || phraseResults.value().results.empty()) {
             continue;
         }
@@ -535,7 +523,8 @@ std::vector<ComponentResult> queryFullTextPipeline(
 
     const bool weakLexicalPool = baseFtsHitCount < config.weakQueryMinTextHits ||
                                  results.size() < config.weakQueryMinTextHits;
-    if (weakLexicalPool) {
+    const bool underfilledLexicalPool = session != nullptr && baseFtsHitCount < limit;
+    if (weakLexicalPool || underfilledLexicalPool) {
         appendDirectSimeonLexicalBatch(metadataRepo, query, session, lastSimeonRouteRecipe,
                                        queryIntent, config, limit, seenHashes, results,
                                        expansionStats);
@@ -545,7 +534,11 @@ std::vector<ComponentResult> queryFullTextPipeline(
         applySubPhraseRescoring(metadataRepo, query, config, limit, results, subPhraseGenerator);
     }
 
-    if (!baseFtsSucceeded || baseFtsHitCount == 0 || results.size() < 3) {
+    // Skip aggressive FTS5 fallback clauses when direct Simeon lexical retrieval already
+    // populated a strong candidate pool (avoids 3 extra SQLite FTS5 scans per query).
+    const bool simeonPopulatedPool =
+        session != nullptr && results.size() >= std::max<size_t>(3, config.weakQueryMinTextHits);
+    if (!simeonPopulatedPool && (!baseFtsSucceeded || baseFtsHitCount == 0 || results.size() < 3)) {
         const size_t maxAggressiveClauses = (!baseFtsSucceeded || baseFtsHitCount == 0) ? 10 : 6;
         auto aggressiveClauses = aggressiveClauseGenerator(query, maxAggressiveClauses);
         applyAggressiveFtsFallback(metadataRepo, query, queryIntent, config, limit,
@@ -580,7 +573,7 @@ GraphDocumentExpansionStats appendGraphDocumentExpansionTerms(
 
     for (const auto& term : graphTerms) {
         auto searchResults =
-            metadataRepo->search(term.text, static_cast<int>(config.textMaxResults), 0);
+            metadataRepo->searchCandidates(term.text, static_cast<int>(config.textMaxResults), 0);
         if (!searchResults) {
             continue;
         }

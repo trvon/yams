@@ -151,6 +151,7 @@ EvidenceSearchPipeline::execute(std::span<const ComponentResult> components,
         auto [indexIt, inserted] = candidateIndex.emplace(id, output.evidence.size());
         if (inserted) {
             CandidateEvidence evidence;
+            evidence.documentId = component.documentId;
             evidence.candidateId = id;
             evidence.documentHash = component.documentHash;
             evidence.filePath = component.filePath;
@@ -165,6 +166,9 @@ EvidenceSearchPipeline::execute(std::span<const ComponentResult> components,
         }
 
         auto& evidence = output.evidence[indexIt->second];
+        if (evidence.documentId <= 0 && component.documentId > 0) {
+            evidence.documentId = component.documentId;
+        }
         if (evidence.documentHash.empty() && !component.documentHash.empty()) {
             evidence.documentHash = component.documentHash;
         }
@@ -220,6 +224,7 @@ EvidenceSearchPipeline::execute(std::span<const ComponentResult> components,
 
     for (const auto& evidence : output.evidence) {
         yams::metadata::SearchResult result;
+        result.document.id = evidence.documentId;
         result.document.sha256Hash = evidence.documentHash;
         result.document.filePath = evidence.filePath;
         result.snippet = evidence.snippet;

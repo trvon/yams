@@ -537,7 +537,7 @@ void MetadataRepository::updateQueryCache(const std::string& key,
     }
     auto updated = std::make_shared<QueryCacheMap>(*snapshot);
     QueryCacheEntry entry;
-    entry.results = results;
+    entry.results = std::make_shared<const SearchResults>(results);
     entry.timestamp = std::chrono::steady_clock::now();
     entry.hits = 0;
 
