@@ -853,6 +853,8 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
     // Release the KG write lease before acquiring a metadata connection (including size-one pools).
     if (hasKgOps && kg_) {
         std::optional<Error> firstCompletionError;
+        std::vector<std::pair<int64_t, std::string>> pendingCompletions;
+        pendingCompletions.reserve(batches.size());
         for (const auto& batch : batches) {
             if (batch->knowledgeGraphToken.empty())
                 continue;
@@ -870,9 +872,12 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                 }
                 continue;
             }
+            pendingCompletions.emplace_back(batch->knowledgeGraphDocumentId,
+                                            batch->knowledgeGraphToken);
+        }
+        if (!pendingCompletions.empty()) {
             metadata::MetadataOpScope opScope("wc_kg_batch_completion");
-            auto completed = meta_->completeKnowledgeGraphEnrichment(
-                batch->knowledgeGraphDocumentId, batch->knowledgeGraphToken);
+            auto completed = meta_->completeKnowledgeGraphEnrichmentBatch(pendingCompletions);
             if (!completed && !firstCompletionError)
                 firstCompletionError = completed.error();
         }
