@@ -35,7 +35,6 @@
 #include <yams/metadata/query_helpers.h>
 #include <yams/vector/vector_database.h>
 
-#include <tuple>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -54,6 +53,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -1715,7 +1715,15 @@ public:
                 ? pendingMetadata.size() * 2
                 : pendingMetadata.size();
         batchFuzzyTerms.reserve(fuzzyTermCapacity);
-        for (auto& pending : pendingMetadata) {
+        struct PendingPathRecord {
+            std::size_t pendingIndex{0};
+            int64_t documentId{0};
+        };
+        std::vector<PendingPathRecord> pendingPathRecords;
+        pendingPathRecords.reserve(pendingMetadata.size());
+
+        for (std::size_t idx = 0; idx < pendingMetadata.size(); ++idx) {
+            auto& pending = pendingMetadata[idx];
             auto inserted = pending.future.get();
             recordDocumentStorePhase("metadata_insert", pending.insertStartedAt);
             if (!inserted) {
@@ -1742,18 +1750,35 @@ public:
             }
             applyStorePathTree(request, pending.info, response.documentId);
             syncStoreKnowledgeGraph(pending.info, pending.snapshotId);
-            auto pathStored = ctx_.metadataRepo->recordDocumentPath(
-                pending.info, response.documentId, pending.pathMetadata);
-            if (!pathStored) {
-                outcomes[pending.requestIndex] = pathStored.error();
-                continue;
+            pendingPathRecords.push_back({idx, response.documentId});
+        }
+
+        if (!pendingPathRecords.empty()) {
+            std::vector<metadata::MetadataRepository::DocumentPathRecordInput> pathInputs;
+            pathInputs.reserve(pendingPathRecords.size());
+            for (const auto& rec : pendingPathRecords) {
+                const auto& pending = pendingMetadata[rec.pendingIndex];
+                pathInputs.push_back({&pending.info, rec.documentId, &pending.pathMetadata});
             }
-            auto documentTerms = collectDocumentTermsForFuzzySearch(pending.info);
-            batchFuzzyTerms.insert(batchFuzzyTerms.end(),
-                                   std::make_move_iterator(documentTerms.begin()),
-                                   std::make_move_iterator(documentTerms.end()));
-            applyStoreInlineContentIndex(request, pending.info, response.documentId,
-                                         pending.usePath);
+            auto batchPathRes = ctx_.metadataRepo->recordDocumentPathsBatch(pathInputs);
+            for (const auto& rec : pendingPathRecords) {
+                auto& pending = pendingMetadata[rec.pendingIndex];
+                if (!batchPathRes) {
+                    auto singleRes = ctx_.metadataRepo->recordDocumentPath(
+                        pending.info, rec.documentId, pending.pathMetadata);
+                    if (!singleRes) {
+                        outcomes[pending.requestIndex] = singleRes.error();
+                        continue;
+                    }
+                }
+                const auto& request = requests[pending.requestIndex];
+                auto documentTerms = collectDocumentTermsForFuzzySearch(pending.info);
+                batchFuzzyTerms.insert(batchFuzzyTerms.end(),
+                                       std::make_move_iterator(documentTerms.begin()),
+                                       std::make_move_iterator(documentTerms.end()));
+                applyStoreInlineContentIndex(request, pending.info, rec.documentId,
+                                             pending.usePath);
+            }
         }
         enqueueStoreFuzzyTerms(std::move(batchFuzzyTerms), "document batch");
 

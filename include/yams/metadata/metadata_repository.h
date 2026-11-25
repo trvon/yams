@@ -704,6 +704,8 @@ public:
     // Content operations
     Result<void> insertContent(const DocumentContent& content) override;
     Result<std::optional<DocumentContent>> getContent(int64_t documentId) override;
+    /// Index-only existence check for document_content rows (avoids loading text blobs).
+    Result<std::unordered_set<int64_t>> batchHasContent(std::span<const int64_t> documentIds);
     Result<void> updateContent(const DocumentContent& content) override;
     Result<void> deleteContent(int64_t documentId) override;
     Result<void> batchInsertContentAndIndex(const std::vector<BatchContentEntry>& entries) override;
@@ -1116,10 +1118,17 @@ public:
 
     void setGraphComponent(std::shared_ptr<yams::daemon::GraphComponent> graphComponent);
 
+    struct DocumentPathRecordInput {
+        const DocumentInfo* info{nullptr};
+        int64_t documentId{0};
+        const std::vector<std::pair<std::string, MetadataValue>>* metadata{nullptr};
+    };
+
     bool supportsDocumentPaths() const { return hasDocumentPaths_; }
     Result<void>
     recordDocumentPath(const DocumentInfo& info, int64_t documentId,
                        const std::vector<std::pair<std::string, MetadataValue>>& metadata);
+    Result<void> recordDocumentPathsBatch(std::span<const DocumentPathRecordInput> entries);
     Result<void> retireDocumentPath(const std::string& path);
     Result<std::vector<DocumentInfo>> getDocumentPathReferences(int64_t documentId);
     Result<std::optional<std::unordered_map<std::string, MetadataValue>>>
