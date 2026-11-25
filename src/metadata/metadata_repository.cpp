@@ -1925,6 +1925,30 @@ void MetadataRepository::initializeCounters() {
             storeNonNegativeCount(cachedTagCount_, tagStatsResult.value().second);
         }
 
+        // Reconcile counters if shadow tables (e.g. documents_fts_docsize) or
+        // non-transactional reads drifted relative to total document count.
+        const auto total = cachedDocumentCount_.load(std::memory_order_relaxed);
+        auto clampToTotal = [&](std::atomic<uint64_t>& counter, const char* name) {
+            const auto val = counter.load(std::memory_order_relaxed);
+            if (val > total) {
+                spdlog::warn("MetadataRepository: clamping drifted {} counter ({} > total {})",
+                             name, val, total);
+                counter.store(total, std::memory_order_relaxed);
+            }
+        };
+        clampToTotal(cachedIndexedCount_, "indexed");
+        clampToTotal(cachedExtractedCount_, "extracted");
+        clampToTotal(cachedEmbeddedCount_, "embedded");
+        clampToTotal(cachedDocsWithTags_, "docsWithTags");
+        const auto docsWithTags = cachedDocsWithTags_.load(std::memory_order_relaxed);
+        if (cachedTagCount_.load(std::memory_order_relaxed) < docsWithTags) {
+            cachedTagCount_.store(docsWithTags, std::memory_order_relaxed);
+        }
+        const auto pathDepthSum = cachedPathDepthSum_.load(std::memory_order_relaxed);
+        if (cachedPathDepthMax_.load(std::memory_order_relaxed) > pathDepthSum) {
+            cachedPathDepthMax_.store(pathDepthSum, std::memory_order_relaxed);
+        }
+
         logInitializedCounters();
         debugCheckInitializedCounters();
     } catch (const std::exception& e) {
