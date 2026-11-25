@@ -58,21 +58,7 @@ namespace detail {
 inline thread_local std::string_view metadata_op_tag;
 }
 
-inline bool metadata_trace_enabled() {
-    static std::atomic<int> cached{-1};
-    int v = cached.load(std::memory_order_relaxed);
-    if (v >= 0)
-        return v == 1;
-    static std::mutex envMutex;
-    bool enabled = false;
-    {
-        std::lock_guard<std::mutex> lock(envMutex);
-        const char* env = std::getenv("YAMS_METADATA_TRACE"); // NOLINT(concurrency-mt-unsafe)
-        enabled = env && *env && std::string_view(env) != "0";
-    }
-    cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
-    return enabled;
-}
+bool metadata_trace_enabled();
 
 inline std::string_view current_metadata_op() {
     return detail::metadata_op_tag;

@@ -19,6 +19,7 @@
 #include <spdlog/spdlog.h>
 #include <yams/core/assert.hpp>
 #include <yams/core/thread_name.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 
 #include <algorithm>
 #include <chrono>
@@ -199,7 +200,7 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
 
     // Determine thread count
     const std::size_t workerCount =
-        numThreads.value_or(std::max<std::size_t>(1, std::thread::hardware_concurrency()));
+        numThreads.value_or(std::max<std::size_t>(1, TuneAdvisor::hardwareConcurrency()));
 
     workers_.reserve(workerCount);
     auto jobSlots = std::make_shared<JobSlots>(workerCount);

@@ -1635,7 +1635,7 @@ void DaemonMetrics::populateWorkerPipelineSnapshot(MetricsSnapshot& out) const {
             out.entityGraphDropped = bus.entityGraphDropped();
             out.entityGraphConsumed = bus.entityGraphConsumed();
         } else {
-            out.workerThreads = std::max(1u, std::thread::hardware_concurrency());
+            out.workerThreads = std::max(1u, TuneAdvisor::hardwareConcurrency());
         }
     } catch (...) {
         spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");

@@ -28,7 +28,6 @@ include/yams/daemon/resource/gpu_info.h:385:portability/env-read # reviewed raw 
 include/yams/daemon/resource/gpu_info.h:439:portability/env-read # reviewed raw environment read
 include/yams/mcp/tool_registry.h:31:portability/env-read # reviewed raw environment read
 include/yams/metadata/connection_pool.h:295:portability/jthread # feature-test guarded std::jthread
-include/yams/metadata/metadata_repository.h:70:portability/env-read # reviewed raw environment read
 plugins/glint/gliner_session.cpp:37:portability/env-read # reviewed raw environment read
 plugins/onnx/model_provider.cpp:90:portability/env-read # reviewed raw environment read
 plugins/onnx/model_provider.cpp:101:portability/env-read # reviewed raw environment read
@@ -82,12 +81,15 @@ src/daemon/components/RequestDispatcher.cpp:617:portability/env-read # reviewed 
 src/metadata/connection_pool.cpp:1000:portability/jthread # feature-test guarded std::jthread
 src/metadata/database.cpp:29:portability/env-read # reviewed raw environment read
 src/metadata/database.cpp:476:portability/path-cstr # std::string filename, not filesystem::path
-src/metadata/metadata_repository.cpp:1502:portability/env-read # reviewed raw environment read
+src/metadata/metadata_repository.cpp:292:portability/env-read # reviewed raw environment read
+src/metadata/metadata_repository.cpp:1519:portability/env-read # reviewed raw environment read
 src/metadata/migration.cpp:1595:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:110:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:124:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:141:portability/env-read # reviewed raw environment read
 src/metadata/versioning_util.cpp:101:portability/env-read # reviewed raw environment read
+src/search/search_engine.cpp:411:portability/env-read # reviewed raw environment read
+src/search/search_engine.cpp:420:portability/env-read # reviewed raw environment read
 src/search/search_engine.cpp:2913:portability/env-read # reviewed raw environment read
 src/search/search_lexical_pipeline.cpp:559:portability/env-read # reviewed raw environment read
 src/storage/reference_counter.cpp:215:portability/env-read # reviewed raw environment read
