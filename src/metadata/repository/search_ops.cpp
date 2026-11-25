@@ -46,19 +46,25 @@ void appendUniqueExpandedTerm(std::vector<std::string>& expandedTerms, std::stri
 Result<SearchResults>
 MetadataRepository::search(const std::string& query, int limit, int offset,
                            const std::optional<std::vector<int64_t>>& docIds) {
-    return searchFullText(query, limit, offset, docIds, false);
+    return searchFullText(query, limit, offset, docIds, false, true);
 }
 
 Result<SearchResults>
 MetadataRepository::searchKeyword(const std::string& query, int limit, int offset,
                                   const std::optional<std::vector<int64_t>>& docIds) {
-    return searchFullText(query, limit, offset, docIds, true);
+    return searchFullText(query, limit, offset, docIds, true, true);
+}
+
+Result<SearchResults>
+MetadataRepository::searchCandidates(const std::string& query, int limit, int offset,
+                                     const std::optional<std::vector<int64_t>>& docIds) {
+    return searchFullText(query, limit, offset, docIds, false, false);
 }
 
 Result<SearchResults>
 MetadataRepository::searchFullText(const std::string& query, int limit, int offset,
                                    const std::optional<std::vector<int64_t>>& docIds,
-                                   bool nlOrFallbackByDefault) {
+                                   bool nlOrFallbackByDefault, bool computeTotalCount) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::search");
     return executeReadQuery<SearchResults>([&](Database& db) -> Result<SearchResults> {
         YAMS_ZONE_SCOPED_N("MetadataRepo::search::FTS5Query");
@@ -80,16 +86,16 @@ MetadataRepository::searchFullText(const std::string& query, int limit, int offs
             cacheKey.append(std::to_string(limit));
             cacheKey.push_back(':');
             cacheKey.append(std::to_string(offset));
-            cacheKey.append(nlOrFallbackByDefault ? ":kw" : ":fts");
+            cacheKey.append(nlOrFallbackByDefault ? ":kw" : (computeTotalCount ? ":fts" : ":cand"));
 
             auto snapshot =
                 std::atomic_load_explicit(&queryCacheSnapshot_, std::memory_order_acquire);
             if (snapshot) {
                 auto it = snapshot->find(cacheKey);
-                if (it != snapshot->end()) {
+                if (it != snapshot->end() && it->second.results) {
                     auto age = std::chrono::steady_clock::now() - it->second.timestamp;
                     if (age <= kQueryCacheTtl) {
-                        return it->second.results;
+                        return *it->second.results;
                     }
                 }
             }
@@ -287,7 +293,7 @@ MetadataRepository::searchFullText(const std::string& query, int limit, int offs
                 const size_t resultSize = out.results.size();
                 const size_t requestedLimit = static_cast<size_t>(effectiveLimit);
 
-                if (resultSize < requestedLimit) {
+                if (!computeTotalCount || resultSize < requestedLimit) {
                     out.totalCount = static_cast<int64_t>(resultSize);
                 } else {
                     constexpr int64_t kMaxCountLimit = 10000;

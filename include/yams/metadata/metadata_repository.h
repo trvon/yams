@@ -811,6 +811,13 @@ public:
     searchKeyword(const std::string& query, int limit = 50, int offset = 0,
                   const std::optional<std::vector<int64_t>>& docIds = std::nullopt);
 
+    /// Candidate-generation search entry point for internal hybrid/lexical pipelines.
+    /// Identical to search(), except it skips the bounded COUNT(*) FTS5+JOIN query when a
+    /// full page is returned (callers only consume the top-limit candidate rows).
+    Result<SearchResults>
+    searchCandidates(const std::string& query, int limit = 50, int offset = 0,
+                     const std::optional<std::vector<int64_t>>& docIds = std::nullopt);
+
     // Fuzzy search operations
     Result<SearchResults>
     fuzzySearch(const std::string& query, float minSimilarity = 0.7f, int limit = 50,
@@ -1219,7 +1226,7 @@ private:
     mutable PathCacheWriteBuffer pathCacheWriteBuffer_{};
 
     struct QueryCacheEntry {
-        SearchResults results;
+        std::shared_ptr<const SearchResults> results;
         std::chrono::steady_clock::time_point timestamp{};
         uint64_t hits{0};
     };
@@ -1315,7 +1322,7 @@ private:
     void updateQueryCache(const std::string& key, const SearchResults& results) const;
     Result<SearchResults> searchFullText(const std::string& query, int limit, int offset,
                                          const std::optional<std::vector<int64_t>>& docIds,
-                                         bool nlOrFallbackByDefault);
+                                         bool nlOrFallbackByDefault, bool computeTotalCount = true);
     void invalidateQueryCache() const;
     std::optional<std::vector<int64_t>> getCachedFtsIndexedIds() const;
     void setCachedFtsIndexedIds(const std::vector<int64_t>& docIds) const;

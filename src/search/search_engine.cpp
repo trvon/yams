@@ -1510,7 +1510,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::optional<std::vector<float>> queryEmbedding;
     const bool needsEmbedding =
         (workingConfig.vectorWeight > 0.0f || workingConfig.entityVectorWeight > 0.0f);
-    std::future<std::vector<float>> embeddingFuture;
+    std::shared_future<std::pair<std::vector<float>, int64_t>> embeddingFuture;
     std::chrono::steady_clock::time_point embStart;
     bool embeddingStarted = false;
     bool embeddingAwaited = false;
@@ -1526,11 +1526,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             embStart = std::chrono::steady_clock::now();
             // The task owns its inputs so a canceled search can stop waiting for it.
             embeddingFuture = postWork(
-                [generator = embeddingGen_, queryText = query]() {
-                    YAMS_ZONE_SCOPED_N("embedding::generate_async");
-                    return generator->generateEmbedding(queryText);
-                },
-                executor_);
+                                  [generator = embeddingGen_, queryText = query]() {
+                                      YAMS_ZONE_SCOPED_N("embedding::generate_async");
+                                      const auto workerStart = std::chrono::steady_clock::now();
+                                      auto vec = generator->generateEmbedding(queryText);
+                                      const auto elapsedUs =
+                                          std::chrono::duration_cast<std::chrono::microseconds>(
+                                              std::chrono::steady_clock::now() - workerStart)
+                                              .count();
+                                      return std::make_pair(std::move(vec), elapsedUs);
+                                  },
+                                  executor_)
+                                  .share();
             embeddingStarted = true;
             embeddingStatus = "launched";
         }
@@ -1600,9 +1607,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         return;
                     }
                 }
-                auto embResult = embeddingFuture.get();
+                const auto& [embResult, embWorkerUs] = embeddingFuture.get();
+                componentTiming["embedding"] = embWorkerUs;
                 if (!embResult.empty()) {
-                    queryEmbedding = std::move(embResult);
+                    queryEmbedding = embResult;
                     embeddingStatus = "ready";
                 } else {
                     embeddingStatus = "empty_result";
@@ -1612,14 +1620,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 embeddingFailed = true;
                 embeddingStatus = "failed";
                 auto embEnd = std::chrono::steady_clock::now();
-                traceCollector.markStageFailure(
-                    "embedding",
+                componentTiming["embedding"] =
                     std::chrono::duration_cast<std::chrono::microseconds>(embEnd - embStart)
-                        .count());
+                        .count();
+                traceCollector.markStageFailure("embedding", componentTiming["embedding"]);
             }
-            auto embEnd = std::chrono::steady_clock::now();
-            componentTiming["embedding"] =
-                std::chrono::duration_cast<std::chrono::microseconds>(embEnd - embStart).count();
             if (!embeddingFailed) {
                 traceCollector.markValueStageResult("embedding", queryEmbedding.has_value(),
                                                     componentTiming["embedding"]);
@@ -1909,6 +1914,64 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                          &textExpansionStats, &graphExpansionTerms,
                                          &simeonRouteRecipe);
                 });
+
+            // Overlap global vector retrieval with Tier 1 text when vector does not narrow to
+            // Tier 1 candidates (Disabled / Shadow / Augment all run the same global vector leg).
+            // If weak-query boost changes effectiveVectorMaxResults after Tier 1, Tier 2 falls
+            // back to a fresh query so ranking stays bit-identical.
+            struct PrefetchedGlobalVector {
+                SearchEngineConfig config;
+                bool relaxedRetryEnabled{false};
+                RelaxedVectorRetryStats relaxedRetry;
+                vector::VectorSearchDiagnostics diag;
+                Result<std::vector<ComponentResult>> results{std::vector<ComponentResult>{}};
+                bool executed{false};
+            };
+            std::shared_ptr<PrefetchedGlobalVector> prefetchedGlobalVector;
+            std::future<void> prefetchedGlobalVectorFuture;
+            std::size_t prefetchedVectorLimit = 0;
+            const bool canPrefetchGlobalVector =
+                executor_ != nullptr && embeddingStarted && !delayEmbeddingUntilTier1 &&
+                !workingConfig.tieredNarrowVectorSearch && workingConfig.vectorWeight > 0.0f &&
+                (workingConfig.textWeight > 0.0f || workingConfig.simeonTextWeight > 0.0f) &&
+                vectorDb_ != nullptr &&
+                (topologyRoutingMode == SearchEngineConfig::TopologyRoutingMode::Disabled ||
+                 workingConfig.topologyVectorPolicy ==
+                     SearchEngineConfig::TopologyVectorPolicy::Shadow ||
+                 workingConfig.topologyVectorPolicy ==
+                     SearchEngineConfig::TopologyVectorPolicy::Augment);
+            if (canPrefetchGlobalVector) {
+                prefetchedVectorLimit =
+                    semanticBudgetActive
+                        ? std::min(workingConfig.vectorMaxResults,
+                                   std::max<std::size_t>(
+                                       1, workingConfig.semanticBudgetVectorMaxResults))
+                        : workingConfig.vectorMaxResults;
+                prefetchedGlobalVector = std::make_shared<PrefetchedGlobalVector>();
+                prefetchedGlobalVector->config = workingConfig;
+                prefetchedGlobalVector->relaxedRetryEnabled = relaxedVectorRetryEnabled;
+                prefetchedGlobalVectorFuture = postWork(
+                    [embFuture = embeddingFuture, state = prefetchedGlobalVector,
+                     repo = metadataRepo_, vdb = vectorDb_, limit = prefetchedVectorLimit,
+                     expectedDim = vectorDbEmbeddingDim]() {
+                        YAMS_ZONE_SCOPED_N("component::vector_prefetch");
+                        try {
+                            const auto& [emb, _] = embFuture.get();
+                            if (emb.empty() || (expectedDim > 0 && emb.size() != expectedDim)) {
+                                return;
+                            }
+                            auto queryFn = makeQueryVectorWithRelaxedRetry(
+                                repo, vdb, state->config, state->relaxedRetryEnabled,
+                                state->relaxedRetry);
+                            state->results = queryFn(emb, limit, nullptr, &state->diag,
+                                                     vector::CandidateFilterMode::BackendDefault);
+                            state->executed = true;
+                        } catch (...) {
+                            state->executed = false;
+                        }
+                    },
+                    executor_);
+            }
 
             fanout.path =
                 schedule("path", workingConfig.pathTreeWeight, stats_.pathTreeQueries,
@@ -2263,9 +2326,43 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 vectorStageState->relaxedRetryEnabled = relaxedVectorRetryEnabled;
                 detail::VectorStageRequest vectorStageRequest;
                 vectorStageRequest.queryEmbedding = queryEmbedding.value();
-                vectorStageRequest.queryVector = makeQueryVectorWithRelaxedRetry(
+                auto baseQueryVector = makeQueryVectorWithRelaxedRetry(
                     metadataRepo_, vectorDb_, vectorStageState->config,
                     vectorStageState->relaxedRetryEnabled, vectorStageState->relaxedRetry);
+                const bool adoptPrefetch = prefetchedGlobalVectorFuture.valid() &&
+                                           prefetchedGlobalVector != nullptr &&
+                                           effectiveVectorMaxResults == prefetchedVectorLimit;
+                if (adoptPrefetch) {
+                    auto sharedPrefetchFuture = std::make_shared<std::future<void>>(
+                        std::move(prefetchedGlobalVectorFuture));
+                    vectorStageRequest.queryVector =
+                        [baseQueryVector = std::move(baseQueryVector),
+                         prefetchFuture = std::move(sharedPrefetchFuture),
+                         prefetchState = prefetchedGlobalVector, stageState = vectorStageState,
+                         prefetchLimit = prefetchedVectorLimit](
+                            const std::vector<float>& emb, std::size_t limit,
+                            const std::unordered_set<std::string>* candidates,
+                            vector::VectorSearchDiagnostics* diagnostics,
+                            vector::CandidateFilterMode candidateFilterMode)
+                        -> Result<std::vector<ComponentResult>> {
+                        if (candidates == nullptr && limit == prefetchLimit &&
+                            candidateFilterMode == vector::CandidateFilterMode::BackendDefault &&
+                            prefetchFuture && prefetchFuture->valid()) {
+                            prefetchFuture->get();
+                            if (prefetchState->executed) {
+                                stageState->relaxedRetry = prefetchState->relaxedRetry;
+                                if (diagnostics != nullptr) {
+                                    *diagnostics = prefetchState->diag;
+                                }
+                                return std::move(prefetchState->results);
+                            }
+                        }
+                        return baseQueryVector(emb, limit, candidates, diagnostics,
+                                               candidateFilterMode);
+                    };
+                } else {
+                    vectorStageRequest.queryVector = std::move(baseQueryVector);
+                }
                 vectorStageRequest.baselineCandidates = baselineTier2Candidates;
                 vectorStageRequest.shadow = topologyVectorShadow;
                 vectorStageRequest.augment = topologyVectorAugment;

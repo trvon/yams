@@ -42,9 +42,10 @@ float normalizedBm25Score(double rawScore, float divisor, double minScore, doubl
     return std::clamp(static_cast<float>(-rawScore) / divisor, 0.0f, 1.0f);
 }
 
-float filenamePathBoost(const std::string& query, const std::string& filePath,
-                        const std::string& fileName) {
-    const auto queryTokens = tokenizeLower(query);
+namespace {
+
+float filenamePathBoostFromTokens(const std::vector<std::string>& queryTokens,
+                                  const std::string& filePath, const std::string& fileName) {
     if (queryTokens.empty()) {
         return 1.0f;
     }
@@ -55,15 +56,17 @@ float filenamePathBoost(const std::string& query, const std::string& filePath,
         return 1.0f;
     }
 
-    std::unordered_set<std::string> nameSet(nameTokens.begin(), nameTokens.end());
-    std::unordered_set<std::string> pathSet(pathTokens.begin(), pathTokens.end());
+    const auto containsExact = [](const std::vector<std::string>& tokens,
+                                  const std::string& target) {
+        return std::find(tokens.begin(), tokens.end(), target) != tokens.end();
+    };
 
     std::size_t nameMatches = 0;
     std::size_t pathMatches = 0;
     for (const auto& tok : queryTokens) {
-        if (nameSet.count(tok)) {
+        if (containsExact(nameTokens, tok)) {
             nameMatches++;
-        } else if (pathSet.count(tok)) {
+        } else if (containsExact(pathTokens, tok)) {
             pathMatches++;
         } else {
             for (const auto& nameTok : nameTokens) {
@@ -90,6 +93,13 @@ float filenamePathBoost(const std::string& query, const std::string& filePath,
         return 1.0f + std::min(1.0f, 0.25f + static_cast<float>(pathMatches) * 0.25f);
     }
     return 1.0f;
+}
+
+} // namespace
+
+float filenamePathBoost(const std::string& query, const std::string& filePath,
+                        const std::string& fileName) {
+    return filenamePathBoostFromTokens(tokenizeLower(query), filePath, fileName);
 }
 
 namespace {
@@ -133,6 +143,8 @@ LexicalScoringOutput scoreLexicalBatch(const LexicalScoringInputs& inputs) {
         inputs.applyIntentAdaptiveWeighting ? intentAdaptiveNonCodeMultiplier(inputs.intent) : 1.0f;
 
     const std::string queryStr{inputs.query};
+    const auto queryTokens =
+        inputs.applyFilenameBoost ? tokenizeLower(queryStr) : std::vector<std::string>{};
 
     for (size_t rank = 0; rank < rows.size(); ++rank) {
         const auto& sr = rows[rank];
@@ -145,7 +157,7 @@ LexicalScoringOutput scoreLexicalBatch(const LexicalScoringInputs& inputs) {
 
         float scoreMultiplier = isCodeFile ? 1.0f : nonCodeFileMultiplier;
         if (inputs.applyFilenameBoost) {
-            scoreMultiplier *= filenamePathBoost(queryStr, filePath, fileName);
+            scoreMultiplier *= filenamePathBoostFromTokens(queryTokens, filePath, fileName);
         }
         scoreMultiplier *= inputs.penalty;
 

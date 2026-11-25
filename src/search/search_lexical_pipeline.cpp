@@ -227,7 +227,7 @@ Fts5CandidatePoolStats fetchFts5CandidatePool(
     std::unordered_set<std::string> simeonSeenHashes;
     simeonSeenHashes.reserve(limit * 2);
 
-    auto fts5Results = metadataRepo->search(query, static_cast<int>(limit), 0);
+    auto fts5Results = metadataRepo->searchCandidates(query, static_cast<int>(limit), 0);
     stats.baseFtsSucceeded = static_cast<bool>(fts5Results);
     if (!stats.baseFtsSucceeded) {
         spdlog::debug("FTS5 search failed, continuing with fallback expansion: {}",
@@ -289,7 +289,8 @@ Fts5CandidatePoolStats fetchFts5CandidatePool(
                 expandedQuery += clauses[i];
             }
 
-            auto expandedResults = metadataRepo->search(expandedQuery, static_cast<int>(limit), 0);
+            auto expandedResults =
+                metadataRepo->searchCandidates(expandedQuery, static_cast<int>(limit), 0);
             if (expandedResults) {
                 if (expansionStats != nullptr) {
                     expansionStats->subPhraseFtsHitCount = expandedResults.value().results.size();
@@ -376,7 +377,8 @@ void applyAggressiveFtsFallback(
     size_t totalAggressiveHits = 0;
     const size_t beforeAggressive = results.size();
     for (const auto& clause : aggressiveClauses) {
-        auto clauseResults = metadataRepo->search(clause.query, static_cast<int>(limit), 0);
+        auto clauseResults =
+            metadataRepo->searchCandidates(clause.query, static_cast<int>(limit), 0);
         if (!clauseResults) {
             continue;
         }
@@ -417,7 +419,7 @@ void applyGraphExpansionTerms(
     size_t totalGraphHits = 0;
     const size_t beforeGraph = results.size();
     for (const auto& term : graphTerms) {
-        auto graphResults = metadataRepo->search(term.text, static_cast<int>(limit), 0);
+        auto graphResults = metadataRepo->searchCandidates(term.text, static_cast<int>(limit), 0);
         if (!graphResults) {
             continue;
         }
@@ -482,7 +484,7 @@ void applySubPhraseRescoring(
         }
         clause += ")";
 
-        auto phraseResults = metadataRepo->search(clause, static_cast<int>(limit), 0);
+        auto phraseResults = metadataRepo->searchCandidates(clause, static_cast<int>(limit), 0);
         if (!phraseResults || phraseResults.value().results.empty()) {
             continue;
         }
@@ -580,7 +582,7 @@ GraphDocumentExpansionStats appendGraphDocumentExpansionTerms(
 
     for (const auto& term : graphTerms) {
         auto searchResults =
-            metadataRepo->search(term.text, static_cast<int>(config.textMaxResults), 0);
+            metadataRepo->searchCandidates(term.text, static_cast<int>(config.textMaxResults), 0);
         if (!searchResults) {
             continue;
         }
