@@ -700,6 +700,9 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                         newEngine->setExecutor(runtimeExecutor_.get_executor());
                         {
                             std::unique_lock lock(engineMutex_);
+                            if (engine_) {
+                                newEngine->adoptTopologySnapshotCache(*engine_);
+                            }
                             engine_ = newEngine;
                         }
                         refreshSnapshot();

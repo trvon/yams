@@ -91,7 +91,7 @@ src/metadata/repository/search_ops.cpp:144:portability/env-read # reviewed raw e
 src/metadata/versioning_util.cpp:101:portability/env-read # reviewed raw environment read
 src/search/search_engine.cpp:410:portability/env-read # reviewed raw environment read
 src/search/search_engine.cpp:423:portability/env-read # reviewed raw environment read
-src/search/search_engine.cpp:2909:portability/env-read # reviewed raw environment read
+src/search/search_engine.cpp:2916:portability/env-read # reviewed raw environment read
 src/search/search_lexical_pipeline.cpp:559:portability/env-read # reviewed raw environment read
 src/storage/reference_counter.cpp:215:portability/env-read # reviewed raw environment read
 src/storage/reference_counter.cpp:272:portability/env-read # reviewed raw environment read

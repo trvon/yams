@@ -1079,6 +1079,13 @@ public:
         return lookup.value().snapshot != nullptr;
     }
 
+    void adoptTopologySnapshotCache(const Impl& previous) {
+        if (previous.topologySnapshotCache_ && metadataRepo_ == previous.metadataRepo_ &&
+            kgStore_ == previous.kgStore_) {
+            topologySnapshotCache_ = previous.topologySnapshotCache_;
+        }
+    }
+
     const SearchEngine::Statistics& getStatistics() const { return stats_; }
 
     void resetStatistics() {
@@ -5104,6 +5111,12 @@ const SearchEngineConfig& SearchEngine::getConfig() const {
 
 Result<bool> SearchEngine::prewarmTopologyRouting() {
     return pImpl_->prewarmTopologyRouting();
+}
+
+void SearchEngine::adoptTopologySnapshotCache(const SearchEngine& previous) {
+    if (pImpl_ && previous.pImpl_) {
+        pImpl_->adoptTopologySnapshotCache(*previous.pImpl_);
+    }
 }
 
 const SearchEngine::Statistics& SearchEngine::getStatistics() const {
