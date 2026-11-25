@@ -295,7 +295,7 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
         try {
             return std::max<size_t>(1, TuneAdvisor::recommendedThreads(0.25));
         } catch (...) {
-            size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+            size_t hw = std::max<size_t>(1, TuneAdvisor::hardwareConcurrency());
             return std::max<size_t>(1, hw / 2);
         }
     }();

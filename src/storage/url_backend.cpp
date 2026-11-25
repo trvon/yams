@@ -266,7 +266,8 @@ public:
 
     auto parseURL(const std::string& url) -> Result<void> {
         // Parse URL: scheme://[user:pass@]host[:port]/path
-        std::regex urlRegex(R"(^(([^:/?#]+):)?(//([^/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?$)");
+        static const std::regex urlRegex(
+            R"(^(([^:/?#]+):)?(//([^/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?$)");
         std::smatch match;
 
         if (!std::regex_match(url, match, urlRegex)) {

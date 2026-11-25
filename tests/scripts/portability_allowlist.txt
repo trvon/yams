@@ -14,9 +14,9 @@ include/yams/cli/daemon_helpers.h:625:portability/env-read # reviewed raw enviro
 include/yams/cli/daemon_helpers.h:716:portability/env-read # reviewed raw environment read
 include/yams/cli/daemon_helpers.h:919:portability/env-read # reviewed raw environment read
 include/yams/cli/daemon_helpers.h:924:portability/env-read # reviewed raw environment read
-include/yams/cli/ui_helpers.hpp:127:portability/env-read # reviewed raw environment read
-include/yams/cli/ui_helpers.hpp:130:portability/env-read # reviewed raw environment read
-include/yams/cli/ui_helpers.hpp:390:portability/env-read # reviewed raw environment read
+include/yams/cli/ui_helpers.hpp:125:portability/env-read # reviewed raw environment read
+include/yams/cli/ui_helpers.hpp:128:portability/env-read # reviewed raw environment read
+include/yams/cli/ui_helpers.hpp:388:portability/env-read # reviewed raw environment read
 include/yams/common/test_utils.h:14:portability/env-read # reviewed raw environment read
 include/yams/common/test_utils.h:30:portability/env-read # reviewed raw environment read
 include/yams/common/test_utils.h:31:portability/env-read # reviewed raw environment read
@@ -99,8 +99,8 @@ src/storage/s3_signer.cpp:83:portability/env-read # reviewed raw environment rea
 src/storage/s3_signer.cpp:159:portability/env-read # reviewed raw environment read
 src/storage/s3_signer.cpp:161:portability/env-read # reviewed raw environment read
 src/storage/s3_signer.cpp:163:portability/env-read # reviewed raw environment read
-src/storage/storage_backend_factory.cpp:565:portability/env-read # reviewed raw environment read
-src/storage/storage_backend_factory.cpp:570:portability/env-read # reviewed raw environment read
+src/storage/storage_backend_factory.cpp:566:portability/env-read # reviewed raw environment read
+src/storage/storage_backend_factory.cpp:571:portability/env-read # reviewed raw environment read
 src/vector/sqlite_vec_backend.cpp:788:portability/path-cstr # std::string filename, not filesystem::path
 tests/benchmarks/beir_loader.h:89:portability/env-read # reviewed raw environment read
 tests/benchmarks/bench_utils.h:42:portability/env-read # reviewed raw environment read
