@@ -1721,6 +1721,8 @@ public:
         };
         std::vector<PendingPathRecord> pendingPathRecords;
         pendingPathRecords.reserve(pendingMetadata.size());
+        std::vector<std::pair<const metadata::DocumentInfo*, int64_t>> pendingPathTreeRecords;
+        pendingPathTreeRecords.reserve(pendingMetadata.size());
 
         for (std::size_t idx = 0; idx < pendingMetadata.size(); ++idx) {
             auto& pending = pendingMetadata[idx];
@@ -1748,9 +1750,30 @@ public:
             if (!inserted.value().pathSeriesInitialized) {
                 applyStoreVersioning(pending.info, response.documentId);
             }
-            applyStorePathTree(request, pending.info, response.documentId);
+            if (!request.combineMetadataPathTree) {
+                pendingPathTreeRecords.emplace_back(&pending.info, response.documentId);
+            }
             syncStoreKnowledgeGraph(pending.info, pending.snapshotId);
             pendingPathRecords.push_back({idx, response.documentId});
+        }
+
+        if (!pendingPathTreeRecords.empty()) {
+            const auto pathTreeStart = std::chrono::steady_clock::now();
+            try {
+                auto treeRes =
+                    ctx_.metadataRepo->upsertPathTreeForDocumentsBatch(pendingPathTreeRecords);
+                if (!treeRes) {
+                    spdlog::debug("Failed to batch update path tree ({} docs): {}",
+                                  pendingPathTreeRecords.size(), treeRes.error().message);
+                }
+            } catch (const std::exception& ex) {
+                spdlog::debug("Exception batch updating path tree ({} docs): {}",
+                              pendingPathTreeRecords.size(), ex.what());
+            } catch (...) {
+                spdlog::debug("Unknown exception batch updating path tree ({} docs)",
+                              pendingPathTreeRecords.size());
+            }
+            recordDocumentStorePhase("path_tree", pathTreeStart);
         }
 
         if (!pendingPathRecords.empty()) {

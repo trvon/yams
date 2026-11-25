@@ -495,6 +495,42 @@ MetadataRepository::listPathTreeChildren(std::string_view fullPath, std::size_t 
         });
 }
 
+Result<void> MetadataRepository::upsertPathTreeForDocumentsBatch(
+    std::span<const std::pair<const DocumentInfo*, int64_t>> items) {
+    if (items.empty()) {
+        return Result<void>();
+    }
+    return executeQuery<void>([&](Database& db) -> Result<void> {
+        YAMS_TRY(beginTransactionWithRetry(db));
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                rollbackIgnoringErrors(db);
+            }
+        });
+
+        for (const auto& [info, docId] : items) {
+            if (!info || info->filePath.empty()) {
+                continue;
+            }
+            YAMS_TRY(db.execute("SAVEPOINT yams_batch_path_tree"));
+            auto upsert = repository::upsertPathTreeForDocumentInTransaction(db, *info, docId);
+            if (upsert) {
+                YAMS_TRY(db.execute("RELEASE SAVEPOINT yams_batch_path_tree"));
+            } else {
+                (void)db.execute("ROLLBACK TO SAVEPOINT yams_batch_path_tree");
+                (void)db.execute("RELEASE SAVEPOINT yams_batch_path_tree");
+                spdlog::debug("Failed to update path tree for {}: {}", info->filePath,
+                              upsert.error().message);
+            }
+        }
+
+        YAMS_TRY(commitOrRollback(db));
+        committed = true;
+        return Result<void>();
+    });
+}
+
 Result<void> MetadataRepository::upsertPathTreeForDocument(const DocumentInfo& info,
                                                            int64_t documentId, bool isNewDocument,
                                                            std::span<const float> embeddingValues) {

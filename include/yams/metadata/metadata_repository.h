@@ -615,6 +615,19 @@ public:
     virtual Result<void> upsertPathTreeForDocument(const DocumentInfo& info, int64_t documentId,
                                                    bool isNewDocument,
                                                    std::span<const float> embeddingValues) = 0;
+    virtual Result<void> upsertPathTreeForDocumentsBatch(
+        std::span<const std::pair<const DocumentInfo*, int64_t>> items) {
+        for (const auto& [info, documentId] : items) {
+            if (!info) {
+                continue;
+            }
+            auto r = upsertPathTreeForDocument(*info, documentId, true, std::span<const float>());
+            if (!r) {
+                return r;
+            }
+        }
+        return Result<void>();
+    }
     virtual Result<void> removePathTreeForDocument(const DocumentInfo& info, int64_t documentId,
                                                    std::span<const float> embeddingValues) = 0;
 
@@ -1046,6 +1059,8 @@ public:
     Result<void> upsertPathTreeForDocument(const DocumentInfo& info, int64_t documentId,
                                            bool isNewDocument,
                                            std::span<const float> embeddingValues) override;
+    Result<void> upsertPathTreeForDocumentsBatch(
+        std::span<const std::pair<const DocumentInfo*, int64_t>> items) override;
     Result<void> removePathTreeForDocument(const DocumentInfo& info, int64_t documentId,
                                            std::span<const float> embeddingValues) override;
 

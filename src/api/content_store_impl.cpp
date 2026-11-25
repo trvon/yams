@@ -923,52 +923,54 @@ public:
         if (maxBytes == 0) {
             return std::vector<std::byte>{};
         }
+
+        // Fast path: in content-addressed storage, single-chunk and unchunked objects are stored
+        // directly under their full-file SHA-256 hash. Checking direct storage first avoids a
+        // manifest read + protobuf deserialize on every single-chunk document.
+        if (auto dataResult = storage_->retrieve(hash); dataResult) {
+            auto data = std::move(dataResult.value());
+            if (data.size() > maxBytes) {
+                data.resize(maxBytes);
+            }
+            updateStats(0, 0, data.size(), 0, 0, 1, 0);
+            return data;
+        }
+
         auto manifestHash = hash + ".manifest";
         auto manifestResult = storage_->retrieve(manifestHash);
+        if (!manifestResult) {
+            return manifestResult.error();
+        }
 
-        if (manifestResult) {
-            auto manifest =
-                manifestManager_->deserialize(std::span<const std::byte>(manifestResult.value()));
-            if (!manifest) {
-                return manifest.error();
+        auto manifest =
+            manifestManager_->deserialize(std::span<const std::byte>(manifestResult.value()));
+        if (!manifest) {
+            return manifest.error();
+        }
+
+        std::vector<std::byte> reconstructed;
+        const auto fileSize = manifest.value().fileSize;
+        const std::size_t cap = std::min<std::size_t>(maxBytes, static_cast<std::size_t>(fileSize));
+        reconstructed.reserve(cap);
+
+        for (const auto& chunk : manifest.value().chunks) {
+            if (reconstructed.size() >= maxBytes) {
+                break;
             }
-
-            std::vector<std::byte> reconstructed;
-            const auto fileSize = manifest.value().fileSize;
-            const std::size_t cap =
-                std::min<std::size_t>(maxBytes, static_cast<std::size_t>(fileSize));
-            reconstructed.reserve(cap);
-
-            for (const auto& chunk : manifest.value().chunks) {
-                if (reconstructed.size() >= maxBytes) {
-                    break;
-                }
-                auto chunkData = storage_->retrieve(chunk.hash);
-                if (!chunkData) {
-                    spdlog::warn("Failed to retrieve chunk {} for hash {}", chunk.hash, hash);
-                    return chunkData.error();
-                }
-                const auto& bytes = chunkData.value();
-                const std::size_t remaining = maxBytes - reconstructed.size();
-                const std::size_t take = std::min<std::size_t>(bytes.size(), remaining);
-                reconstructed.insert(reconstructed.end(), bytes.begin(),
-                                     bytes.begin() + static_cast<std::ptrdiff_t>(take));
+            auto chunkData = storage_->retrieve(chunk.hash);
+            if (!chunkData) {
+                spdlog::warn("Failed to retrieve chunk {} for hash {}", chunk.hash, hash);
+                return chunkData.error();
             }
-
-            updateStats(0, 0, reconstructed.size(), 0, 0, 1, 0);
-            return reconstructed;
+            const auto& bytes = chunkData.value();
+            const std::size_t remaining = maxBytes - reconstructed.size();
+            const std::size_t take = std::min<std::size_t>(bytes.size(), remaining);
+            reconstructed.insert(reconstructed.end(), bytes.begin(),
+                                 bytes.begin() + static_cast<std::ptrdiff_t>(take));
         }
 
-        auto dataResult = storage_->retrieve(hash);
-        if (!dataResult) {
-            return dataResult.error();
-        }
-        auto data = std::move(dataResult.value());
-        if (data.size() > maxBytes) {
-            data.resize(maxBytes);
-        }
-        updateStats(0, 0, data.size(), 0, 0, 1, 0);
-        return data;
+        updateStats(0, 0, reconstructed.size(), 0, 0, 1, 0);
+        return reconstructed;
     }
 
     // Check if content exists
