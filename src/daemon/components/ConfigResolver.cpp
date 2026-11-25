@@ -63,19 +63,8 @@ std::optional<bool> parseBool01(std::string_view raw) {
     return *parsed != 0;
 }
 
-std::optional<bool> parseBoolValue(std::string raw) {
-    raw.erase(std::remove_if(raw.begin(), raw.end(),
-                             [](unsigned char c) { return std::isspace(c) != 0; }),
-              raw.end());
-    std::transform(raw.begin(), raw.end(), raw.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (raw == "true" || raw == "yes" || raw == "on" || raw == "1") {
-        return true;
-    }
-    if (raw == "false" || raw == "no" || raw == "off" || raw == "0") {
-        return false;
-    }
-    return std::nullopt;
+std::optional<bool> parseBoolValue(std::string_view raw) {
+    return yams::config::detail::parseTomlBool(raw);
 }
 
 std::string embeddingDispatchEnvSignature() {

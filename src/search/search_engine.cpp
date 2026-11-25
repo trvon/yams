@@ -12,6 +12,7 @@
 #include "search_lexical_pipeline_internal.h"
 #include "search_vector_pipeline_internal.h"
 #include "search_vector_stage.h"
+#include <yams/config/detail/config_parse_utils.h>
 #include <yams/core/assert.hpp>
 #include <yams/core/cpp23_features.hpp>
 #include <yams/core/magic_numbers.hpp>
@@ -409,11 +410,7 @@ std::vector<float> computeReciprocalCommunitySupport(
 bool envFlagEnabled(const char* name) {
     if (const char* env = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe) — read-only; env
                                                // vars not modified concurrently
-        std::string value(env);
-        std::transform(value.begin(), value.end(), value.begin(), [](char c) {
-            return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        });
-        return value == "1" || value == "true" || value == "yes" || value == "on";
+        return yams::config::detail::parseTomlBool(env).value_or(false);
     }
     return false;
 }

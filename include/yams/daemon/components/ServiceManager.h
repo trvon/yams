@@ -19,10 +19,10 @@
 #include <vector>
 #include "IComponent.h"
 #include <boost/asio/any_io_executor.hpp>
-#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/cancellation_signal.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/thread_pool.hpp>
@@ -30,11 +30,9 @@
 #include <boost/asio/use_future.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
-#include <yams/compat/thread_stop_compat.h>
 #include <yams/common/pattern_utils.h>
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
-#include <yams/daemon/components/GrepTrigramIndexer.h>
-#include <yams/daemon/components/SessionWatcher.h>
 #include <yams/daemon/components/AsyncInitOrchestrator.h>
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/ConfigResolver.h>
@@ -43,6 +41,7 @@
 #include <yams/daemon/components/EmbeddingLifecycleManager.h>
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
 #include <yams/daemon/components/EmbeddingService.h>
+#include <yams/daemon/components/GrepTrigramIndexer.h>
 #include <yams/daemon/components/IngestMetricsPublisher.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PluginHostFsm.h>
@@ -55,6 +54,7 @@
 #include <yams/daemon/components/SearchEngineFsm.h>
 #include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
+#include <yams/daemon/components/SessionWatcher.h>
 #include <yams/daemon/components/startup_phase.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/test_hooks.h>
@@ -62,7 +62,6 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/components/VectorSystemManager.h>
-#include <yams/daemon/components/WalMetricsProvider.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/daemon.h>
@@ -78,7 +77,6 @@
 #include <yams/search/search_engine.h>
 #include <yams/search/search_execution_context.h>
 #include <yams/vector/vector_database.h>
-#include <yams/wal/wal_manager.h>
 
 // Forward declarations for services
 namespace yams::api {
@@ -609,12 +607,6 @@ public:
         return std::string{};
     }
 
-    // WAL metrics provider (may return zeros until a WALManager is attached)
-    std::shared_ptr<WalMetricsProvider> getWalMetricsProvider() const {
-        return databaseManager_ ? databaseManager_->getWalMetricsProvider()
-                                : std::shared_ptr<WalMetricsProvider>{};
-    }
-
     std::shared_ptr<RepairService> getRepairServiceShared() const {
         return repairServiceHost_.get();
     }
@@ -644,12 +636,6 @@ public:
         return topologyManager_.getTelemetrySnapshot();
     }
     TopologyManager& getTopologyManager() { return topologyManager_; }
-
-    void attachWalManager(std::shared_ptr<yams::wal::WALManager> wal) {
-        if (databaseManager_) {
-            databaseManager_->attachWalManager(std::move(wal));
-        }
-    }
 
     // Keeps the directories of watch-enabled sessions indexed (polling).
     SessionWatcher sessionWatcher_;

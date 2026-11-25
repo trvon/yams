@@ -1838,32 +1838,6 @@ if catch2_dep.found()
     install: false,
   )
 
-#WAL Entry tests - serialization, checksums, encode / decode round - trips
-  catch2_wal_entry_exe = executable('catch2_wal_entry',
-    files('unit/wal/wal_entry_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + [
-      '-DYAMS_TESTING=1',
-      '-DYAMS_WAL_FIXTURE_DIR="@0@"'.format(meson.current_source_dir() / 'fixtures' / 'wal'),
-    ],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
-
-  catch2_test_table += [{
-    'name': 'wal_submodule',
-    'sources': files(
-      'unit/wal/wal_file_catch2_test.cpp',
-      'unit/wal/wal_manager_catch2_test.cpp',
-      'unit/wal/wal_metrics_provider_catch2_test.cpp',
-      'unit/wal/wal_recovery_catch2_test.cpp',
-    ),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'wal'],
-    'timeout': 120,
-  }]
-
 #Search submodule tests
 #Migrated from GTest as part of yams - 3s4 / yams - 1yq
   catch2_test_table += [{
@@ -3707,12 +3681,6 @@ if catch2_dep.found()
     args: ['[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300
-  )
-
-  test('wal_entry', catch2_wal_entry_exe,
-    suite: ['catch2', 'unit', 'wal'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
   )
 
   test('benchmark_invocation', catch2_benchmark_invocation_exe,

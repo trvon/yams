@@ -5,7 +5,6 @@
 
 #include "../../core/types.h"
 #include "IComponent.h"
-#include "WalMetricsProvider.h"
 
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
@@ -27,10 +26,6 @@ class ConnectionPool;
 class MetadataRepository;
 class KnowledgeGraphStore;
 } // namespace yams::metadata
-
-namespace yams::wal {
-class WALManager;
-} // namespace yams::wal
 
 namespace yams::daemon {
 
@@ -163,29 +158,6 @@ public:
     }
 
     /**
-     * @brief Initialize the WAL manager against a data directory.
-     *
-     * Creates a WALManager rooted at dataDir/wal and attaches it to the
-     * internal metrics provider. Safe to call when the platform has no
-     * WAL support — the method simply no-ops on failure.
-     */
-    void initializeWal(const std::filesystem::path& dataDir);
-
-    /**
-     * @brief Shutdown and release the WAL manager (idempotent).
-     */
-    void shutdownWal();
-
-    /**
-     * @brief Attach an externally-created WAL manager to the metrics provider.
-     */
-    void attachWalManager(std::shared_ptr<yams::wal::WALManager> wal);
-
-    std::shared_ptr<WalMetricsProvider> getWalMetricsProvider() const {
-        return std::atomic_load_explicit(&walMetricsProvider_, std::memory_order_acquire);
-    }
-
-    /**
      * @brief Interrupt blocked connection-pool acquires during shutdown.
      *
      * Safe to call multiple times. Existing leased connections are left alone;
@@ -236,9 +208,6 @@ private:
     std::shared_ptr<metadata::ConnectionPool> readConnectionPool_;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
-
-    std::shared_ptr<yams::wal::WALManager> walManager_;
-    std::shared_ptr<WalMetricsProvider> walMetricsProvider_;
 
     std::shared_ptr<api::IContentStore> contentStore_;
     mutable std::mutex contentStoreErrorMutex_;
