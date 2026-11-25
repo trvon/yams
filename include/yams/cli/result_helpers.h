@@ -5,7 +5,6 @@
 #include <string>
 
 #include <CLI/CLI.hpp>
-#include <spdlog/spdlog.h>
 #include <yams/cli/error_hints.h>
 #include <yams/config/config_helpers.h>
 #include <yams/core/types.h>

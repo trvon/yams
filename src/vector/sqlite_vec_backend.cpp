@@ -605,7 +605,7 @@ std::string serializeMetadata(const std::map<std::string, std::string>& meta) {
 
 // Helper: deserialize JSON to metadata map
 std::map<std::string, std::string> deserializeMetadata(const std::string& json_str) {
-    if (json_str.empty() || json_str == "null")
+    if (json_str.empty() || json_str == "{}" || json_str == "null")
         return {};
     try {
         return nlohmann::json::parse(json_str).get<std::map<std::string, std::string>>();
@@ -624,7 +624,7 @@ std::string serializeStringVector(const std::vector<std::string>& vec) {
 
 // Helper: deserialize JSON to string vector
 std::vector<std::string> deserializeStringVector(const std::string& json_str) {
-    if (json_str.empty() || json_str == "null")
+    if (json_str.empty() || json_str == "[]" || json_str == "null")
         return {};
     try {
         return nlohmann::json::parse(json_str).get<std::vector<std::string>>();
@@ -3261,31 +3261,37 @@ private:
 
         sqlite3_reset(stmt_insert_);
 
-        // Bind parameters
-        sqlite3_bind_text(stmt_insert_, 1, record.chunk_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt_insert_, 2, record.document_hash.c_str(), -1, SQLITE_TRANSIENT);
+        // Bind parameters with SQLITE_STATIC + explicit lengths (all buffers outlive
+        // stepWithRetry(stmt_insert_) below).
+        sqlite3_bind_text(stmt_insert_, 1, record.chunk_id.data(),
+                          static_cast<int>(record.chunk_id.size()), SQLITE_STATIC);
+        sqlite3_bind_text(stmt_insert_, 2, record.document_hash.data(),
+                          static_cast<int>(record.document_hash.size()), SQLITE_STATIC);
 
         sqlite3_bind_blob(stmt_insert_, 3, record.embedding.data(),
-                          static_cast<int>(record.embedding.size() * sizeof(float)),
-                          SQLITE_TRANSIENT);
+                          static_cast<int>(record.embedding.size() * sizeof(float)), SQLITE_STATIC);
 
         size_t effective_dim =
             record.embedding_dim > 0 ? record.embedding_dim : record.embedding.size();
         sqlite3_bind_int64(stmt_insert_, 4, static_cast<int64_t>(effective_dim));
 
-        sqlite3_bind_text(stmt_insert_, 5, record.content.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt_insert_, 5, record.content.data(),
+                          static_cast<int>(record.content.size()), SQLITE_STATIC);
         sqlite3_bind_int64(stmt_insert_, 6, static_cast<int64_t>(record.start_offset));
         sqlite3_bind_int64(stmt_insert_, 7, static_cast<int64_t>(record.end_offset));
 
         // Metadata as JSON
         std::string metadata_json = serializeMetadata(record.metadata);
-        sqlite3_bind_text(stmt_insert_, 8, metadata_json.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt_insert_, 8, metadata_json.data(),
+                          static_cast<int>(metadata_json.size()), SQLITE_STATIC);
 
-        sqlite3_bind_text(stmt_insert_, 9, record.model_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt_insert_, 10, record.model_version.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt_insert_, 9, record.model_id.data(),
+                          static_cast<int>(record.model_id.size()), SQLITE_STATIC);
+        sqlite3_bind_text(stmt_insert_, 10, record.model_version.data(),
+                          static_cast<int>(record.model_version.size()), SQLITE_STATIC);
         sqlite3_bind_int(stmt_insert_, 11, static_cast<int>(record.embedding_version));
-        sqlite3_bind_text(stmt_insert_, 12, record.content_hash_at_embedding.c_str(), -1,
-                          SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt_insert_, 12, record.content_hash_at_embedding.data(),
+                          static_cast<int>(record.content_hash_at_embedding.size()), SQLITE_STATIC);
 
         sqlite3_bind_int64(stmt_insert_, 13,
                            yams::common::timePointToEpochSeconds(record.created_at));
@@ -3296,11 +3302,13 @@ private:
 
         // JSON arrays
         std::string source_chunks_json = serializeStringVector(record.source_chunk_ids);
-        sqlite3_bind_text(stmt_insert_, 17, source_chunks_json.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt_insert_, 18, record.parent_document_hash.c_str(), -1,
-                          SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt_insert_, 17, source_chunks_json.data(),
+                          static_cast<int>(source_chunks_json.size()), SQLITE_STATIC);
+        sqlite3_bind_text(stmt_insert_, 18, record.parent_document_hash.data(),
+                          static_cast<int>(record.parent_document_hash.size()), SQLITE_STATIC);
         std::string child_hashes_json = serializeStringVector(record.child_document_hashes);
-        sqlite3_bind_text(stmt_insert_, 19, child_hashes_json.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt_insert_, 19, child_hashes_json.data(),
+                          static_cast<int>(child_hashes_json.size()), SQLITE_STATIC);
 
         int rc = stepWithRetry(stmt_insert_);
         if (rc != SQLITE_DONE) {
@@ -3319,7 +3327,8 @@ private:
 
         sqlite3_reset(stmt_get_rowid_);
         StmtResetGuard guard(stmt_get_rowid_);
-        sqlite3_bind_text(stmt_get_rowid_, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt_get_rowid_, 1, chunk_id.data(), static_cast<int>(chunk_id.size()),
+                          SQLITE_STATIC);
 
         if (sqlite3_step(stmt_get_rowid_) == SQLITE_ROW) {
             return sqlite3_column_int64(stmt_get_rowid_, 0);
@@ -4704,18 +4713,22 @@ private:
                                 embeddingScratch.resize(numFloats);
                                 std::memcpy(embeddingScratch.data(), blob,
                                             static_cast<std::size_t>(blobSize));
-                                const auto rerankStart = std::chrono::steady_clock::now();
-                                similarity =
-                                    static_cast<float>(vector_utils::computeCosineSimilarity(
-                                        query_embedding, embeddingScratch));
-                                const auto rerankNs = static_cast<std::uint64_t>(
-                                    std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                        std::chrono::steady_clock::now() - rerankStart)
-                                        .count());
-                                batchExactRerankNs += rerankNs;
                                 if (diagnostics != nullptr) {
+                                    const auto rerankStart = std::chrono::steady_clock::now();
+                                    similarity =
+                                        static_cast<float>(vector_utils::computeCosineSimilarity(
+                                            query_embedding, embeddingScratch));
+                                    const auto rerankNs = static_cast<std::uint64_t>(
+                                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            std::chrono::steady_clock::now() - rerankStart)
+                                            .count());
+                                    batchExactRerankNs += rerankNs;
                                     ++diagnostics->exactDistanceEvaluations;
                                     diagnostics->exactRerankNanoseconds += rerankNs;
+                                } else {
+                                    similarity =
+                                        static_cast<float>(vector_utils::computeCosineSimilarity(
+                                            query_embedding, embeddingScratch));
                                 }
                             } else {
                                 auto foundPair = std::lower_bound(

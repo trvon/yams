@@ -78,6 +78,44 @@ Result<std::optional<DocumentContent>> MetadataRepository::getContent(int64_t do
     return result;
 }
 
+Result<std::unordered_set<int64_t>>
+MetadataRepository::batchHasContent(std::span<const int64_t> documentIds) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::batchHasContent");
+    if (documentIds.empty()) {
+        return std::unordered_set<int64_t>{};
+    }
+    return executeReadQuery<std::unordered_set<int64_t>>(
+        [&](Database& db) -> Result<std::unordered_set<int64_t>> {
+            std::unordered_set<int64_t> present;
+            present.reserve(documentIds.size());
+            constexpr std::size_t kChunkSize = 500;
+            for (std::size_t offset = 0; offset < documentIds.size(); offset += kChunkSize) {
+                const auto chunkSize = std::min(kChunkSize, documentIds.size() - offset);
+                std::string sql = "SELECT document_id FROM document_content WHERE document_id IN (";
+                sql.reserve(sql.size() + chunkSize * 2 + 2);
+                for (std::size_t i = 0; i < chunkSize; ++i) {
+                    if (i > 0) {
+                        sql += ',';
+                    }
+                    sql += '?';
+                }
+                sql += ')';
+                YAMS_TRY_UNWRAP(stmt, db.prepare(sql));
+                for (std::size_t i = 0; i < chunkSize; ++i) {
+                    YAMS_TRY(stmt.bind(static_cast<int>(i + 1), documentIds[offset + i]));
+                }
+                while (true) {
+                    YAMS_TRY_UNWRAP(hasRow, stmt.step());
+                    if (!hasRow) {
+                        break;
+                    }
+                    present.insert(stmt.getInt64(0));
+                }
+            }
+            return present;
+        });
+}
+
 Result<void> MetadataRepository::updateContent(const DocumentContent& content) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::updateContent");
     YAMS_PLOT("metadata_repo::update_content_bytes",

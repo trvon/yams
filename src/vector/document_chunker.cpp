@@ -808,26 +808,25 @@ size_t estimateTokens(const std::string& text) {
 }
 
 std::string preprocessText(const std::string& text) {
-    std::string processed = text;
+    std::string processed;
+    processed.reserve(text.size());
 
-    // Normalize whitespace
-    std::regex multiple_spaces(R"(\s+)");
-    processed = std::regex_replace(processed, multiple_spaces, " ");
-
-    // Remove control characters
-    processed.erase(
-        std::remove_if(processed.begin(), processed.end(),
-                       [](char c) { return std::iscntrl(c) && c != '\n' && c != '\t'; }),
-        processed.end());
-
-    // Trim leading and trailing whitespace
-    size_t first = processed.find_first_not_of(" \t\n\r");
-    size_t last = processed.find_last_not_of(" \t\n\r");
-    if (first != std::string::npos && last != std::string::npos) {
-        processed = processed.substr(first, last - first + 1);
-    } else if (first == std::string::npos) {
-        // All whitespace
-        processed.clear();
+    bool inWhitespace = false;
+    for (unsigned char uc : text) {
+        if (std::isspace(uc)) {
+            if (!processed.empty()) {
+                inWhitespace = true;
+            }
+            continue;
+        }
+        if (std::iscntrl(uc)) {
+            continue;
+        }
+        if (inWhitespace) {
+            processed.push_back(' ');
+            inWhitespace = false;
+        }
+        processed.push_back(static_cast<char>(uc));
     }
 
     return processed;

@@ -234,7 +234,8 @@ BackendConfig StorageBackendFactory::parseURL(const std::string& url) {
     }
 
     // Parse URL for remote backends
-    std::regex urlRegex(R"(^(([^:/?#]+):)?(//([^/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?$)");
+    static const std::regex urlRegex(
+        R"(^(([^:/?#]+):)?(//([^/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?$)");
     std::smatch match;
 
     if (!std::regex_match(url, match, urlRegex)) {
@@ -263,7 +264,7 @@ BackendConfig StorageBackendFactory::parseURL(const std::string& url) {
     // Parse query parameters for additional configuration
     std::string query = match[7].str();
     if (!query.empty()) {
-        std::regex paramRegex("([^&=]+)=([^&]*)");
+        static const std::regex paramRegex("([^&=]+)=([^&]*)");
         auto paramsBegin = std::sregex_iterator(query.begin(), query.end(), paramRegex);
         auto paramsEnd = std::sregex_iterator();
 

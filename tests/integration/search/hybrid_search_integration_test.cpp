@@ -1,5 +1,6 @@
 // Integration tests for semantic/hybrid daemon request availability and model-free lexical
 // fallback through the public hybrid search request.
+#include <spdlog/spdlog.h>
 #include "tests/integration/daemon/test_async_helpers.h"
 #include "tests/integration/daemon/test_daemon_harness.h"
 #include <catch2/catch_test_macros.hpp>

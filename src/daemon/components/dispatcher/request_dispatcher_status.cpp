@@ -932,7 +932,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                         active = serviceManager_->getWorkerActive();
                         queued = 0;
                     } else {
-                        threads = std::max(1u, std::thread::hardware_concurrency());
+                        threads = std::max(1u, TuneAdvisor::hardwareConcurrency());
                     }
                     res.requestCounts[std::string(metrics::kWorkerThreads)] = threads;
                     res.requestCounts[std::string(metrics::kWorkerActive)] = active;

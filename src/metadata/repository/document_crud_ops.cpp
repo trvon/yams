@@ -11,6 +11,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <spdlog/spdlog.h>
+
 #include <yams/core/assert.hpp>
 #include <yams/core/atomic_utils.h>
 #include <yams/metadata/metadata_repository.h>

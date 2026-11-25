@@ -79,6 +79,10 @@ public:
     /// rebuild does not build it inline. Blocks for the build; call it off the query path.
     /// Returns false when routing is disabled or no snapshot is published.
     Result<bool> prewarmTopologyRouting();
+    /// Share the resident topology routing snapshot cache from a prior engine instance
+    /// when both engines point at the same metadata repository and KG store, avoiding a
+    /// redundant route-index rebuild on SearchEngine swap.
+    void adoptTopologySnapshotCache(const SearchEngine& previous);
     void setExecutor(std::optional<boost::asio::any_io_executor> executor);
     void setConceptExtractor(EntityExtractionFunc extractor);
     void setSearchTuner(std::shared_ptr<SearchTuner> tuner);

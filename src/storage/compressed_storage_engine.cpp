@@ -483,7 +483,7 @@ private:
     Result<std::vector<std::byte>> compressData(std::span<const std::byte> data,
                                                 const DecisionType& decision) {
         auto& registry = compression::CompressionRegistry::instance();
-        auto compressor = registry.createCompressor(decision.algorithm);
+        auto* compressor = registry.getThreadLocalCompressor(decision.algorithm);
         if (!compressor) {
             return Result<std::vector<std::byte>>(
                 Error{ErrorCode::InvalidArgument, "Compressor not available"});
@@ -585,7 +585,7 @@ private:
         // Get decompressor
         auto algorithm = static_cast<compression::CompressionAlgorithm>(header.algorithm);
         auto& registry = compression::CompressionRegistry::instance();
-        auto decompressor = registry.createCompressor(algorithm);
+        auto* decompressor = registry.getThreadLocalCompressor(algorithm);
         if (!decompressor) {
             return Result<std::vector<std::byte>>(
                 Error{ErrorCode::InvalidArgument, "Decompressor not available"});

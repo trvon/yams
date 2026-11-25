@@ -259,7 +259,8 @@ private:
                 spdlog::debug("EmbeddingGenerator: failed to read TuneAdvisor concurrency cap");
             }
             if (cap <= 0) {
-                cap = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+                cap = static_cast<int>(
+                    std::max(1u, yams::daemon::TuneAdvisor::hardwareConcurrency()));
             }
             return std::max(1, cap);
         }

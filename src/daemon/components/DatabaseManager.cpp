@@ -14,7 +14,6 @@
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
-#include <yams/wal/wal_manager.h>
 
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/associated_executor.hpp>
@@ -107,7 +106,6 @@ void DatabaseManager::shutdown() {
     if (deps_.state) {
         deps_.state->readiness.metadataRepoReady.store(false, std::memory_order_release);
     }
-    shutdownWal();
 
     std::atomic_store_explicit(&kgStore_, std::shared_ptr<metadata::KnowledgeGraphStore>{},
                                std::memory_order_release);
@@ -249,27 +247,6 @@ void DatabaseManager::shutdown() {
 // via co_openDatabase / co_migrateDatabase which post blocking work to a
 // dedicated thread_pool and await real completion with init::co_await_future.
 
-void DatabaseManager::initializeWal(const std::filesystem::path& dataDir) {
-    try {
-        yams::wal::WALManager::Config walConfig;
-        walConfig.walDirectory = dataDir / "wal";
-        auto walManager = std::make_shared<yams::wal::WALManager>(walConfig);
-        if (auto result = walManager->initialize(); !result) {
-            spdlog::warn("[DatabaseManager] WALManager initialization failed: {}",
-                         result.error().message);
-            return;
-        }
-        std::atomic_store_explicit(&walManager_, walManager, std::memory_order_release);
-        spdlog::info("[DatabaseManager] WALManager initialized");
-        attachWalManager(std::move(walManager));
-        spdlog::debug("[DatabaseManager] WALManager attached to metrics provider");
-    } catch (const std::exception& e) {
-        spdlog::warn("[DatabaseManager] WALManager initialization threw: {}", e.what());
-        std::atomic_store_explicit(&walManager_, std::shared_ptr<yams::wal::WALManager>{},
-                                   std::memory_order_release);
-    }
-}
-
 void DatabaseManager::interruptPendingConnectionAcquiresForShutdown() {
     std::shared_ptr<metadata::ConnectionPool> readPool;
     std::shared_ptr<metadata::ConnectionPool> writePool;
@@ -304,45 +281,6 @@ std::size_t DatabaseManager::interruptActiveConnectionsForShutdown() {
     return interrupted;
 }
 
-void DatabaseManager::shutdownWal() {
-    auto walManager = std::atomic_exchange_explicit(
-        &walManager_, std::shared_ptr<yams::wal::WALManager>{}, std::memory_order_acq_rel);
-    if (auto provider =
-            std::atomic_load_explicit(&walMetricsProvider_, std::memory_order_acquire)) {
-        provider->setManager(nullptr);
-    }
-    if (!walManager) {
-        return;
-    }
-    try {
-        auto result = walManager->shutdown();
-        if (!result) {
-            spdlog::warn("[DatabaseManager] WALManager shutdown failed: {}",
-                         result.error().message);
-        } else {
-            spdlog::info("[DatabaseManager] WALManager shutdown complete");
-        }
-    } catch (const std::exception& e) {
-        spdlog::warn("[DatabaseManager] WALManager shutdown threw: {}", e.what());
-    } catch (...) {
-        spdlog::warn("[DatabaseManager] WALManager shutdown threw unknown exception");
-    }
-}
-
-void DatabaseManager::attachWalManager(std::shared_ptr<yams::wal::WALManager> wal) {
-    auto provider = std::atomic_load_explicit(&walMetricsProvider_, std::memory_order_acquire);
-    if (!provider) {
-        auto candidate = std::make_shared<WalMetricsProvider>();
-        candidate->setManager(wal);
-        if (std::atomic_compare_exchange_strong_explicit(&walMetricsProvider_, &provider, candidate,
-                                                         std::memory_order_release,
-                                                         std::memory_order_acquire)) {
-            return;
-        }
-    }
-    provider->setManager(std::move(wal));
-}
-
 bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
     auto database = std::atomic_load_explicit(&database_, std::memory_order_acquire);
     if (!database) {
@@ -357,7 +295,7 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
         try {
             return std::max<size_t>(1, TuneAdvisor::recommendedThreads(0.25));
         } catch (...) {
-            size_t hw = std::max<size_t>(1, std::thread::hardware_concurrency());
+            size_t hw = std::max<size_t>(1, TuneAdvisor::hardwareConcurrency());
             return std::max<size_t>(1, hw / 2);
         }
     }();

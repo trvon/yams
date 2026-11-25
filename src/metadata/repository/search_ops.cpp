@@ -6,6 +6,7 @@
 #include <sstream>
 
 #include <yams/common/utf8_utils.h>
+#include <yams/config/detail/config_parse_utils.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/profiling.h>
@@ -110,11 +111,7 @@ MetadataRepository::searchFullText(const std::string& query, int limit, int offs
             if (!env || !*env) {
                 return defaultValue;
             }
-
-            std::string value(env);
-            std::transform(value.begin(), value.end(), value.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            return !(value == "0" || value == "false" || value == "off" || value == "no");
+            return yams::config::detail::parseTomlBool(env).value_or(true);
         };
 
         const bool nlAutoPhrase = parseEnvFlag("YAMS_FTS_NL_AUTO_PHRASE", true);

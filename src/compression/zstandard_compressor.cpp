@@ -199,7 +199,9 @@ public:
 
         std::vector<std::byte> decompressed(decompressedSize);
 
-        auto start = std::chrono::steady_clock::now();
+        const bool debugLog = spdlog::should_log(spdlog::level::debug);
+        const auto start =
+            debugLog ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
         // Perform decompression
         const size_t result = ZSTD_decompressDCtx(dctx.get(), decompressed.data(),
@@ -209,14 +211,15 @@ public:
             return makeZstdError("ZSTD_decompressDCtx", result);
         }
 
-        auto end = std::chrono::steady_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
         // Resize to actual decompressed size
         decompressed.resize(result);
 
-        spdlog::debug("Zstandard decompressed {} bytes to {} bytes in {}μs", data.size(), result,
-                      duration.count());
+        if (debugLog) {
+            const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start);
+            spdlog::debug("Zstandard decompressed {} bytes to {} bytes in {}μs", data.size(),
+                          result, duration.count());
+        }
 
         return decompressed;
     }

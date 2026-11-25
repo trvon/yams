@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>

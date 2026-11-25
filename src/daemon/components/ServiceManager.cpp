@@ -899,11 +899,6 @@ ServiceManager::initializeImpl(const std::function<void()>& beforePoolConfigure)
     std::atomic_store_explicit(&embeddingConfig_, std::move(resolvedEmbeddingConfig),
                                std::memory_order_release);
 
-    // Initialize WALManager via DatabaseManager (owns lifecycle + metrics provider)
-    if (databaseManager_) {
-        databaseManager_->initializeWal(resolvedDataDir_);
-    }
-
     // File type detector init skipped to reduce compile-time deps; non-fatal fallback remains.
 
     // io_context and workers already created in constructor; proceed with initialization

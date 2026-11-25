@@ -1502,6 +1502,26 @@ std::size_t applyBenchmarkDocumentMetadata(yams::metadata::IMetadataRepository& 
                                            std::size_t* missingDocuments) {
     std::size_t applied = 0;
     std::size_t missing = 0;
+    constexpr std::size_t kMetadataChunkSize = 512;
+    std::vector<std::tuple<int64_t, std::string, yams::metadata::MetadataValue>> batchEntries;
+    batchEntries.reserve(kMetadataChunkSize);
+    std::size_t chunkDocCount = 0;
+
+    auto flushChunk = [&]() {
+        if (batchEntries.empty()) {
+            return;
+        }
+        if (auto set = repo.setMetadataBatch(batchEntries); !set) {
+            spdlog::warn("[Bench] metadata batch write failed ({} entries): {}",
+                         batchEntries.size(), set.error().message);
+            missing += chunkDocCount;
+        } else {
+            applied += chunkDocCount;
+        }
+        batchEntries.clear();
+        chunkDocCount = 0;
+    };
+
     for (const auto& [id, doc] : loader.dataset.documents) {
         if (doc.metadata.empty()) {
             continue;
@@ -1517,18 +1537,15 @@ std::size_t applyBenchmarkDocumentMetadata(yams::metadata::IMetadataRepository& 
             ++missing;
             continue;
         }
-        std::vector<std::tuple<int64_t, std::string, yams::metadata::MetadataValue>> entries;
-        entries.reserve(doc.metadata.size());
         for (const auto& [key, value] : doc.metadata) {
-            entries.emplace_back(found.value()->id, key, yams::metadata::MetadataValue(value));
+            batchEntries.emplace_back(found.value()->id, key, yams::metadata::MetadataValue(value));
         }
-        if (auto set = repo.setMetadataBatch(entries); !set) {
-            spdlog::warn("[Bench] metadata write failed for {}: {}", path, set.error().message);
-            ++missing;
-            continue;
+        ++chunkDocCount;
+        if (batchEntries.size() >= kMetadataChunkSize) {
+            flushChunk();
         }
-        ++applied;
     }
+    flushChunk();
     if (missingDocuments != nullptr) {
         *missingDocuments = missing;
     }

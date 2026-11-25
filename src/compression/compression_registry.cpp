@@ -24,7 +24,35 @@ void CompressionRegistry::registerCompressor(CompressionAlgorithm algorithm,
     }
 
     factories_[algorithm] = std::move(factory);
+    generation_.fetch_add(1, std::memory_order_release);
     spdlog::debug("Registered compressor for algorithm: {}", static_cast<int>(algorithm));
+}
+
+ICompressor* CompressionRegistry::getThreadLocalCompressor(CompressionAlgorithm algorithm) const {
+    struct ThreadLocalCache {
+        uint64_t generation = 0;
+        std::unordered_map<CompressionAlgorithm, std::unique_ptr<ICompressor>> compressors;
+    };
+    thread_local ThreadLocalCache cache;
+
+    const uint64_t currentGen = generation_.load(std::memory_order_acquire);
+    if (cache.generation != currentGen) {
+        cache.compressors.clear();
+        cache.generation = currentGen;
+    }
+
+    auto it = cache.compressors.find(algorithm);
+    if (it != cache.compressors.end()) {
+        return it->second.get();
+    }
+
+    auto created = createCompressor(algorithm);
+    if (!created) {
+        return nullptr;
+    }
+    ICompressor* raw = created.get();
+    cache.compressors.emplace(algorithm, std::move(created));
+    return raw;
 }
 
 std::unique_ptr<ICompressor>

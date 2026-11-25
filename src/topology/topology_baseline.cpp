@@ -885,12 +885,14 @@ SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(
         centroids.push_back(centroid);
     }
     if (buildDenseAnnIndex && !centroids.empty()) {
+        YAMS_ZONE_SCOPED_N("topology::route::buildDenseAnn");
         auto annIndex = yams::vector::StaticCosineAnnIndex::build(centroidIds, centroids);
         if (annIndex) {
             index.centroidAnnIndex = std::move(annIndex).value();
         }
     }
     if (buildBqIndex && !centroids.empty()) {
+        YAMS_ZONE_SCOPED_N("topology::route::buildBq");
         auto bqIndex = yams::vector::BinaryQuantizedIndex::build(
             centroidIds, centroids, bqPrefixDimension, bqRotation,
             yams::vector::kDefaultBinaryRotationSeed);
@@ -901,32 +903,36 @@ SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(
         }
     }
 
-    auto addMembership = [&](const std::string& hash, const std::string& clusterId) {
-        const auto clusterIt = clusterIndexById.find(clusterId);
-        if (hash.empty() || clusterIt == clusterIndexById.end()) {
-            return;
-        }
-        auto& clusters = index.clustersByDocumentHash[hash];
-        if (std::ranges::find(clusters, clusterIt->second) == clusters.end()) {
-            clusters.push_back(clusterIt->second);
-        }
-    };
-    if (!artifacts.memberships.empty()) {
-        for (const auto& membership : artifacts.memberships) {
-            addMembership(membership.documentHash, membership.clusterId);
-            if (membership.parentClusterId.has_value()) {
-                addMembership(membership.documentHash, *membership.parentClusterId);
+    {
+        YAMS_ZONE_SCOPED_N("topology::route::buildMemberships");
+        index.clustersByDocumentHash.reserve(artifacts.memberships.size());
+        auto addMembership = [&](const std::string& hash, const std::string& clusterId) {
+            const auto clusterIt = clusterIndexById.find(clusterId);
+            if (hash.empty() || clusterIt == clusterIndexById.end()) {
+                return;
             }
-            for (const auto& overlapClusterId : membership.overlapClusterIds) {
-                addMembership(membership.documentHash, overlapClusterId);
+            auto& clusters = index.clustersByDocumentHash[hash];
+            if (std::ranges::find(clusters, clusterIt->second) == clusters.end()) {
+                clusters.push_back(clusterIt->second);
             }
-        }
-    } else {
-        // Compatibility for lightweight callers that construct cluster-only artifacts.
-        for (std::size_t clusterIndex = 0; clusterIndex < artifacts.clusters.size();
-             ++clusterIndex) {
-            for (const auto& hash : artifacts.clusters[clusterIndex].memberDocumentHashes) {
-                index.clustersByDocumentHash[hash].push_back(clusterIndex);
+        };
+        if (!artifacts.memberships.empty()) {
+            for (const auto& membership : artifacts.memberships) {
+                addMembership(membership.documentHash, membership.clusterId);
+                if (membership.parentClusterId.has_value()) {
+                    addMembership(membership.documentHash, *membership.parentClusterId);
+                }
+                for (const auto& overlapClusterId : membership.overlapClusterIds) {
+                    addMembership(membership.documentHash, overlapClusterId);
+                }
+            }
+        } else {
+            // Compatibility for lightweight callers that construct cluster-only artifacts.
+            for (std::size_t clusterIndex = 0; clusterIndex < artifacts.clusters.size();
+                 ++clusterIndex) {
+                for (const auto& hash : artifacts.clusters[clusterIndex].memberDocumentHashes) {
+                    index.clustersByDocumentHash[hash].push_back(clusterIndex);
+                }
             }
         }
     }

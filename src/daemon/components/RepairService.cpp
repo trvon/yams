@@ -2376,14 +2376,14 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
         if (batch.empty())
             break;
 
-        std::vector<std::pair<int64_t, std::string>> toRepair;
+        std::vector<std::pair<metadata::DocumentInfo, std::string>> toRepair;
         toRepair.reserve(batch.size());
         for (const auto& doc : batch) {
             ++totalScanned;
             if (shouldRedetectMime(doc)) {
                 const auto detectedMime = bestEffortMimeForDocument(doc, store);
                 if (!detectedMime.empty() && detectedMime != doc.mimeType) {
-                    toRepair.push_back({doc.id, detectedMime});
+                    toRepair.push_back({doc, detectedMime});
                     ++totalCandidates;
                 }
             }
@@ -2395,15 +2395,8 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
         if (dryRun) {
             result.skipped += toRepair.size();
         } else {
-            for (auto& [id, mimeType] : toRepair) {
-                auto docResult = meta->getDocument(id);
-                if (!(docResult && docResult.value())) {
-                    result.failed++;
-                    continue;
-                }
-
-                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-                auto doc = *docResult.value();
+            for (auto& [doc, mimeType] : toRepair) {
+                const int64_t id = doc.id;
                 const bool oldWasText = detector.isTextMimeType(doc.mimeType);
                 const bool newIsText = detector.isTextMimeType(mimeType);
                 doc.mimeType = std::move(mimeType);
@@ -2468,7 +2461,7 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
     auto* wc = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
     MetadataWriteFacade metaFacade(wc, meta.get());
 
-    auto docsResult = metadata::queryDocumentsByPattern(*meta, "%");
+    auto docsResult = metadata::queryDocumentsByPattern(*meta, "%://%");
     if (!docsResult) {
         result.message = "Failed to query";
         return result;
@@ -2956,6 +2949,17 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
             if (nodes.empty())
                 break;
 
+            std::vector<std::string> pageHashes;
+            pageHashes.reserve(nodes.size());
+            for (const auto& node : nodes) {
+                if (node.nodeKey.compare(0, prefix.size(), prefix) == 0 &&
+                    node.nodeKey.size() > prefix.size()) {
+                    pageHashes.push_back(node.nodeKey.substr(prefix.size()));
+                }
+            }
+            auto pageDocsRes = meta->batchGetDocumentsByHash(pageHashes);
+            const auto* pageDocsByHash = pageDocsRes ? &pageDocsRes.value() : nullptr;
+
             std::size_t deletedNodesInBatch = 0;
             for (const auto& node : nodes) {
                 ++stats.nodesScanned;
@@ -2966,14 +2970,20 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
                 if (hash.empty())
                     continue;
 
-                auto docRes = meta->getDocumentByHash(hash);
-                if (!docRes) {
-                    ++stats.errors;
-                    stats.issues.push_back("getDocumentByHash failed for " + hash + ": " +
-                                           docRes.error().message);
-                    continue;
+                bool exists = false;
+                if (pageDocsByHash != nullptr) {
+                    exists = pageDocsByHash->contains(hash);
+                } else {
+                    auto docRes = meta->getDocumentByHash(hash);
+                    if (!docRes) {
+                        ++stats.errors;
+                        stats.issues.push_back("getDocumentByHash failed for " + hash + ": " +
+                                               docRes.error().message);
+                        continue;
+                    }
+                    exists = docRes.value().has_value();
                 }
-                if (!docRes.value().has_value()) {
+                if (!exists) {
                     ++stats.orphanNodes;
                     if (dryRun) {
                         ++stats.skipped;
@@ -3419,6 +3429,16 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
                 break;
             }
 
+            std::vector<int64_t> successDocIds;
+            successDocIds.reserve(docs.value().size());
+            for (const auto& d : docs.value()) {
+                if (d.extractionStatus == metadata::ExtractionStatus::Success) {
+                    successDocIds.push_back(d.id);
+                }
+            }
+            auto hasContentBatchRes = meta->batchHasContent(successDocIds);
+            const auto* hasContentSet = hasContentBatchRes ? &hasContentBatchRes.value() : nullptr;
+
             for (const auto& d : docs.value()) {
                 if (isCanceled()) {
                     result.message = "FTS5 rebuild canceled after scanning " +
@@ -3450,8 +3470,12 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
                 auto extractionStatus = d.extractionStatus;
                 bool successHasContent = false;
                 if (extractionStatus == metadata::ExtractionStatus::Success) {
-                    auto contentRes = meta->getContent(d.id);
-                    successHasContent = contentRes && contentRes.value().has_value();
+                    if (hasContentSet != nullptr) {
+                        successHasContent = hasContentSet->contains(d.id);
+                    } else {
+                        auto contentRes = meta->getContent(d.id);
+                        successHasContent = contentRes && contentRes.value().has_value();
+                    }
                     if (!successHasContent) {
                         metaFacade.updateExtractionStatus(d.id, false,
                                                           metadata::ExtractionStatus::Pending,

@@ -99,7 +99,11 @@ inline std::optional<double> parseDouble(std::string_view raw) {
 }
 
 inline std::optional<bool> parseTomlBool(std::string_view raw) {
-    std::string value(raw);
+    auto view = trimView(raw);
+    if (view.empty()) {
+        return std::nullopt;
+    }
+    std::string value(view);
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (value == "true" || value == "1" || value == "yes" || value == "on") {

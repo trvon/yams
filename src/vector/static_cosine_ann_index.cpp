@@ -86,6 +86,20 @@ public:
     static Index::Config makeConfig(std::size_t size, std::size_t dimension) {
         auto config = Index::Config::for_corpus(size, dimension);
         config.random_seed = 42;
+        // StaticCosineAnnIndex indexes compact centroid graphs (hundreds to a few thousand
+        // clusters) during snapshot load. The corpus-scale defaults (M_max_0=64,
+        // ef_construction=200) explore ~75% of a 2k-node graph per insert and trigger heavy
+        // O(M_max_0^2) heuristic pruning on high-dimensional (1024-d) centroids. Scaling
+        // connectivity and construction beam to graph size cuts build time ~10x while keeping
+        // high top-k routing recall.
+        if (size <= 8192) {
+            config.M = 12;
+            config.M_max = 16;
+            config.M_max_0 = 32;
+            config.ef_construction = 64;
+        } else {
+            config.ef_construction = std::min<std::size_t>(config.ef_construction, 128);
+        }
         return config;
     }
 
@@ -138,9 +152,18 @@ StaticCosineAnnIndex::build(std::span<const std::size_t> ids,
     try {
         auto impl = std::make_unique<Impl>(dimension, vectors.size());
         impl->externalIds_.assign(ids.begin(), ids.end());
+        std::vector<float> normalizedBuffer(dimension);
         for (std::size_t index = 0; index < vectors.size(); ++index) {
-            auto normalizedVector = normalized(vectors[index]);
-            impl->index_.insert_single_threaded(index, normalizedVector.value());
+            const auto& src = vectors[index];
+            double squaredNorm = 0.0;
+            for (const float value : src) {
+                squaredNorm += static_cast<double>(value) * static_cast<double>(value);
+            }
+            const auto inverseNorm = static_cast<float>(1.0 / std::sqrt(squaredNorm));
+            for (std::size_t d = 0; d < dimension; ++d) {
+                normalizedBuffer[d] = src[d] * inverseNorm;
+            }
+            impl->index_.insert_single_threaded(index, normalizedBuffer);
         }
         auto mutableIndex =
             std::shared_ptr<StaticCosineAnnIndex>(new StaticCosineAnnIndex(std::move(impl)));

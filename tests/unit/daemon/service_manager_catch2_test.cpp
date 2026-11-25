@@ -1488,25 +1488,6 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,
-                 "ServiceManager initializes WAL under configured data directory",
-                 "[daemon][service_manager][wal]") {
-    const auto runRoot = testDir_ / "cwd";
-    fs::create_directories(runRoot);
-    ScopedCurrentPath cwdGuard(runRoot);
-
-    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    auto init = sm->initialize();
-    REQUIRE(init);
-
-    const auto expectedWalDir = config_.dataDir / "wal";
-    REQUIRE(fs::exists(expectedWalDir));
-    REQUIRE(fs::is_directory(expectedWalDir));
-
-    const auto misplacedWalDir = runRoot / "wal";
-    CHECK_FALSE(fs::exists(misplacedWalDir));
-}
-
-TEST_CASE_METHOD(ServiceManagerFixture,
                  "ServiceManager refuses a store created by a newer YAMS without aborting",
                  "[daemon][service_manager][startup][migration][regression]") {
     // A migration_history version above this binary's latest used to dispatch

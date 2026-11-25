@@ -2048,17 +2048,45 @@ boost::asio::awaitable<void> EmbeddingService::processEmbedJob(InternalEventBus:
     };
     std::vector<GatherCandidate> candidates;
     candidates.reserve(inputs.size());
+    std::vector<std::string> inputHashes;
+    inputHashes.reserve(inputs.size());
+    for (const auto& [hash, _] : inputs) {
+        inputHashes.push_back(hash);
+    }
+    std::unordered_map<std::string, metadata::DocumentInfo> docsByHash;
+    bool batchLookupOk = false;
+    try {
+        auto batchRes = meta_->batchGetDocumentsByHash(inputHashes);
+        if (batchRes) {
+            docsByHash = std::move(batchRes.value());
+            batchLookupOk = true;
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("EmbeddingService: batchGetDocumentsByHash threw ({}), falling back per-doc",
+                     e.what());
+    }
     for (const auto& [hash, prepared] : inputs) {
         try {
-            auto docInfoRes = meta_->getDocumentByHash(hash);
-            if (!docInfoRes || !docInfoRes.value().has_value()) {
-                spdlog::warn("EmbeddingService: document not found: {}", hash);
-                failedGather++;
-                failedGatherHashes.push_back(hash);
-                continue;
+            if (batchLookupOk) {
+                auto it = docsByHash.find(hash);
+                if (it == docsByHash.end()) {
+                    spdlog::warn("EmbeddingService: document not found: {}", hash);
+                    failedGather++;
+                    failedGatherHashes.push_back(hash);
+                    continue;
+                }
+                candidates.push_back({hash, std::move(it->second), prepared});
+            } else {
+                auto docInfoRes = meta_->getDocumentByHash(hash);
+                if (!docInfoRes || !docInfoRes.value().has_value()) {
+                    spdlog::warn("EmbeddingService: document not found: {}", hash);
+                    failedGather++;
+                    failedGatherHashes.push_back(hash);
+                    continue;
+                }
+                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
+                candidates.push_back({hash, std::move(*docInfoRes.value()), prepared});
             }
-            // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-            candidates.push_back({hash, std::move(*docInfoRes.value()), prepared});
         } catch (const std::exception& e) {
             spdlog::error("EmbeddingService: exception gathering {}: {}", hash, e.what());
             failedGather++;

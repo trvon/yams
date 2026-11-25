@@ -18,7 +18,7 @@
 #include <yams/core/types.h>
 #include <yams/daemon/resource/plugin_host.h>
 
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 #include <chrono>
 #include <filesystem>

@@ -7,6 +7,7 @@
 #include <yams/profiling.h>
 
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
@@ -853,6 +854,8 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
     // Release the KG write lease before acquiring a metadata connection (including size-one pools).
     if (hasKgOps && kg_) {
         std::optional<Error> firstCompletionError;
+        std::vector<std::pair<int64_t, std::string>> pendingCompletions;
+        pendingCompletions.reserve(batches.size());
         for (const auto& batch : batches) {
             if (batch->knowledgeGraphToken.empty())
                 continue;
@@ -870,9 +873,12 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                 }
                 continue;
             }
+            pendingCompletions.emplace_back(batch->knowledgeGraphDocumentId,
+                                            batch->knowledgeGraphToken);
+        }
+        if (!pendingCompletions.empty()) {
             metadata::MetadataOpScope opScope("wc_kg_batch_completion");
-            auto completed = meta_->completeKnowledgeGraphEnrichment(
-                batch->knowledgeGraphDocumentId, batch->knowledgeGraphToken);
+            auto completed = meta_->completeKnowledgeGraphEnrichmentBatch(pendingCompletions);
             if (!completed && !firstCompletionError)
                 firstCompletionError = completed.error();
         }
@@ -2084,31 +2090,6 @@ Result<void> WriteCoordinator::applyMetadataOp(SetMetadataBatchOp& op) {
     return r;
 }
 
-Result<void> WriteCoordinator::applyMetadataOp(UpdateExtractionStatusOp& op) {
-    if (!meta_)
-        return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
-    metadata::MetadataOpScope opScope("wc_extraction_status");
-    auto r = meta_->updateDocumentExtractionStatus(op.documentId, op.contentExtracted, op.status,
-                                                   op.error);
-    if (r) {
-        std::lock_guard<std::mutex> lock(statsMutex_);
-        stats_.extractionStatusesUpdated++;
-    }
-    return r;
-}
-
-Result<void> WriteCoordinator::applyMetadataOp(UpdateEmbeddingStatusByHashOp& op) {
-    if (!meta_)
-        return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
-    metadata::MetadataOpScope opScope("wc_embedding_status");
-    auto r = meta_->updateDocumentEmbeddingStatusByHash(op.hash, op.embedded, op.modelName);
-    if (r) {
-        std::lock_guard<std::mutex> lock(statsMutex_);
-        stats_.embeddingStatusesUpdated++;
-    }
-    return r;
-}
-
 Result<void> WriteCoordinator::applyMetadataOp(UpdateEmbeddingStatusByHashesOp& op) {
     if (!meta_)
         return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
@@ -2219,5 +2200,11 @@ Result<void> WriteCoordinator::applyMetadataOp(AcknowledgeKnowledgeGraphOp& op) 
     }
     return Result<void>();
 }
+
+namespace detail {
+void logWriteBatchCoalescerWarn(std::string_view source, std::string_view message) {
+    spdlog::warn("[WriteBatchCoalescer:{}] {}", source, message);
+}
+} // namespace detail
 
 } // namespace yams::daemon

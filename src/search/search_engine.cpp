@@ -1,7 +1,7 @@
 #include <yams/search/search_engine.h>
 
-#include "../../include/yams/search/evidence_search_pipeline.h"
 #include <yams/search/bandit_reward.h>
+#include <yams/search/evidence_search_pipeline.h>
 
 #include <spdlog/spdlog.h>
 #include "concept_boost_internal.h"
@@ -12,6 +12,7 @@
 #include "search_lexical_pipeline_internal.h"
 #include "search_vector_pipeline_internal.h"
 #include "search_vector_stage.h"
+#include <yams/config/detail/config_parse_utils.h>
 #include <yams/core/assert.hpp>
 #include <yams/core/cpp23_features.hpp>
 #include <yams/core/magic_numbers.hpp>
@@ -409,11 +410,7 @@ std::vector<float> computeReciprocalCommunitySupport(
 bool envFlagEnabled(const char* name) {
     if (const char* env = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe) — read-only; env
                                                // vars not modified concurrently
-        std::string value(env);
-        std::transform(value.begin(), value.end(), value.begin(), [](char c) {
-            return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        });
-        return value == "1" || value == "true" || value == "yes" || value == "on";
+        return yams::config::detail::parseTomlBool(env).value_or(false);
     }
     return false;
 }
@@ -1077,6 +1074,13 @@ public:
             return lookup.error();
         }
         return lookup.value().snapshot != nullptr;
+    }
+
+    void adoptTopologySnapshotCache(const Impl& previous) {
+        if (previous.topologySnapshotCache_ && metadataRepo_ == previous.metadataRepo_ &&
+            kgStore_ == previous.kgStore_) {
+            topologySnapshotCache_ = previous.topologySnapshotCache_;
+        }
     }
 
     const SearchEngine::Statistics& getStatistics() const { return stats_; }
@@ -5104,6 +5108,12 @@ const SearchEngineConfig& SearchEngine::getConfig() const {
 
 Result<bool> SearchEngine::prewarmTopologyRouting() {
     return pImpl_->prewarmTopologyRouting();
+}
+
+void SearchEngine::adoptTopologySnapshotCache(const SearchEngine& previous) {
+    if (pImpl_ && previous.pImpl_) {
+        pImpl_->adoptTopologySnapshotCache(*previous.pImpl_);
+    }
 }
 
 const SearchEngine::Statistics& SearchEngine::getStatistics() const {

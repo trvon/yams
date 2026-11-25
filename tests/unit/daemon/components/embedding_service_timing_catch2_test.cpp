@@ -1,3 +1,4 @@
+#include <spdlog/spdlog.h>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
@@ -518,6 +519,15 @@ public:
             callback();
         }
         return metadata::MetadataRepository::getDocumentByHash(hash);
+    }
+
+    Result<std::unordered_map<std::string, metadata::DocumentInfo>>
+    batchGetDocumentsByHash(const std::vector<std::string>& hashes) override {
+        if (beforeLookup) {
+            auto callback = std::exchange(beforeLookup, {});
+            callback();
+        }
+        return metadata::MetadataRepository::batchGetDocumentsByHash(hashes);
     }
 };
 

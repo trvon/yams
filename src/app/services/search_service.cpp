@@ -2300,12 +2300,28 @@ private:
                            std::string::npos;
             };
 
+            std::vector<std::string> deltaHashVec(recentLexicalDeltaHashes.begin(),
+                                                  recentLexicalDeltaHashes.end());
+            auto deltaDocsRes = ctx_.metadataRepo->batchGetDocumentsByHash(deltaHashVec);
+            const auto* deltaDocsByHash = deltaDocsRes ? &deltaDocsRes.value() : nullptr;
             for (const auto& hash : recentLexicalDeltaHashes) {
-                auto docResult = ctx_.metadataRepo->getDocumentByHash(hash);
-                if (!docResult || !docResult.value().has_value()) {
+                std::optional<metadata::DocumentInfo> fallbackDoc;
+                const metadata::DocumentInfo* docPtr = nullptr;
+                if (deltaDocsByHash != nullptr) {
+                    if (auto it = deltaDocsByHash->find(hash); it != deltaDocsByHash->end()) {
+                        docPtr = &it->second;
+                    }
+                } else {
+                    auto docResult = ctx_.metadataRepo->getDocumentByHash(hash);
+                    if (docResult && docResult.value().has_value()) {
+                        fallbackDoc = std::move(*docResult.value());
+                        docPtr = &*fallbackDoc;
+                    }
+                }
+                if (docPtr == nullptr) {
                     continue;
                 }
-                const auto& doc = *docResult.value();
+                const auto& doc = *docPtr;
                 if (!docIdAllowed(doc.id)) {
                     continue;
                 }
