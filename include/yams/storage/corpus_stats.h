@@ -84,6 +84,11 @@ struct CorpusStats {
     int64_t kgAliasCount{0};
     double kgAliasDensity{0.0};
 
+    // --- Entity vectors (vector database, not the metadata DB) ---
+    // Rows in entity_vectors. -1 means unknown: getCorpusStats() reads only the metadata DB,
+    // so the count is filled in by callers that hold the vector database (SearchEngineBuilder).
+    int64_t entityVectorCount{-1};
+
     // --- Language distribution (optional, for future use) ---
     std::unordered_map<std::string, int64_t> extensionCounts; // extension -> count
 
@@ -130,6 +135,8 @@ struct CorpusStats {
     }
     [[nodiscard]] bool hasFtsIndexing() const noexcept { return ftsIndexedCoverage > 0.5; }
     [[nodiscard]] bool hasTitles() const noexcept { return titleCoverage > 0.1; }
+    // Known-empty only; an unknown count (-1) is not treated as absent.
+    [[nodiscard]] bool hasNoEntityVectors() const noexcept { return entityVectorCount == 0; }
     [[nodiscard]] bool hasRichGraphTopology() const noexcept {
         return kgRelationalEdgeDensity > 2.0 || kgAliasDensity > 1.0;
     }
@@ -194,6 +201,7 @@ struct CorpusStats {
         j["kg_relational_edge_density"] = kgRelationalEdgeDensity;
         j["kg_alias_count"] = kgAliasCount;
         j["kg_alias_density"] = kgAliasDensity;
+        j["entity_vector_count"] = entityVectorCount;
         j["computed_at_ms"] = computedAtMs;
         j["used_online_overlay"] = usedOnlineOverlay;
         j["reconciled_computed_at_ms"] = reconciledComputedAtMs;
@@ -307,6 +315,8 @@ struct CorpusStats {
             stats.kgAliasCount = j["kg_alias_count"].get<int64_t>();
         if (j.contains("kg_alias_density"))
             stats.kgAliasDensity = j["kg_alias_density"].get<double>();
+        if (j.contains("entity_vector_count"))
+            stats.entityVectorCount = j["entity_vector_count"].get<int64_t>();
         if (j.contains("computed_at_ms"))
             stats.computedAtMs = j["computed_at_ms"].get<int64_t>();
         if (j.contains("used_online_overlay"))

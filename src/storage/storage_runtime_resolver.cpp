@@ -2,6 +2,7 @@
 
 #include <yams/common/string_utils.h>
 #include <yams/config/config_helpers.h>
+#include <yams/config/detail/config_parse_utils.h>
 #include <yams/storage/storage_backend.h>
 #include <yams/storage/storage_backend_engine_adapter.h>
 
@@ -304,9 +305,8 @@ requestR2TemporaryCredentials(const std::string& accountId, const std::string& b
     return creds;
 }
 
-bool parseBool(std::string raw) {
-    raw = toLower(trim(raw));
-    return raw == "1" || raw == "true" || raw == "yes" || raw == "on";
+bool parseBool(std::string_view raw) {
+    return yams::config::detail::parseTomlBool(raw).value_or(false);
 }
 
 std::string getOrDefault(const std::map<std::string, std::string>& cfg, const std::string& key,

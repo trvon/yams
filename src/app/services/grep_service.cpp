@@ -690,10 +690,25 @@ public:
             filteredDocs.reserve(docs.size());
 
             auto shouldSkipFile = [](const metadata::GrepCandidateProjection& doc) -> bool {
-                std::string ext;
-                auto dotPos = doc.filePath.rfind('.');
-                if (dotPos != std::string::npos && dotPos < doc.filePath.size() - 1) {
-                    ext = doc.filePath.substr(dotPos + 1);
+                if (doc.mimeType.starts_with("image/") || doc.mimeType.starts_with("video/") ||
+                    doc.mimeType.starts_with("audio/") || doc.mimeType == "application/pdf" ||
+                    doc.mimeType == "application/zip" || doc.mimeType == "application/x-tar" ||
+                    doc.mimeType == "application/x-gzip" || doc.mimeType == "application/x-bzip2" ||
+                    doc.mimeType == "application/octet-stream") {
+                    return true;
+                }
+
+                const std::string_view filePathView(doc.filePath);
+                std::string_view ext;
+                if (const auto dotPos = filePathView.rfind('.');
+                    dotPos != std::string_view::npos && dotPos < filePathView.size() - 1) {
+                    ext = filePathView.substr(dotPos + 1);
+                }
+
+                std::string_view leafName = filePathView;
+                if (const auto slashPos = filePathView.find_last_of("/\\");
+                    slashPos != std::string_view::npos) {
+                    leafName = filePathView.substr(slashPos + 1);
                 }
 
                 const auto isBinaryArtifactCategory = [](yams::magic::PruneCategory category) {
@@ -703,20 +718,15 @@ public:
                            category == yams::magic::PruneCategory::BuildArchive ||
                            category == yams::magic::PruneCategory::Packages;
                 };
-                const auto pathCategory = yams::magic::getPruneCategory(doc.filePath, ext);
-                const auto leafCategory = yams::magic::getPruneCategory(
-                    std::filesystem::path(doc.filePath).filename().generic_string(), ext);
-                if (isBinaryArtifactCategory(leafCategory) ||
-                    (isBinaryArtifactCategory(pathCategory) && !isTextMime(doc.mimeType))) {
+                const auto leafCategory = yams::magic::getPruneCategory(leafName, ext);
+                if (isBinaryArtifactCategory(leafCategory)) {
                     return true;
                 }
-
-                if (doc.mimeType.find("image/") == 0 || doc.mimeType.find("video/") == 0 ||
-                    doc.mimeType.find("audio/") == 0 || doc.mimeType == "application/pdf" ||
-                    doc.mimeType == "application/zip" || doc.mimeType == "application/x-tar" ||
-                    doc.mimeType == "application/x-gzip" || doc.mimeType == "application/x-bzip2" ||
-                    doc.mimeType == "application/octet-stream") {
-                    return true;
+                if (!isTextMime(doc.mimeType) && leafName.size() < filePathView.size()) {
+                    const auto pathCategory = yams::magic::getPruneCategory(filePathView, ext);
+                    if (isBinaryArtifactCategory(pathCategory)) {
+                        return true;
+                    }
                 }
 
                 return false;

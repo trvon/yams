@@ -1,6 +1,5 @@
 #pragma once
 
-#include <spdlog/spdlog.h>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -56,23 +55,24 @@ std::unordered_map<std::string, MetadataInsertPhaseTiming> getMetadataInsertPhas
 
 namespace detail {
 inline thread_local std::string_view metadata_op_tag;
-}
 
-inline bool metadata_trace_enabled() {
-    static std::atomic<int> cached{-1};
-    int v = cached.load(std::memory_order_relaxed);
-    if (v >= 0)
-        return v == 1;
-    static std::mutex envMutex;
-    bool enabled = false;
-    {
-        std::lock_guard<std::mutex> lock(envMutex);
-        const char* env = std::getenv("YAMS_METADATA_TRACE"); // NOLINT(concurrency-mt-unsafe)
-        enabled = env && *env && std::string_view(env) != "0";
-    }
-    cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
-    return enabled;
-}
+void logPoolAcquireFailure(std::string_view route, std::string_view op, int attempt,
+                           long long acquireMs, long long acquireUs, long long totalMs,
+                           long long totalUs, bool shutdownAcquire, std::string_view errorMessage);
+void logPoolQueryTrace(std::string_view route, std::string_view op, int attempt,
+                       long long acquireMs, long long acquireUs, long long queryMs,
+                       long long queryUs, long long releaseUs, long long totalMs, long long totalUs,
+                       bool ok, std::string_view errorMessage);
+void logPoolRetrySuccess(std::string_view route, int attempt);
+void logPoolFinalError(std::string_view route, std::string_view op, int attempt, bool isRetryable,
+                       std::string_view errorMessage);
+void logPoolRetrySleep(std::string_view route, std::string_view op, int attempt, int delayMs,
+                       bool isLockError);
+void logBestEffortWriteTrace(bool acquireFailed, long long totalMs, bool ok,
+                             std::string_view errorMessage);
+} // namespace detail
+
+bool metadata_trace_enabled();
 
 inline std::string_view current_metadata_op() {
     return detail::metadata_op_tag;
@@ -629,6 +629,19 @@ public:
     virtual Result<void> upsertPathTreeForDocument(const DocumentInfo& info, int64_t documentId,
                                                    bool isNewDocument,
                                                    std::span<const float> embeddingValues) = 0;
+    virtual Result<void> upsertPathTreeForDocumentsBatch(
+        std::span<const std::pair<const DocumentInfo*, int64_t>> items) {
+        for (const auto& [info, documentId] : items) {
+            if (!info) {
+                continue;
+            }
+            auto r = upsertPathTreeForDocument(*info, documentId, true, std::span<const float>());
+            if (!r) {
+                return r;
+            }
+        }
+        return Result<void>();
+    }
     virtual Result<void> removePathTreeForDocument(const DocumentInfo& info, int64_t documentId,
                                                    std::span<const float> embeddingValues) = 0;
 
@@ -718,6 +731,8 @@ public:
     // Content operations
     Result<void> insertContent(const DocumentContent& content) override;
     Result<std::optional<DocumentContent>> getContent(int64_t documentId) override;
+    /// Index-only existence check for document_content rows (avoids loading text blobs).
+    Result<std::unordered_set<int64_t>> batchHasContent(std::span<const int64_t> documentIds);
     Result<void> updateContent(const DocumentContent& content) override;
     Result<void> deleteContent(int64_t documentId) override;
     Result<void> batchInsertContentAndIndex(const std::vector<BatchContentEntry>& entries) override;
@@ -725,6 +740,10 @@ public:
     /// Acknowledge actual KG completion only for the matching pending admission token.
     /// False means stale, missing, untracked, or already acknowledged; errors leave it pending.
     Result<bool> completeKnowledgeGraphEnrichment(int64_t documentId, const std::string& token);
+
+    /// Batched KG completion acknowledgement in a single write transaction.
+    Result<size_t>
+    completeKnowledgeGraphEnrichmentBatch(std::span<const std::pair<int64_t, std::string>> items);
 
     // Metadata operations
     Result<void> setMetadata(int64_t documentId, const std::string& key,
@@ -802,6 +821,21 @@ public:
     Result<SearchResults>
     search(const std::string& query, int limit = 50, int offset = 0,
            const std::optional<std::vector<int64_t>>& docIds = std::nullopt) override;
+
+    /// Keyword search entry point. Same as search(), except that a natural-language query whose
+    /// implicit-AND match returns less than a full page is rerun as a BM25-ranked OR over the
+    /// same terms. Candidate generators (hybrid text, grep prefilter) keep using search().
+    /// YAMS_FTS_NL_OR_FALLBACK=0/1 overrides the default of either entry point.
+    Result<SearchResults>
+    searchKeyword(const std::string& query, int limit = 50, int offset = 0,
+                  const std::optional<std::vector<int64_t>>& docIds = std::nullopt);
+
+    /// Candidate-generation search entry point for internal hybrid/lexical pipelines.
+    /// Identical to search(), except it skips the bounded COUNT(*) FTS5+JOIN query when a
+    /// full page is returned (callers only consume the top-limit candidate rows).
+    Result<SearchResults>
+    searchCandidates(const std::string& query, int limit = 50, int offset = 0,
+                     const std::optional<std::vector<int64_t>>& docIds = std::nullopt);
 
     // Fuzzy search operations
     Result<SearchResults>
@@ -952,6 +986,12 @@ public:
     batchGetDocumentsWithContentPreview(const std::vector<std::string>& hashes,
                                         int maxPreviewChars);
 
+    /// Batch fetch documents with content previews keyed by document id in a single JOIN query
+    /// (chunked for SQLite bind-parameter limits). Avoids N+1 getDocument + getContent loops.
+    Result<std::unordered_map<int64_t, std::pair<DocumentInfo, std::string>>>
+    batchGetDocumentsWithContentPreviewByIds(const std::vector<int64_t>& documentIds,
+                                             int maxPreviewChars);
+
     // Embedding status operations
     /// Starts a new local attempt and invalidates previous readiness/tokens.
     /// Call before reading the input snapshot. Recipe must identify the full derivation policy.
@@ -1033,6 +1073,8 @@ public:
     Result<void> upsertPathTreeForDocument(const DocumentInfo& info, int64_t documentId,
                                            bool isNewDocument,
                                            std::span<const float> embeddingValues) override;
+    Result<void> upsertPathTreeForDocumentsBatch(
+        std::span<const std::pair<const DocumentInfo*, int64_t>> items) override;
     Result<void> removePathTreeForDocument(const DocumentInfo& info, int64_t documentId,
                                            std::span<const float> embeddingValues) override;
 
@@ -1105,10 +1147,17 @@ public:
 
     void setGraphComponent(std::shared_ptr<yams::daemon::GraphComponent> graphComponent);
 
+    struct DocumentPathRecordInput {
+        const DocumentInfo* info{nullptr};
+        int64_t documentId{0};
+        const std::vector<std::pair<std::string, MetadataValue>>* metadata{nullptr};
+    };
+
     bool supportsDocumentPaths() const { return hasDocumentPaths_; }
     Result<void>
     recordDocumentPath(const DocumentInfo& info, int64_t documentId,
                        const std::vector<std::pair<std::string, MetadataValue>>& metadata);
+    Result<void> recordDocumentPathsBatch(std::span<const DocumentPathRecordInput> entries);
     Result<void> retireDocumentPath(const std::string& path);
     Result<std::vector<DocumentInfo>> getDocumentPathReferences(int64_t documentId);
     Result<std::optional<std::unordered_map<std::string, MetadataValue>>>
@@ -1205,7 +1254,7 @@ private:
     mutable PathCacheWriteBuffer pathCacheWriteBuffer_{};
 
     struct QueryCacheEntry {
-        SearchResults results;
+        std::shared_ptr<const SearchResults> results;
         std::chrono::steady_clock::time_point timestamp{};
         uint64_t hits{0};
     };
@@ -1299,6 +1348,9 @@ private:
     void recordPathHit(const std::string& normalizedPath) const;
     void ensurePathHitRingInitialized() const;
     void updateQueryCache(const std::string& key, const SearchResults& results) const;
+    Result<SearchResults> searchFullText(const std::string& query, int limit, int offset,
+                                         const std::optional<std::vector<int64_t>>& docIds,
+                                         bool nlOrFallbackByDefault, bool computeTotalCount = true);
     void invalidateQueryCache() const;
     std::optional<std::vector<int64_t>> getCachedFtsIndexedIds() const;
     void setCachedFtsIndexedIds(const std::vector<int64_t>& docIds) const;
@@ -1346,36 +1398,21 @@ private:
 
             if (!connResult) {
                 auto op = current_metadata_op();
-                if (metadata_trace_enabled()) {
-                    const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                             std::chrono::steady_clock::now() - attemptStart)
-                                             .count();
-                    spdlog::warn(
-                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
-                        "acquire_ms={} acquire_us={} query_ms=0 query_us=0 release_us=0 "
-                        "total_ms={} total_us={} ok=false error='{}'",
-                        route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
-                        totalMs,
-                        std::chrono::duration_cast<std::chrono::microseconds>(
-                            std::chrono::steady_clock::now() - attemptStart)
-                            .count(),
-                        connResult.error().message);
-                }
                 const auto& acquireError = connResult.error();
                 const bool shutdownAcquire =
                     acquireError.code == ErrorCode::OperationCancelled ||
                     acquireError.code == ErrorCode::SystemShutdown ||
                     (acquireError.code == ErrorCode::InvalidState &&
                      acquireError.message.find("shut down") != std::string::npos);
-                if (shutdownAcquire) {
-                    spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' op='{}' "
-                                  "acquire cancelled during shutdown: {}",
-                                  route, op.empty() ? "(unknown)" : op, acquireError.message);
-                } else {
-                    spdlog::error("MetadataRepository::executeQueryOnPool route='{}' op='{}' "
-                                  "acquire error: {}",
-                                  route, op.empty() ? "(unknown)" : op, acquireError.message);
-                }
+                const auto now = std::chrono::steady_clock::now();
+                const auto totalMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - attemptStart)
+                        .count();
+                const auto totalUs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(now - attemptStart)
+                        .count();
+                detail::logPoolAcquireFailure(route, op, attempt + 1, acquireMs, acquireUs, totalMs,
+                                              totalUs, shutdownAcquire, acquireError.message);
                 return Error{acquireError};
             }
 
@@ -1421,22 +1458,11 @@ private:
             // Observability must never discard a committed result or cause the operation to retry.
             try {
                 if (metadata_trace_enabled()) {
-                    auto op = current_metadata_op();
-                    if (result.has_value()) {
-                        spdlog::info(
-                            "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
-                            "acquire_ms={} acquire_us={} query_ms={} query_us={} release_us={} "
-                            "total_ms={} total_us={} ok=true",
-                            route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
-                            queryMs, queryUs, releaseUs, totalMs, totalUs);
-                    } else {
-                        spdlog::info(
-                            "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
-                            "acquire_ms={} acquire_us={} query_ms={} query_us={} release_us={} "
-                            "total_ms={} total_us={} ok=false error='{}'",
-                            route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
-                            queryMs, queryUs, releaseUs, totalMs, totalUs, result.error().message);
-                    }
+                    detail::logPoolQueryTrace(
+                        route, current_metadata_op(), attempt + 1, acquireMs, acquireUs, queryMs,
+                        queryUs, releaseUs, totalMs, totalUs, result.has_value(),
+                        result.has_value() ? std::string_view{}
+                                           : std::string_view{result.error().message});
                 }
             } catch (...) {
                 std::fputs("MetadataRepository: query trace unavailable\n", stderr);
@@ -1445,10 +1471,7 @@ private:
             if (result.has_value()) {
                 try {
                     if (attempt > 0) {
-                        // Log successful retry at debug level
-                        spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' succeeded "
-                                      "after {} retries",
-                                      route, attempt);
+                        detail::logPoolRetrySuccess(route, attempt);
                     }
                 } catch (...) {
                     std::fputs("MetadataRepository: retry success trace unavailable\n", stderr);
@@ -1476,16 +1499,8 @@ private:
                     reportDbLockError();
                 }
                 // Always log operation context for constraint errors (helps debugging)
-                auto op = current_metadata_op();
-                if (isRetryable || metadata_trace_enabled()) {
-                    spdlog::warn(
-                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' error: {}",
-                        route, op.empty() ? "(unknown)" : op, result.error().message);
-                }
-                spdlog::error("MetadataRepository::executeQueryOnPool route='{}' op='{}' "
-                              "attempts={} connection error: {}",
-                              route, op.empty() ? "(unknown)" : op, attempt + 1,
-                              result.error().message);
+                detail::logPoolFinalError(route, current_metadata_op(), attempt + 1, isRetryable,
+                                          result.error().message);
                 return Error{result.error()};
             }
 
@@ -1496,11 +1511,8 @@ private:
             std::uniform_int_distribution<int> dist(-jitter, jitter);
             int delayMs = baseDelayMs + dist(rng);
             if (metadata_trace_enabled()) {
-                auto op = current_metadata_op();
-                spdlog::info(
-                    "MetadataRepository::executeQueryOnPool retry route='{}' op='{}' attempt={} "
-                    "sleep_ms={} retryable=true lock_error={}",
-                    route, op.empty() ? "(unknown)" : op, attempt + 1, delayMs, isLockError);
+                detail::logPoolRetrySleep(route, current_metadata_op(), attempt + 1, delayMs,
+                                          isLockError);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
         }
@@ -1554,9 +1566,7 @@ private:
                 const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                          std::chrono::steady_clock::now() - start)
                                          .count();
-                spdlog::warn("MetadataRepository::executeBestEffortWrite acquire_ms={} total_ms={} "
-                             "ok=false error='{}'",
-                             totalMs, totalMs, connResult.error().message);
+                detail::logBestEffortWriteTrace(true, totalMs, false, connResult.error().message);
             }
             if (!hasExistingOp) {
                 detail::metadata_op_tag = prevOp;
@@ -1578,14 +1588,9 @@ private:
             const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now() - start)
                                      .count();
-            if (result.has_value()) {
-                spdlog::info("MetadataRepository::executeBestEffortWrite total_ms={} ok=true",
-                             totalMs);
-            } else {
-                spdlog::info(
-                    "MetadataRepository::executeBestEffortWrite total_ms={} ok=false error='{}'",
-                    totalMs, result.error().message);
-            }
+            detail::logBestEffortWriteTrace(
+                false, totalMs, result.has_value(),
+                result.has_value() ? std::string_view{} : std::string_view{result.error().message});
         }
 
         if (!hasExistingOp) {
@@ -1614,36 +1619,6 @@ std::string buildNaturalLanguageFts5QueryForTest(std::string_view query, bool us
                                                  bool autoPrefix, bool autoPhrase);
 bool isLikelyNaturalLanguageQueryForTest(std::string_view query);
 } // namespace test
-
-/**
- * @brief Builder for metadata queries with fluent interface
- */
-class MetadataQueryBuilder {
-public:
-    MetadataQueryBuilder() = default;
-
-    // Document filtering
-    MetadataQueryBuilder& withExtension(const std::string& extension);
-    MetadataQueryBuilder& modifiedAfter(std::chrono::system_clock::time_point time);
-    MetadataQueryBuilder& modifiedBefore(std::chrono::system_clock::time_point time);
-    MetadataQueryBuilder& indexedAfter(std::chrono::system_clock::time_point time);
-
-    // Sorting and pagination
-    MetadataQueryBuilder& orderByModified(bool ascending = false);
-    MetadataQueryBuilder& limit(int count);
-    MetadataQueryBuilder& offset(int count);
-
-    // Build the query
-    [[nodiscard]] std::string buildQuery() const;
-    [[nodiscard]] const std::vector<std::string>& getParameters() const;
-
-private:
-    std::vector<std::string> conditions_;
-    std::vector<std::string> parameters_;
-    std::string orderBy_;
-    int limit_ = -1;
-    int offset_ = -1;
-};
 
 /**
  * @brief Transaction helper for atomic metadata operations

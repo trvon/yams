@@ -847,11 +847,11 @@ TEST_CASE("MetadataKgTopologyArtifactStore persists member orders in the road si
         CHECK(resident.value()->orderUnavailableReason.empty());
     }
 
-    auto node = fixture.kgStore->getNodeByKey(roadNodeKey("snap-1"));
-    REQUIRE(node.has_value());
-    REQUIRE(node.value().has_value());
-    REQUIRE(node.value()->properties.has_value());
-    auto sidecar = deserializeTopologyRoadSidecarCompressed(*node.value()->properties);
+    auto payload =
+        MetadataKgTopologyArtifactStore::readStoredPayload(*fixture.kgStore, roadNodeKey("snap-1"));
+    REQUIRE(payload.has_value());
+    REQUIRE(payload.value().has_value());
+    auto sidecar = deserializeTopologyRoadSidecarCompressed(*payload.value());
     REQUIRE(sidecar.has_value());
     CHECK(sidecar.value().roads == stored.roads);
     CHECK(sidecar.value().memberOrders == collectTopologyMemberOrders(stored));

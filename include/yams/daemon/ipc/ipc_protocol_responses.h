@@ -4059,15 +4059,40 @@ struct GraphValidateResponse {
 /**
  * Response for KG ingest request (PBI-093 Phase 2).
  */
+struct KgIngestUnresolvedEdge {
+    std::string srcNodeKey;
+    std::string dstNodeKey;
+    std::string relation;
+    bool srcMissing{false};
+    bool dstMissing{false};
+};
+
+struct KgIngestNsConflict {
+    std::string kind; // "node" | "edge"
+    std::string nodeKey;
+    std::string srcNodeKey;
+    std::string dstNodeKey;
+    std::string relation;
+    std::string existingNs;
+    std::string requestedNs;
+    std::string reason; // "ns_change" | "invalid_ns" | "reserved_key"
+};
+
 struct KgIngestResponse {
-    uint64_t nodesInserted{0};
-    uint64_t nodesSkipped{0};
+    uint64_t nodesInserted{0}; // New rows
+    uint64_t nodesSkipped{0};  // Existing rows left untouched (skip_existing) or invalid keys
     uint64_t edgesInserted{0};
-    uint64_t edgesSkipped{0};
+    uint64_t edgesSkipped{0}; // Unresolved endpoints plus skip_existing
     uint64_t aliasesInserted{0};
     uint64_t aliasesSkipped{0};
     std::vector<std::string> errors; // Non-fatal errors/warnings
     bool success{true};
+    // Appended tail; older peers omit it.
+    uint64_t nodesUpdated{0}; // Existing rows refreshed in place
+    uint64_t edgesUpdated{0};
+    std::vector<KgIngestUnresolvedEdge> unresolvedEdges; // Edges dropped for a missing endpoint
+    uint64_t aliasesUpdated{0};
+    std::vector<KgIngestNsConflict> nsConflicts; // Rows refused to protect row ownership
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -4079,6 +4104,16 @@ struct KgIngestResponse {
             ser << err;
         }
         ser << success;
+        ser << nodesUpdated << edgesUpdated << static_cast<uint32_t>(unresolvedEdges.size());
+        for (const auto& edge : unresolvedEdges) {
+            ser << edge.srcNodeKey << edge.dstNodeKey << edge.relation << edge.srcMissing
+                << edge.dstMissing;
+        }
+        ser << aliasesUpdated << static_cast<uint32_t>(nsConflicts.size());
+        for (const auto& c : nsConflicts) {
+            ser << c.kind << c.nodeKey << c.srcNodeKey << c.dstNodeKey << c.relation << c.existingNs
+                << c.requestedNs << c.reason;
+        }
     }
 
     template <typename Deserializer>
@@ -4132,6 +4167,83 @@ struct KgIngestResponse {
         else
             return r.error();
 
+        // Tolerate the tail being absent (older daemon); a present tail must be complete.
+        auto updated = deser.template read<uint64_t>();
+        if (!updated)
+            return res;
+        res.nodesUpdated = updated.value();
+        if (auto r = ipc_detail::readField(deser, res.edgesUpdated); !r)
+            return r.error();
+        uint32_t unresolvedCount = 0;
+        if (auto r = ipc_detail::readField(deser, unresolvedCount); !r)
+            return r.error();
+        res.unresolvedEdges.reserve(unresolvedCount);
+        for (uint32_t i = 0; i < unresolvedCount; ++i) {
+            KgIngestUnresolvedEdge edge;
+            if (auto r = ipc_detail::readField(deser, edge.srcNodeKey); !r)
+                return r.error();
+            if (auto r = ipc_detail::readField(deser, edge.dstNodeKey); !r)
+                return r.error();
+            if (auto r = ipc_detail::readField(deser, edge.relation); !r)
+                return r.error();
+            if (auto r = ipc_detail::readField(deser, edge.srcMissing); !r)
+                return r.error();
+            if (auto r = ipc_detail::readField(deser, edge.dstMissing); !r)
+                return r.error();
+            res.unresolvedEdges.push_back(std::move(edge));
+        }
+        if (auto r = ipc_detail::readField(deser, res.aliasesUpdated); !r)
+            return r.error();
+        uint32_t conflictCount = 0;
+        if (auto r = ipc_detail::readField(deser, conflictCount); !r)
+            return r.error();
+        res.nsConflicts.reserve(conflictCount);
+        for (uint32_t i = 0; i < conflictCount; ++i) {
+            KgIngestNsConflict c;
+            for (auto* field : {&c.kind, &c.nodeKey, &c.srcNodeKey, &c.dstNodeKey, &c.relation,
+                                &c.existingNs, &c.requestedNs, &c.reason}) {
+                if (auto r = ipc_detail::readField(deser, *field); !r)
+                    return r.error();
+            }
+            res.nsConflicts.push_back(std::move(c));
+        }
+        return res;
+    }
+};
+
+/**
+ * Response for scoped KG removal (KgRemoveRequest).
+ */
+struct KgRemoveResponse {
+    uint64_t nodesRemoved{0};
+    uint64_t edgesRemoved{0}; // Includes foreignEdgesRemoved
+    bool dryRun{false};
+    // Edges not owned by the namespace (other owners or none) incident to its nodes.
+    uint64_t foreignEdgesRemoved{0};
+    // True when foreign edges exist and the request did not include them: nothing was removed
+    // and the counts say what would have been.
+    bool refused{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << nodesRemoved << edgesRemoved << dryRun << foreignEdgesRemoved << refused;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<KgRemoveResponse> deserialize(Deserializer& deser) {
+        KgRemoveResponse res;
+        if (auto r = ipc_detail::readField(deser, res.nodesRemoved); !r)
+            return r.error();
+        if (auto r = ipc_detail::readField(deser, res.edgesRemoved); !r)
+            return r.error();
+        if (auto r = ipc_detail::readField(deser, res.dryRun); !r)
+            return r.error();
+        if (auto r = ipc_detail::readField(deser, res.foreignEdgesRemoved); !r)
+            return r.error();
+        if (auto r = ipc_detail::readField(deser, res.refused); !r)
+            return r.error();
         return res;
     }
 };
@@ -4755,6 +4867,6 @@ using Response = std::variant<
     // Streaming events (progress/heartbeats)
     EmbeddingEvent, ModelLoadEvent,
     // Repair service responses
-    RepairResponse, RepairEvent>;
+    RepairResponse, RepairEvent, KgRemoveResponse>;
 
 } // namespace yams::daemon

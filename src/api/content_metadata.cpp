@@ -303,13 +303,13 @@ Result<ContentMetadata> ContentMetadata::fromJson(const std::string& json) {
         metadata.accessedAt = parseTime("accessedAt");
 
         // Extract tags object
-        std::regex tagsPattern("\"tags\"\\s*:\\s*\\{([^}]*)\\}");
+        static const std::regex tagsPattern("\"tags\"\\s*:\\s*\\{([^}]*)\\}");
         std::smatch tagsMatch;
         if (std::regex_search(json, tagsMatch, tagsPattern)) {
             std::string tagsContent = tagsMatch[1];
 
             // Parse individual tag key-value pairs
-            std::regex tagPattern("\"([^\"]+)\"\\s*:\\s*\"([^\"]+)\"");
+            static const std::regex tagPattern("\"([^\"]+)\"\\s*:\\s*\"([^\"]+)\"");
             std::sregex_iterator it(tagsContent.begin(), tagsContent.end(), tagPattern);
             std::sregex_iterator end;
 

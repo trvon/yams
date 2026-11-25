@@ -151,6 +151,7 @@ EvidenceSearchPipeline::execute(std::span<const ComponentResult> components,
         auto [indexIt, inserted] = candidateIndex.emplace(id, output.evidence.size());
         if (inserted) {
             CandidateEvidence evidence;
+            evidence.documentId = component.documentId;
             evidence.candidateId = id;
             evidence.documentHash = component.documentHash;
             evidence.filePath = component.filePath;
@@ -165,6 +166,9 @@ EvidenceSearchPipeline::execute(std::span<const ComponentResult> components,
         }
 
         auto& evidence = output.evidence[indexIt->second];
+        if (evidence.documentId <= 0 && component.documentId > 0) {
+            evidence.documentId = component.documentId;
+        }
         if (evidence.documentHash.empty() && !component.documentHash.empty()) {
             evidence.documentHash = component.documentHash;
         }
@@ -196,25 +200,70 @@ EvidenceSearchPipeline::execute(std::span<const ComponentResult> components,
 
     output.trace.aggregatedCandidates = output.evidence.size();
     output.results.reserve(output.evidence.size());
+
+    struct SourceScoreRange {
+        double minScore{std::numeric_limits<double>::infinity()};
+        double maxScore{-std::numeric_limits<double>::infinity()};
+        std::size_t count{0};
+    };
+    std::unordered_map<ComponentResult::Source, SourceScoreRange> sourceRanges;
+    if (config.fusionStrategy == SearchEngineConfig::FusionStrategy::ConvexMinMax) {
+        for (const auto& evidence : output.evidence) {
+            for (const auto& source : evidence.sources) {
+                const double raw = static_cast<double>(source.bestRawScore);
+                if (!std::isfinite(raw)) {
+                    continue;
+                }
+                auto& range = sourceRanges[source.source];
+                range.minScore = std::min(range.minScore, raw);
+                range.maxScore = std::max(range.maxScore, raw);
+                ++range.count;
+            }
+        }
+    }
+
     for (const auto& evidence : output.evidence) {
         yams::metadata::SearchResult result;
+        result.document.id = evidence.documentId;
         result.document.sha256Hash = evidence.documentHash;
         result.document.filePath = evidence.filePath;
         result.snippet = evidence.snippet;
 
         for (const auto& source : evidence.sources) {
-            const double contribution = sourceContribution(source, config);
+            double contribution = 0.0;
+            if (config.fusionStrategy == SearchEngineConfig::FusionStrategy::ConvexMinMax) {
+                const double weight = std::max(
+                    0.0, static_cast<double>(componentSourceWeight(config, source.source)));
+                const double raw = static_cast<double>(source.bestRawScore);
+                double norm = 0.0;
+                if (std::isfinite(raw)) {
+                    if (auto rangeIt = sourceRanges.find(source.source);
+                        rangeIt != sourceRanges.end() && rangeIt->second.count > 0) {
+                        const double span = rangeIt->second.maxScore - rangeIt->second.minScore;
+                        if (span > 1e-12) {
+                            norm = std::clamp((raw - rangeIt->second.minScore) / span, 0.0, 1.0);
+                        } else {
+                            norm = raw > 0.0 ? std::clamp(raw, 0.0, 1.0) : 1.0;
+                        }
+                    }
+                }
+                contribution = weight * norm;
+            } else {
+                contribution = sourceContribution(source, config);
+            }
             result.score += contribution;
             accumulateComponentScore(result, source.source, contribution);
         }
-        if (const auto* lexical = bestLexicalSource(evidence);
-            lexical != nullptr && config.lexicalFloorBoost > 0.0F &&
-            (config.lexicalFloorTopN == 0 || lexical->bestRank < config.lexicalFloorTopN)) {
-            const double floor =
-                std::clamp(static_cast<double>(config.lexicalFloorBoost), 0.0, 1.0) /
-                (1.0 + static_cast<double>(lexical->bestRank));
-            result.score += floor;
-            accumulateComponentScore(result, lexical->source, floor);
+        if (config.fusionStrategy == SearchEngineConfig::FusionStrategy::Rrf) {
+            if (const auto* lexical = bestLexicalSource(evidence);
+                lexical != nullptr && config.lexicalFloorBoost > 0.0F &&
+                (config.lexicalFloorTopN == 0 || lexical->bestRank < config.lexicalFloorTopN)) {
+                const double floor =
+                    std::clamp(static_cast<double>(config.lexicalFloorBoost), 0.0, 1.0) /
+                    (1.0 + static_cast<double>(lexical->bestRank));
+                result.score += floor;
+                accumulateComponentScore(result, lexical->source, floor);
+            }
         }
         if (evidence.topology.has_value()) {
             const double confidence =

@@ -663,11 +663,23 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
     }
 
     auto has_dir = [&](std::string_view dir) -> bool {
-        std::string needle = "/" + std::string(dir) + "/";
-        if (filenameLower.find(needle) != std::string::npos)
+        if (dir.empty() || filenameLower.size() <= dir.size()) {
+            return false;
+        }
+        const std::string_view view(filenameLower);
+        if (view.starts_with(dir) && view[dir.size()] == '/') {
             return true;
-        if (filenameLower.rfind(std::string(dir) + "/", 0) == 0)
-            return true;
+        }
+        size_t pos = 0;
+        while ((pos = view.find(dir, pos)) != std::string_view::npos) {
+            const bool leftOk = (pos > 0 && view[pos - 1] == '/');
+            const size_t after = pos + dir.size();
+            const bool rightOk = (after < view.size() && view[after] == '/');
+            if (leftOk && rightOk) {
+                return true;
+            }
+            pos += 1;
+        }
         return false;
     };
 

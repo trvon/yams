@@ -112,9 +112,12 @@ def GraphRespectsReciprocalGate
   ∀ edge ∈ edges, ReciprocalNeighborWitness cfg observations edge
 
 /-- Component admission cap. The cap is a construction-time guard against giant
-components; retrieval-time `maxDocs` remains a separate search-path cap. -/
+components; retrieval-time `maxDocs` remains a separate search-path cap. As in C++,
+`maxComponentDocs = 0` means unlimited. A component over the cap is split into connected pieces
+of at most `maxComponentDocs` members (`splitOversizedComponent`), so each published component
+respects it. -/
 def ComponentRespectsCap (cfg : ConstructionGateConfig) (component : TopologyComponent) : Prop :=
-  component.members.length ≤ cfg.maxComponentDocs
+  cfg.maxComponentDocs = 0 ∨ component.members.length ≤ cfg.maxComponentDocs
 
 /-- Component candidates are both connected and capped. -/
 def ComponentsConnectedAndCapped
@@ -187,16 +190,19 @@ theorem reciprocalGate_edgesHaveBothDirections
   exact hGraph edge hEdge
 
 /-- If the component section of a certificate passes, every published component
-respects the anti-giant cap. -/
+respects the anti-giant cap whenever a cap is set. -/
 theorem componentsConnectedAndCapped_impliesCap
     {cfg : ConstructionGateConfig}
     {edges : List UEdge}
     {components : List TopologyComponent}
     {component : TopologyComponent}
     (hComponents : ComponentsConnectedAndCapped cfg edges components)
-    (hComponent : component ∈ components) :
+    (hComponent : component ∈ components)
+    (hCap : 0 < cfg.maxComponentDocs) :
     component.members.length ≤ cfg.maxComponentDocs := by
-  exact (hComponents component hComponent).2
+  rcases (hComponents component hComponent).2 with h0 | hle
+  · omega
+  · exact hle
 
 /-- Certificate-level projection: every edge has a non-hub source-signal witness. -/
 theorem certificate_edgesHaveNonHubWitness
@@ -233,14 +239,15 @@ theorem certificate_edgesHaveReciprocalWitness
   exact reciprocalGate_edgesHaveBothDirections hCert.2.1 hEdge
 
 /-- Certificate-level projection: no certified component exceeds the configured
-component-size cap. -/
+component-size cap when one is set (`0` = unlimited). -/
 theorem certificate_componentsRespectCap
     {cfg : ConstructionGateConfig}
     {cert : TopologyConstructionCertificate}
     {component : TopologyComponent}
     (hCert : CertificateRespectsGates cfg cert)
-    (hComponent : component ∈ cert.components) :
+    (hComponent : component ∈ cert.components)
+    (hCap : 0 < cfg.maxComponentDocs) :
     component.members.length ≤ cfg.maxComponentDocs := by
-  exact componentsConnectedAndCapped_impliesCap hCert.2.2 hComponent
+  exact componentsConnectedAndCapped_impliesCap hCert.2.2 hComponent hCap
 
 end Yams.Topology

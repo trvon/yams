@@ -54,30 +54,4 @@ public:
         : ContentStoreException(ContentStoreError::OperationCancelled, message) {}
 };
 
-// Storage full exception
-class StorageFullException : public ContentStoreException {
-public:
-    StorageFullException(const std::string& message, uint64_t availableBytes,
-                         uint64_t requiredBytes)
-        : ContentStoreException(ContentStoreError::StorageFull, message),
-          availableBytes_(availableBytes), requiredBytes_(requiredBytes) {}
-
-private:
-    uint64_t availableBytes_;
-    uint64_t requiredBytes_;
-};
-
-// Hash mismatch exception
-class HashMismatchException : public ContentStoreException {
-public:
-    HashMismatchException(const std::string& message, const std::string& expectedHash,
-                          const std::string& actualHash)
-        : ContentStoreException(ContentStoreError::HashMismatch, message, expectedHash),
-          expectedHash_(expectedHash), actualHash_(actualHash) {}
-
-private:
-    std::string expectedHash_;
-    std::string actualHash_;
-};
-
 } // namespace yams::api

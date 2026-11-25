@@ -75,7 +75,8 @@ Result<std::vector<std::byte>> bytesForContentHash(std::span<const std::byte> st
     }
 
     const auto algorithm = static_cast<compression::CompressionAlgorithm>(header->algorithm);
-    auto compressor = compression::CompressionRegistry::instance().createCompressor(algorithm);
+    auto* compressor =
+        compression::CompressionRegistry::instance().getThreadLocalCompressor(algorithm);
     if (!compressor) {
         return Error(ErrorCode::InvalidArgument, "Compressor not available for stored object");
     }
@@ -551,52 +552,44 @@ Result<IStorageEngine::RawObject> StorageEngine::retrieveRaw(std::string_view ha
 
     auto objectPath = getObjectPath(hash);
 
-    // Check existence
-    if (!std::filesystem::exists(objectPath)) {
-        return Result<IStorageEngine::RawObject>(ErrorCode::ChunkNotFound);
-    }
-
-    // Read file
+    // Open directly without a separate stat() call on the hot path; distinguish NotFound
+    // vs PermissionDenied only when opening fails.
     std::ifstream file(objectPath, std::ios::binary | std::ios::ate);
     if (!file) {
-        pImpl->stats.failedOperations.fetch_add(1);
+        std::error_code ec;
+        if (!std::filesystem::exists(objectPath, ec)) {
+            return Result<IStorageEngine::RawObject>(ErrorCode::ChunkNotFound);
+        }
+        pImpl->stats.failedOperations.fetch_add(1, std::memory_order_relaxed);
         return Result<IStorageEngine::RawObject>(ErrorCode::PermissionDenied);
     }
 
     auto fileSize = file.tellg();
     if (fileSize < 0) {
-        pImpl->stats.failedOperations.fetch_add(1);
+        pImpl->stats.failedOperations.fetch_add(1, std::memory_order_relaxed);
         return Result<IStorageEngine::RawObject>(ErrorCode::IOError);
     }
     file.seekg(0, std::ios::beg);
 
-    // Avoid zero-initialization: allocate uninitialized, read directly, then copy into vector.
-    // Guard against UB: make_unique_for_overwrite(0) may return null; assign(null,null) is UB.
     if (fileSize == 0) {
-        pImpl->stats.readOperations.fetch_add(1);
+        pImpl->stats.readOperations.fetch_add(1, std::memory_order_relaxed);
         IStorageEngine::RawObject obj;
         obj.header = std::nullopt;
         return obj;
     }
 
-    auto buf = std::make_unique_for_overwrite<std::byte[]>(static_cast<size_t>(fileSize));
-    YAMS_DCHECK(buf != nullptr, "make_unique_for_overwrite must return non-null for positive size");
-    file.read(reinterpret_cast<char*>(buf.get()), fileSize);
+    IStorageEngine::RawObject obj;
+    obj.data.resize(static_cast<size_t>(fileSize));
+    file.read(reinterpret_cast<char*>(obj.data.data()), fileSize);
 
     if (!file) {
-        pImpl->stats.failedOperations.fetch_add(1);
+        pImpl->stats.failedOperations.fetch_add(1, std::memory_order_relaxed);
         return Result<IStorageEngine::RawObject>(ErrorCode::CorruptedData);
     }
 
     YAMS_DCHECK(static_cast<size_t>(file.tellg()) == static_cast<size_t>(fileSize),
                 "File read should consume entire file");
-    // Update statistics
-    pImpl->stats.readOperations.fetch_add(1);
-
-    IStorageEngine::RawObject obj;
-    obj.data.assign(buf.get(), buf.get() + static_cast<size_t>(fileSize));
-    YAMS_DCHECK(obj.data.size() == static_cast<size_t>(fileSize),
-                "Assigned vector size must match file size");
+    pImpl->stats.readOperations.fetch_add(1, std::memory_order_relaxed);
     obj.header = std::nullopt;
     return obj;
 }

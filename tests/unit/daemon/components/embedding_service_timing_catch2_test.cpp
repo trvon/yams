@@ -1,3 +1,4 @@
+#include <spdlog/spdlog.h>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
@@ -518,6 +519,15 @@ public:
             callback();
         }
         return metadata::MetadataRepository::getDocumentByHash(hash);
+    }
+
+    Result<std::unordered_map<std::string, metadata::DocumentInfo>>
+    batchGetDocumentsByHash(const std::vector<std::string>& hashes) override {
+        if (beforeLookup) {
+            auto callback = std::exchange(beforeLookup, {});
+            callback();
+        }
+        return metadata::MetadataRepository::batchGetDocumentsByHash(hashes);
     }
 };
 
@@ -1697,5 +1707,81 @@ TEST_CASE("Byte budget cannot be bypassed by prepared ordering or duplicates",
         auto index = yams::daemon::embed::preparedPayloadIndex(job);
         REQUIRE(index.count("a") == 1);
         CHECK(index.at("a") >= static_cast<std::size_t>(80) * 1024 * 1024);
+    }
+}
+
+TEST_CASE("prepareEmbedPreparedDoc selects and budgets chunks across policies",
+          "[daemon][embedding][embed-preparer]") {
+    using Policy = yams::daemon::ConfigResolver::EmbeddingSelectionPolicy;
+    yams::vector::ChunkingConfig chunkCfg;
+    chunkCfg.target_chunk_size = 120;
+    chunkCfg.max_chunk_size = 180;
+    chunkCfg.min_chunk_size = 40;
+    chunkCfg.overlap_size = 0;
+    auto chunker =
+        yams::vector::createChunker(yams::vector::ChunkingStrategy::FIXED_SIZE, chunkCfg, nullptr);
+
+    SECTION("empty hash or text returns nullopt") {
+        Policy policy;
+        CHECK_FALSE(yams::daemon::embed::prepareEmbedPreparedDoc(
+                        {"", "hello", "a.txt", "/a.txt", "text/plain"}, *chunker, policy)
+                        .has_value());
+        CHECK_FALSE(yams::daemon::embed::prepareEmbedPreparedDoc(
+                        {"h1", "", "a.txt", "/a.txt", "text/plain"}, *chunker, policy)
+                        .has_value());
+    }
+
+    std::string text;
+    text += "Intro paragraph with enough text to form the first chunk cleanly.\n";
+    text += std::string(140, 'a') + "\n";
+    text += "# Markdown Heading Section\n" + std::string(140, 'b') + "\n";
+    text += "Colon Heading:\n" + std::string(140, 'c') + "\n";
+    text += "ALL CAPS HEADING LINE\n" + std::string(140, 'd') + "\n";
+    text += "Plain body tail " + std::string(140, 'e') + "\n";
+    yams::daemon::embed::EmbedSourceDoc src{"hash-prep-1", text, "doc.md", "/doc.md",
+                                            "text/markdown"};
+
+    SECTION("Full mode keeps all chunks and computes sourceTextHash") {
+        Policy policy;
+        policy.mode = Policy::Mode::Full;
+        auto doc = yams::daemon::embed::prepareEmbedPreparedDoc(src, *chunker, policy);
+        REQUIRE(doc.has_value());
+        CHECK_FALSE(doc->sourceTextHash.empty());
+        CHECK(doc->chunks.size() >= 4u);
+    }
+
+    SECTION("Budgeted mode enforces maxChunksPerDoc and maxCharsPerDoc") {
+        Policy policy;
+        policy.mode = Policy::Mode::Budgeted;
+        policy.strategy = Policy::Strategy::Ranked;
+        policy.maxChunksPerDoc = 2;
+        policy.maxCharsPerDoc = 250;
+        auto doc = yams::daemon::embed::prepareEmbedPreparedDoc(src, *chunker, policy);
+        REQUIRE(doc.has_value());
+        CHECK(doc->chunks.size() <= 2u);
+        CHECK_FALSE(doc->chunks.empty());
+    }
+
+    SECTION("Adaptive mode scales char cap and keeps at least 4 chunks when available") {
+        Policy policy;
+        policy.mode = Policy::Mode::Adaptive;
+        policy.strategy = Policy::Strategy::Ranked;
+        policy.maxChunksPerDoc = 2;
+        policy.maxCharsPerDoc = 500;
+        auto doc = yams::daemon::embed::prepareEmbedPreparedDoc(src, *chunker, policy);
+        REQUIRE(doc.has_value());
+        CHECK(doc->chunks.size() >= 4u);
+    }
+
+    SECTION("IntroHeadings strategy keeps intro chunk and heading chunks") {
+        Policy policy;
+        policy.mode = Policy::Mode::Budgeted;
+        policy.strategy = Policy::Strategy::IntroHeadings;
+        policy.maxChunksPerDoc = 8;
+        policy.maxCharsPerDoc = 4096;
+        auto doc = yams::daemon::embed::prepareEmbedPreparedDoc(src, *chunker, policy);
+        REQUIRE(doc.has_value());
+        REQUIRE_FALSE(doc->chunks.empty());
+        CHECK(doc->chunks.front().startOffset == 0u);
     }
 }

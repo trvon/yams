@@ -348,12 +348,10 @@ test_deps = [
   dependency('yams_storage_engine'),
   dependency('yams_reference_counter'),
   dependency('yams_manifest'),
-  dependency('yams_integrity'),
   dependency('yams_metadata'),
   dependency('yams_topology'),
   dependency('yams_extraction'),
   dependency('yams_detection'),
-  dependency('yams_content'),
   dependency('yams_downloader'),
   dependency('yams_vector'),
   dependency('yams_search'),
@@ -706,6 +704,7 @@ if catch2_dep.found()
       'unit/daemon/daemon_components_test.cpp',
       'unit/daemon/systemd_user_unit_catch2_test.cpp',
       'unit/daemon/daemon_client_start_catch2_test.cpp',
+      'unit/daemon/daemon_start_plan_catch2_test.cpp',
     ),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'components', 'concurrency'],
@@ -898,6 +897,14 @@ if catch2_dep.found()
     'sources': files('unit/daemon/components/embedding_service_timing_catch2_test.cpp'),
     'deps': embedding_service_test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'embedding', 'startup', 'concurrency'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
+    'name': 'simeon_entity_extractor',
+    'sources': files('unit/daemon/components/simeon_entity_extractor_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'components'],
     'timeout': 60,
   }]
 
@@ -1141,15 +1148,6 @@ if catch2_dep.found()
     'timeout': 60,
   }]
 
-  catch2_test_table += [{
-    'name': 'repair_scheduling_adapter',
-    'target': 'catch2_repair_scheduling',
-    'sources': files('unit/daemon/repair_scheduling_adapter_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'daemon', 'repair'],
-    'timeout': 120,
-  }]
-
   catch2_repair_service_exe = executable('catch2_repair_service',
     files('unit/daemon/repair_service_post_ingest_channel_catch2_test.cpp',
           'unit/daemon/repair_scan_cursor_catch2_test.cpp'),
@@ -1163,6 +1161,14 @@ if catch2_dep.found()
   catch2_test_table += [{
     'name': 'repair_maintenance',
     'sources': files('unit/daemon/repair_maintenance_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'repair'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
+    'name': 'repair_fsm_wiring',
+    'sources': files('unit/daemon/repair_fsm_wiring_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'daemon', 'repair'],
     'timeout': 60,
@@ -1816,23 +1822,6 @@ if catch2_dep.found()
     install: false,
   )
 
-  catch2_memory_sync_cli_exe = executable('catch2_memory_sync_cli',
-    files('unit/memory_sync/memory_sync_cli_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [
-      catch2_dep,
-      catch2_main_dep,
-      dependency('nlohmann_json'),
-      dependency('yams_storage_engine'),
-      dependency('yams_crypto'),
-      dependency('yams_memory_sync'),
-      dependency('yams_core'),
-    ],
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
-
 #Storage submodule tests(StorageEngine, CompressedStorageEngine, ReferenceCounter, etc.)
 #Migrated from GTest as part of yams - 3s4 / yams - 8b9
   catch2_storage_submodule_exe = executable('catch2_storage_submodule',
@@ -1841,7 +1830,6 @@ if catch2_dep.found()
       'unit/storage/compressed_storage_engine_catch2_test.cpp',
       'unit/storage/compressed_storage_stats_catch2_test.cpp',
       'unit/storage/storage_backend_engine_adapter_catch2_test.cpp',
-      'unit/storage/object_storage_adapter_catch2_test.cpp',
       'unit/storage/reference_counter_catch2_test.cpp',
       'unit/storage/reference_counter_stress_catch2_test.cpp',
       'unit/storage/sqlite_retry_catch2_test.cpp',
@@ -1858,38 +1846,11 @@ if catch2_dep.found()
     install: false,
   )
 
-#WAL Entry tests - serialization, checksums, encode / decode round - trips
-  catch2_wal_entry_exe = executable('catch2_wal_entry',
-    files('unit/wal/wal_entry_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + [
-      '-DYAMS_TESTING=1',
-      '-DYAMS_WAL_FIXTURE_DIR="@0@"'.format(meson.current_source_dir() / 'fixtures' / 'wal'),
-    ],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
-
-  catch2_test_table += [{
-    'name': 'wal_submodule',
-    'sources': files(
-      'unit/wal/wal_file_catch2_test.cpp',
-      'unit/wal/wal_manager_catch2_test.cpp',
-      'unit/wal/wal_metrics_provider_catch2_test.cpp',
-      'unit/wal/wal_recovery_catch2_test.cpp',
-    ),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'wal'],
-    'timeout': 120,
-  }]
-
 #Search submodule tests
 #Migrated from GTest as part of yams - 3s4 / yams - 1yq
   catch2_test_table += [{
     'name': 'search_submodule',
     'sources': files(
-      'unit/search/chunk_coverage_catch2_test.cpp',
       'unit/search/graph_expansion_catch2_test.cpp',
       'unit/search/kg_scorer_simple_catch2_test.cpp',
       'unit/search/lexical_scoring_catch2_test.cpp',
@@ -1977,6 +1938,15 @@ if catch2_dep.found()
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'search', 'evidence-pipeline'],
     'timeout': 30,
+  }]
+
+  # Hypotheses the Lean search contracts (formal/topology) take about the C++ search path.
+  catch2_test_table += [{
+    'name': 'search_lean_assumptions',
+    'sources': files('unit/search/search_lean_assumptions_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'search', 'lean-contract'],
+    'timeout': 60,
   }]
 
 #TuningSlot tests(provenance - tracking primitives for restructured tuning pipeline)
@@ -2072,7 +2042,6 @@ if catch2_dep.found()
   catch2_compression_submodule_exe = executable('catch2_compression_submodule',
     files(
       'unit/compression/compression_header_catch2_test.cpp',
-      'unit/compression/compression_monitor_catch2_test.cpp',
       'unit/compression/compression_policy_catch2_test.cpp',
       'unit/compression/framed_payload_catch2_test.cpp',
       'unit/compression/zstandard_compressor_catch2_test.cpp',
@@ -2193,6 +2162,7 @@ if catch2_dep.found()
     files(
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/add_command_stdin_catch2_test.cpp',
+      'unit/cli/graph_ingest_cli_catch2_test.cpp',
       'unit/cli/command_registry_catch2_test.cpp',
       'unit/cli/content_roundtrip_catch2_test.cpp',
       'unit/cli/completion_command_catch2_test.cpp',
@@ -2237,7 +2207,6 @@ if catch2_dep.found()
     files(
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/doctor_command_catch2_test.cpp',
-      'unit/cli/doctor_repair_renderers_catch2_test.cpp',
       'unit/cli/doctor/db_integrity_catch2_test.cpp',
       'unit/cli/doctor/dim_consistency_catch2_test.cpp',
       'unit/cli/doctor/storage_blob_check_catch2_test.cpp',
@@ -2256,6 +2225,7 @@ if catch2_dep.found()
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/graph_explore_presenter_catch2_test.cpp',
       'unit/cli/graph_helpers_catch2_test.cpp',
+      'unit/cli/graph_ingest_support_catch2_test.cpp',
       'unit/cli/graph_query_presenter_catch2_test.cpp',
       'unit/cli/graph_topology_support_catch2_test.cpp',
       'unit/cli/vector_db_util_catch2_test.cpp',
@@ -2488,6 +2458,7 @@ if catch2_dep.found()
     'sources': files(
       'unit/metadata/kg_store_catch2_test.cpp',
       'unit/metadata/kg_relation_summary_catch2_test.cpp',
+      'unit/metadata/kg_namespace_catch2_test.cpp',
     ),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'metadata', 'kg', 'concurrency'],
@@ -2652,6 +2623,15 @@ if catch2_dep.found()
     'timeout': 60,
   }]
 
+  # Hypotheses the Lean topology contracts (formal/topology) take about the C++ engines.
+  catch2_test_table += [{
+    'name': 'topology_lean_assumptions',
+    'sources': files('unit/topology/topology_lean_assumptions_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'topology', 'lean-contract'],
+    'timeout': 60,
+  }]
+
   catch2_test_table += [{
     'name': 'topology_identity',
     'sources': files('unit/topology/protected_relation_identity_catch2_test.cpp'),
@@ -2761,14 +2741,6 @@ if catch2_dep.found()
     'sources': files('unit/topology/topology_metadata_store_catch2_test.cpp'),
     'deps': test_deps,
     'suite': ['catch2', 'unit', 'topology'],
-    'timeout': 30,
-  }]
-
-  catch2_test_table += [{
-    'name': 'string_interner',
-    'sources': files('unit/search/string_interner_catch2_test.cpp'),
-    'deps': test_deps,
-    'suite': ['catch2', 'unit', 'search'],
     'timeout': 30,
   }]
 
@@ -2931,6 +2903,15 @@ if catch2_dep.found()
   }]
 
   catch2_test_table += [{
+    'name': 'core_repair_fsm',
+    'target': 'core_repair_fsm',
+    'sources': files('unit/core/repair_fsm_catch2_test.cpp'),
+    'deps': core_test_deps,
+    'suite': ['catch2', 'unit', 'core', 'repair'],
+    'timeout': 60,
+  }]
+
+  catch2_test_table += [{
     'name': 'core_checked_arithmetic',
     'target': 'core_checked_arithmetic',
     'sources': files('unit/core/checked_arithmetic_catch2_test.cpp'),
@@ -3020,63 +3001,14 @@ if catch2_dep.found()
     'timeout': 120,
   }]
 
-#Integrity tests(Catch2 - migrated from GTest)
-  integrity_test_deps = [
-    dependency('spdlog'),
-    dependency('yams_core'),
-    dependency('yams_crypto'),
-    dependency('yams_integrity'),
-    dependency('yams_storage_engine'),
-    dependency('yams_reference_counter'),
-    dependency('yams_metadata'),
-    dependency('yams_search'),
-    dependency('yams_daemon'),
-    dependency('yams_api'),
-  ]
-
-  integrity_catch2_exe = executable('integrity_catch2',
-    files(
-      'unit/integrity/integrity_verifier_catch2_test.cpp',
-      'unit/integrity/block_repairer_catch2_test.cpp',
-      'unit/integrity/verification_monitor_test.cpp',
-      'unit/integrity/verification_scheduler_test.cpp',
-    ),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + integrity_test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
-
-#Content tests(depends on content, extraction, detection modules)
+#Extraction tests(depends on extraction, detection modules)
   content_test_deps = [
     dependency('spdlog'),
     dependency('yams_core'),
-    dependency('yams_content'),
     dependency('yams_extraction'),
     dependency('yams_detection'),
     dependency('sqlite3'),
   ]
-
-#Content tests
-  catch2_test_table += [{
-    'name': 'content_handlers',
-    'target': 'content_handlers',
-    'sources': files('unit/content/content_handlers_test.cpp'),
-    'deps': content_test_deps,
-    'suite': ['catch2', 'unit', 'content', 'handlers'],
-    'timeout': 60,
-  }]
-
-#Archive content handler tests(formatToString, ProcessingStats, helper functions, canHandle)
-  catch2_test_table += [{
-    'name': 'archive_content_handler',
-    'target': 'archive_content_handler',
-    'sources': files('unit/content/archive_content_handler_catch2_test.cpp'),
-    'deps': content_test_deps,
-    'suite': ['catch2', 'unit', 'content', 'archive'],
-    'timeout': 60,
-  }]
 
   catch2_test_table += [{
     'name': 'html_extractor_robust',
@@ -3165,15 +3097,6 @@ if catch2_dep.found()
     'sources': files('unit/extraction/jsonrpc_client_test.cpp'),
     'deps': plugin_process_test_deps,
     'suite': ['catch2', 'unit', 'extraction', 'jsonrpc'],
-    'timeout': 60,
-  }]
-
-  catch2_test_table += [{
-    'name': 'external_plugin_extractor',
-    'target': 'external_plugin_extractor',
-    'sources': files('unit/extraction/external_plugin_extractor_test.cpp'),
-    'deps': plugin_process_test_deps,
-    'suite': ['catch2', 'unit', 'extraction', 'plugins'],
     'timeout': 60,
   }]
 
@@ -3399,12 +3322,6 @@ if catch2_dep.found()
     suite: ['unit', 'config', 'link'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30
-  )
-
-  test('integrity_catch2', integrity_catch2_exe,
-    suite: ['catch2', 'unit', 'integrity'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: host_machine.system() == 'windows' ? 600 : 120
   )
 
   test('plugin_process_launcher', plugin_process_launcher_exe,
@@ -3759,12 +3676,6 @@ if catch2_dep.found()
     timeout: 60
   )
 
-  test('memory_sync_cli', catch2_memory_sync_cli_exe,
-    suite: ['catch2', 'unit', 'memory-sync'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
-  )
-
   test('storage_submodule', catch2_storage_submodule_exe,
     suite: ['catch2', 'unit', 'storage', 'concurrency'],
     args: ['~[slow]'],
@@ -3777,12 +3688,6 @@ if catch2_dep.found()
     args: ['[slow]'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 300
-  )
-
-  test('wal_entry', catch2_wal_entry_exe,
-    suite: ['catch2', 'unit', 'wal'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 60
   )
 
   test('benchmark_invocation', catch2_benchmark_invocation_exe,

@@ -383,6 +383,8 @@ constexpr std::string_view kCheckingIntegrity = "checking_integrity";
 constexpr std::string_view kRecovering = "recovering";
 constexpr std::string_view kSalvaging = "salvaging";
 constexpr std::string_view kMigrating = "migrating";
+// A migration failed and startup stopped; lastError names the migration and the error.
+constexpr std::string_view kMigrationFailed = "migration_failed";
 constexpr std::string_view kReady = "ready";
 
 } // namespace yams::daemon::dbphase

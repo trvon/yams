@@ -331,22 +331,6 @@ public:
                                         kgNodesCreated++;
                                     }
 
-                                    // Create path node for this file in this snapshot
-                                    metadata::PathNodeDescriptor pathDesc;
-                                    pathDesc.snapshotId = response.snapshotId;
-                                    pathDesc.path = result.path;
-                                    pathDesc.rootTreeHash = treeRootHash;
-                                    pathDesc.isDirectory = false;
-
-                                    auto pathNodeResult = ctx_.kgStore->ensurePathNode(pathDesc);
-                                    if (!pathNodeResult) {
-                                        spdlog::debug(
-                                            "[IndexingService] KG ensurePathNode failed for {}: {}",
-                                            result.path, pathNodeResult.error().message);
-                                        continue;
-                                    }
-                                    kgNodesCreated++;
-
                                     if (docNodeId) {
                                         metadata::KGEdge hasBlob;
                                         hasBlob.srcNodeId = docNodeId.value();
@@ -376,9 +360,36 @@ public:
                                         }
                                     }
 
+                                    // Unchanged content at this path keeps its existing
+                                    // version: re-indexing a directory must not mint a new
+                                    // snapshot path node per file.
+                                    if (auto latest =
+                                            ctx_.kgStore->latestPathVersionBlobKey(result.path);
+                                        latest && latest.value() &&
+                                        // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
+                                        *latest.value() == "blob:" + result.hash) {
+                                        continue;
+                                    }
+
+                                    // Create path node for this file in this snapshot
+                                    metadata::PathNodeDescriptor pathDesc;
+                                    pathDesc.snapshotId = response.snapshotId;
+                                    pathDesc.path = result.path;
+                                    pathDesc.rootTreeHash = treeRootHash;
+                                    pathDesc.isDirectory = false;
+
+                                    auto pathNodeResult = ctx_.kgStore->ensurePathNode(pathDesc);
+                                    if (!pathNodeResult) {
+                                        spdlog::debug(
+                                            "[IndexingService] KG ensurePathNode failed for {}: {}",
+                                            result.path, pathNodeResult.error().message);
+                                        continue;
+                                    }
+                                    kgNodesCreated++;
+
                                     // Link path version to blob (has_version edge). This is
-                                    // best-effort; the canonical doc->blob edge above should not
-                                    // be skipped if snapshot path linking is unavailable.
+                                    // best-effort; the canonical doc->blob edge above is written
+                                    // first so snapshot path failures cannot skip it.
                                     auto linkResult = ctx_.kgStore->linkPathVersion(
                                         pathNodeResult.value(), blobNodeResult.value(), 0);
                                     if (!linkResult) {

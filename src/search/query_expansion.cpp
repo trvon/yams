@@ -344,32 +344,47 @@ generateAggressiveFtsFallbackClauses(const std::string& query, size_t maxClauses
         clauses.push_back({std::move(clause), std::clamp(penalty, 0.1f, 1.0f)});
     };
 
-    auto addAndClauseFromTerms = [&](const std::vector<std::string>& terms, float penalty) {
+    auto formatAndGroup = [](const std::vector<std::string>& terms) -> std::string {
         if (terms.empty()) {
-            return;
+            return {};
         }
-        std::string clause;
+        std::string group;
         if (terms.size() > 1) {
-            clause.push_back('(');
+            group.push_back('(');
         }
         for (size_t i = 0; i < terms.size(); ++i) {
             if (i > 0) {
-                clause += " AND ";
+                group += " AND ";
             }
-            clause += terms[i];
+            group += terms[i];
         }
         if (terms.size() > 1) {
-            clause.push_back(')');
+            group.push_back(')');
         }
-        addClause(std::move(clause), penalty);
+        return group;
     };
 
+    auto addMergedTierClause = [&](const std::vector<std::string>& groups, float penalty) {
+        if (groups.empty() || clauses.size() >= maxClauses) {
+            return;
+        }
+        std::string merged;
+        for (size_t i = 0; i < groups.size(); ++i) {
+            if (i > 0) {
+                merged += " OR ";
+            }
+            merged += groups[i];
+        }
+        addClause(std::move(merged), penalty);
+    };
+
+    // Tier 1 (0.78f): merge anchored sub-phrase AND groups into a single OR-of-ANDs FTS5 probe.
     auto anchoredPhrases =
         generateAnchoredSubPhrases(query, std::min(maxClauses, size_t(8)), &idfByToken);
+    std::vector<std::string> tier1Groups;
+    std::unordered_set<std::string> seenTierGroups;
+    tier1Groups.reserve(anchoredPhrases.size());
     for (const auto& phrase : anchoredPhrases) {
-        if (clauses.size() >= maxClauses) {
-            break;
-        }
         std::vector<std::string> terms;
         for (const auto& token : tokenizeQueryTokens(phrase)) {
             if (token.normalized.size() >= 2) {
@@ -377,15 +392,25 @@ generateAggressiveFtsFallbackClauses(const std::string& query, size_t maxClauses
             }
         }
         if (terms.size() >= 2) {
-            addAndClauseFromTerms(terms, 0.78f);
+            std::string group = formatAndGroup(terms);
+            if (!group.empty() && seenTierGroups.insert(group).second) {
+                tier1Groups.push_back(std::move(group));
+            }
         }
     }
+    addMergedTierClause(tier1Groups, 0.78f);
 
-    if (!rankedTokens.empty()) {
+    // Tier 2 (0.68f): merge anchor + top-IDF token pairs into a single OR-of-ANDs FTS5 probe.
+    if (!rankedTokens.empty() && clauses.size() < maxClauses) {
         const auto& anchor = rankedTokens.front().token.normalized;
-        for (size_t i = 1; i < rankedTokens.size() && i < 5 && clauses.size() < maxClauses; ++i) {
-            addAndClauseFromTerms({anchor, rankedTokens[i].token.normalized}, 0.68f);
+        std::vector<std::string> tier2Groups;
+        for (size_t i = 1; i < rankedTokens.size() && i < 5; ++i) {
+            std::string group = formatAndGroup({anchor, rankedTokens[i].token.normalized});
+            if (!group.empty() && seenTierGroups.insert(group).second) {
+                tier2Groups.push_back(std::move(group));
+            }
         }
+        addMergedTierClause(tier2Groups, 0.68f);
     }
 
     // Single OR probe replaces one FTS round-trip per token: same docs, same

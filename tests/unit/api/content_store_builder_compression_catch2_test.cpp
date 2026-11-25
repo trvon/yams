@@ -47,6 +47,32 @@ TEST_CASE("ContentStoreBuilder default compression skips tiny objects",
     REQUIRE(largerRaw.has_value());
     CHECK(largerRaw.value().header.has_value());
 
+    const auto compressionStats = store->getCompressionStats();
+    REQUIRE(compressionStats.has_value());
+    CHECK(compressionStats->totalCompressedFiles >= 1);
+    CHECK(compressionStats->totalSpaceSaved > 0);
+    CHECK(compressionStats->algorithmStats.contains(
+        yams::compression::CompressionAlgorithm::Zstandard));
+
+    store.reset();
+    cleanup();
+}
+
+TEST_CASE("ContentStore getCompressionStats returns nullopt when compression is disabled",
+          "[api][content-store][compression]") {
+    const auto tempDir = makeTempDir("yams_content_store_no_compression_");
+    auto cleanup = [&] {
+        std::error_code ec;
+        std::filesystem::remove_all(tempDir, ec);
+    };
+
+    auto storeResult =
+        yams::api::ContentStoreBuilder().withStoragePath(tempDir).withCompression(false).build();
+    REQUIRE(storeResult.has_value());
+    auto store = std::move(storeResult).value();
+
+    CHECK_FALSE(store->getCompressionStats().has_value());
+
     store.reset();
     cleanup();
 }

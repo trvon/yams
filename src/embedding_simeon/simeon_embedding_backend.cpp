@@ -15,12 +15,12 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
-#include <filesystem>
 #include <map>
-#include <optional>
 #include <mutex>
+#include <optional>
 #include <string>
 
 namespace yams::vector {
@@ -204,6 +204,13 @@ resolveStaticTablePath(const daemon::ConfigResolver::SimeonEncoderPolicy& policy
     return yams::config::findStaticEmbeddingTable(configured, dataDir);
 }
 
+bool usesNormalizedV2Profile(const daemon::ConfigResolver::SimeonEncoderPolicy& policy) {
+    if (!policy.encoderProfile.has_value()) {
+        return false;
+    }
+    return *policy.encoderProfile == "normalized_v2" || *policy.encoderProfile == "scientific_hash";
+}
+
 bool usesFixedHash384Profile(const EmbeddingConfig& yamsConfig,
                              const daemon::ConfigResolver::SimeonEncoderPolicy& policy) {
     if (yamsConfig.simeon_encoder_profile == EmbeddingConfig::SimeonEncoderProfile::FixedHash384) {
@@ -215,7 +222,8 @@ bool usesFixedHash384Profile(const EmbeddingConfig& yamsConfig,
     if (*policy.encoderProfile == "fixed_hash_384" || *policy.encoderProfile == "simeon-v1-384") {
         return true;
     }
-    if (*policy.encoderProfile != "configurable" && *policy.encoderProfile != "static") {
+    if (*policy.encoderProfile != "configurable" && *policy.encoderProfile != "static" &&
+        !usesNormalizedV2Profile(policy)) {
         spdlog::warn("Ignoring unknown embeddings.simeon.encoder_profile='{}'",
                      *policy.encoderProfile);
     }
@@ -223,7 +231,10 @@ bool usesFixedHash384Profile(const EmbeddingConfig& yamsConfig,
 }
 
 std::string configurableSpaceIdentity(const simeon::EncoderConfig& config) {
-    std::string identity = "simeon-config-v1:";
+    const bool hasNormalization = config.text_normalization != simeon::TextNormalization::None ||
+                                  config.char_ngram_scope != simeon::CharNGramScope::Text ||
+                                  config.feature_weighting != simeon::FeatureWeighting::Raw;
+    std::string identity = hasNormalization ? "simeon-normalized-v2:" : "simeon-config-v1:";
     identity += ngram_mode_label(config.ngram_mode);
     identity += ':';
     identity += std::to_string(config.ngram_min);
@@ -237,6 +248,19 @@ std::string configurableSpaceIdentity(const simeon::EncoderConfig& config) {
     identity += projection_mode_label(config.projection);
     identity += ":l2=";
     identity += config.l2_normalize ? '1' : '0';
+    if (hasNormalization) {
+        identity += ":norm=";
+        identity += (config.text_normalization == simeon::TextNormalization::AsciiLower)
+                        ? "ascii_lower"
+                        : "none";
+        identity += ":scope=";
+        identity += (config.char_ngram_scope == simeon::CharNGramScope::WordBounded)
+                        ? "word_bounded"
+                        : "text";
+        identity += ":weight=";
+        identity +=
+            (config.feature_weighting == simeon::FeatureWeighting::SqrtTf) ? "sqrt_tf" : "raw";
+    }
     return identity;
 }
 
@@ -269,6 +293,11 @@ ResolvedSimeonEncoder resolveEncoder(const EmbeddingConfig& yamsConfig) {
     config.output_dim = policy.outputDim.value_or(static_cast<uint32_t>(yamsConfig.embedding_dim));
     config.projection = parse_projection_mode(policy.projection.value_or(std::string{}));
     config.l2_normalize = policy.l2Normalize.value_or(yamsConfig.normalize_embeddings);
+    if (usesNormalizedV2Profile(policy)) {
+        config.text_normalization = simeon::TextNormalization::AsciiLower;
+        config.char_ngram_scope = simeon::CharNGramScope::WordBounded;
+        config.feature_weighting = simeon::FeatureWeighting::SqrtTf;
+    }
     return ResolvedSimeonEncoder{.config = config,
                                  .spaceIdentity = configurableSpaceIdentity(config),
                                  .fallback = wantedStatic};

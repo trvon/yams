@@ -6,6 +6,7 @@
 #include <sstream>
 
 #include <yams/common/utf8_utils.h>
+#include <yams/config/detail/config_parse_utils.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/profiling.h>
@@ -46,6 +47,25 @@ void appendUniqueExpandedTerm(std::vector<std::string>& expandedTerms, std::stri
 Result<SearchResults>
 MetadataRepository::search(const std::string& query, int limit, int offset,
                            const std::optional<std::vector<int64_t>>& docIds) {
+    return searchFullText(query, limit, offset, docIds, false, true);
+}
+
+Result<SearchResults>
+MetadataRepository::searchKeyword(const std::string& query, int limit, int offset,
+                                  const std::optional<std::vector<int64_t>>& docIds) {
+    return searchFullText(query, limit, offset, docIds, true, true);
+}
+
+Result<SearchResults>
+MetadataRepository::searchCandidates(const std::string& query, int limit, int offset,
+                                     const std::optional<std::vector<int64_t>>& docIds) {
+    return searchFullText(query, limit, offset, docIds, false, false);
+}
+
+Result<SearchResults>
+MetadataRepository::searchFullText(const std::string& query, int limit, int offset,
+                                   const std::optional<std::vector<int64_t>>& docIds,
+                                   bool nlOrFallbackByDefault, bool computeTotalCount) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::search");
     return executeReadQuery<SearchResults>([&](Database& db) -> Result<SearchResults> {
         YAMS_ZONE_SCOPED_N("MetadataRepo::search::FTS5Query");
@@ -67,15 +87,16 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
             cacheKey.append(std::to_string(limit));
             cacheKey.push_back(':');
             cacheKey.append(std::to_string(offset));
+            cacheKey.append(nlOrFallbackByDefault ? ":kw" : (computeTotalCount ? ":fts" : ":cand"));
 
             auto snapshot =
                 std::atomic_load_explicit(&queryCacheSnapshot_, std::memory_order_acquire);
             if (snapshot) {
                 auto it = snapshot->find(cacheKey);
-                if (it != snapshot->end()) {
+                if (it != snapshot->end() && it->second.results) {
                     auto age = std::chrono::steady_clock::now() - it->second.timestamp;
                     if (age <= kQueryCacheTtl) {
-                        return it->second.results;
+                        return *it->second.results;
                     }
                 }
             }
@@ -90,21 +111,21 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
             if (!env || !*env) {
                 return defaultValue;
             }
-
-            std::string value(env);
-            std::transform(value.begin(), value.end(), value.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            return !(value == "0" || value == "false" || value == "off" || value == "no");
+            return yams::config::detail::parseTomlBool(env).value_or(true);
         };
 
         const bool nlAutoPhrase = parseEnvFlag("YAMS_FTS_NL_AUTO_PHRASE", true);
         const bool nlAutoPrefix = parseEnvFlag("YAMS_FTS_NL_PREFIX", true);
-        int nlMinResults = 3;
+        // Natural-language queries run as an implicit AND first. A sentence-length query rarely
+        // has every term in one document, so for keyword search a short AND page is rerun as a
+        // BM25-ranked OR over the same terms; strict AND returned nothing for most prose queries.
+        // Candidate generators keep AND, which the hybrid text pipeline expands on its own.
+        int nlMinResults = nlOrFallbackByDefault ? effectiveLimit : 3;
         if (const char* s = std::getenv("YAMS_FTS_NL_MIN_RESULTS"); // NOLINT(concurrency-mt-unsafe)
             s && *s) {
             nlMinResults = std::max(0, std::atoi(s));
         }
-        const bool useNlFallback = parseEnvFlag("YAMS_FTS_NL_OR_FALLBACK", false);
+        const bool useNlFallback = parseEnvFlag("YAMS_FTS_NL_OR_FALLBACK", nlOrFallbackByDefault);
         const bool isAdvancedQuery = hasAdvancedFts5Operators(query);
         bool usedNaturalLanguageQuery = false;
         if (!isAdvancedQuery) {
@@ -165,27 +186,33 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
                          diagAltQuery, *diagAltHitCount);
         }
 
+        const bool includeSnippet = includeSearchSnippets();
+        const bool lightweightCandidates = !computeTotalCount;
         auto runFtsQuery = [&](const std::string& queryText, SearchResults& out) -> Result<bool> {
             using yams::metadata::sql::QuerySpec;
             QuerySpec spec{};
             spec.table = "documents_fts";
             spec.from = std::optional<std::string>{"documents_fts fts JOIN documents d ON d.id = "
                                                    "fts.rowid"};
-            const bool includeSnippet = includeSearchSnippets();
-            spec.columns = {"d.id",
-                            "bm25(documents_fts, 1.0, 10.0) as score",
-                            "d.file_path",
-                            "d.file_name",
-                            "d.file_extension",
-                            "d.file_size",
-                            "d.sha256_hash",
-                            "d.mime_type",
-                            "d.created_time",
-                            "d.modified_time",
-                            "d.indexed_time",
-                            "d.content_extracted",
-                            "d.extraction_status",
-                            "d.extraction_error"};
+            if (lightweightCandidates) {
+                spec.columns = {"d.id", "bm25(documents_fts, 1.0, 10.0) as score", "d.file_path",
+                                "d.file_name", "d.sha256_hash"};
+            } else {
+                spec.columns = {"d.id",
+                                "bm25(documents_fts, 1.0, 10.0) as score",
+                                "d.file_path",
+                                "d.file_name",
+                                "d.file_extension",
+                                "d.file_size",
+                                "d.sha256_hash",
+                                "d.mime_type",
+                                "d.created_time",
+                                "d.modified_time",
+                                "d.indexed_time",
+                                "d.content_extracted",
+                                "d.extraction_status",
+                                "d.extraction_error"};
+            }
             if (includeSnippet) {
                 spec.columns.insert(spec.columns.begin() + 1,
                                     "snippet(documents_fts, 0, '<b>', '</b>', '...', 16) as "
@@ -227,6 +254,10 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
                 }
             }
 
+            const int scoreIndex = includeSnippet ? 2 : 1;
+            const int docStartIndex = includeSnippet ? 3 : 2;
+            out.results.reserve(static_cast<size_t>(std::min(effectiveLimit, 512)));
+
             while (true) {
                 auto stepResult = stmt.step();
                 if (!stepResult) {
@@ -238,38 +269,38 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
                 }
 
                 SearchResult result;
-
-                const bool includeSnippet = includeSearchSnippets();
-                const int scoreIndex = includeSnippet ? 2 : 1;
-                const int docStartIndex = includeSnippet ? 3 : 2;
-
                 result.document.id = stmt.getInt64(0);
                 result.document.filePath = stmt.getString(docStartIndex + 0);
                 result.document.fileName = stmt.getString(docStartIndex + 1);
-                result.document.fileExtension = stmt.getString(docStartIndex + 2);
-                result.document.fileSize = stmt.getInt64(docStartIndex + 3);
-                result.document.sha256Hash = stmt.getString(docStartIndex + 4);
-                result.document.mimeType = stmt.getString(docStartIndex + 5);
-                result.document.createdTime = stmt.getTime(docStartIndex + 6);
-                result.document.modifiedTime = stmt.getTime(docStartIndex + 7);
-                result.document.indexedTime = stmt.getTime(docStartIndex + 8);
-                result.document.contentExtracted = stmt.getInt(docStartIndex + 9) != 0;
-                result.document.extractionStatus =
-                    ExtractionStatusUtils::fromString(stmt.getString(docStartIndex + 10));
-                result.document.extractionError = stmt.getString(docStartIndex + 11);
+                if (lightweightCandidates) {
+                    result.document.sha256Hash = stmt.getString(docStartIndex + 2);
+                } else {
+                    result.document.fileExtension = stmt.getString(docStartIndex + 2);
+                    result.document.fileSize = stmt.getInt64(docStartIndex + 3);
+                    result.document.sha256Hash = stmt.getString(docStartIndex + 4);
+                    result.document.mimeType = stmt.getString(docStartIndex + 5);
+                    result.document.createdTime = stmt.getTime(docStartIndex + 6);
+                    result.document.modifiedTime = stmt.getTime(docStartIndex + 7);
+                    result.document.indexedTime = stmt.getTime(docStartIndex + 8);
+                    result.document.contentExtracted = stmt.getInt(docStartIndex + 9) != 0;
+                    result.document.extractionStatus =
+                        ExtractionStatusUtils::fromString(stmt.getString(docStartIndex + 10));
+                    result.document.extractionError = stmt.getString(docStartIndex + 11);
+                }
 
-                result.snippet =
-                    includeSnippet ? common::sanitizeUtf8(stmt.getString(1)) : std::string{};
+                if (includeSnippet) {
+                    result.snippet = common::sanitizeUtf8(stmt.getString(1));
+                }
                 result.score = stmt.getDouble(scoreIndex);
 
-                out.results.push_back(result);
+                out.results.push_back(std::move(result));
             }
 
             if (!out.results.empty()) {
                 const size_t resultSize = out.results.size();
                 const size_t requestedLimit = static_cast<size_t>(effectiveLimit);
 
-                if (resultSize < requestedLimit) {
+                if (!computeTotalCount || resultSize < requestedLimit) {
                     out.totalCount = static_cast<int64_t>(resultSize);
                 } else {
                     constexpr int64_t kMaxCountLimit = 10000;
@@ -343,8 +374,8 @@ MetadataRepository::search(const std::string& query, int limit, int offset,
             static_cast<int>(results.results.size()) < nlMinResults) {
             SearchResults orResults;
             orResults.query = query;
-            std::string orQuery =
-                buildNaturalLanguageFts5Query(query, true, nlAutoPrefix, nlAutoPhrase);
+            // No auto-phrase here: a 3-4 term query would otherwise rerun the same phrase.
+            std::string orQuery = buildNaturalLanguageFts5Query(query, true, nlAutoPrefix, false);
             auto orRun = runFtsQuery(orQuery, orResults);
             if (!orRun) {
                 return orRun.error();

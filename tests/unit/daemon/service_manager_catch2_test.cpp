@@ -56,6 +56,7 @@
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/memory_sync/writer_auth.h>
 #include <yams/metadata/database.h>
+#include <yams/metadata/migration.h>
 
 namespace fs = std::filesystem;
 using namespace yams;
@@ -1487,22 +1488,43 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,
-                 "ServiceManager initializes WAL under configured data directory",
-                 "[daemon][service_manager][wal]") {
-    const auto runRoot = testDir_ / "cwd";
-    fs::create_directories(runRoot);
-    ScopedCurrentPath cwdGuard(runRoot);
+                 "ServiceManager refuses a store created by a newer YAMS without aborting",
+                 "[daemon][service_manager][startup][migration][regression]") {
+    // A migration_history version above this binary's latest used to dispatch
+    // InitializationFailedEvent twice; the second dispatch, in Failed, tripped a YAMS_DCHECK
+    // and aborted (`yams status` exited 134).
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+
+    const auto dbPath = metadataDbPath(config_);
+    {
+        yams::metadata::Database db;
+        REQUIRE(db.open(dbPath.string(), yams::metadata::ConnectionMode::Create));
+        yams::metadata::MigrationManager mm(db);
+        REQUIRE(mm.initialize());
+        mm.registerMigrations(yams::metadata::YamsMetadataMigrations::getAllMigrations());
+        REQUIRE(mm.migrate());
+        REQUIRE(db.execute("INSERT INTO migration_history "
+                           "(version, name, applied_at, duration_ms, success, error) "
+                           "VALUES (99, 'from a newer yams', 0, 0, 1, NULL)"));
+        REQUIRE(db.execute("PRAGMA wal_checkpoint(TRUNCATE)"));
+        db.close();
+    }
 
     auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    auto init = sm->initialize();
-    REQUIRE(init);
-
-    const auto expectedWalDir = config_.dataDir / "wal";
-    REQUIRE(fs::exists(expectedWalDir));
-    REQUIRE(fs::is_directory(expectedWalDir));
-
-    const auto misplacedWalDir = runRoot / "wal";
-    CHECK_FALSE(fs::exists(misplacedWalDir));
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+    const auto snapshot = sm->waitForServiceManagerTerminalState(30);
+    INFO("lastError: " << snapshot.lastError);
+    REQUIRE((snapshot.state == ServiceManagerState::Failed));
+    CHECK(snapshot.lastError.find("created by a newer version of YAMS") != std::string::npos);
+    CHECK(snapshot.lastError.find("schema version 99") != std::string::npos);
+    CHECK(snapshot.lastError.find("Upgrade YAMS") != std::string::npos);
+    // Let async init finish dispatching; the FSM stays Failed with the first error.
+    CHECK(sm->waitForAsyncInitCompletion(std::chrono::seconds(10)));
+    CHECK((sm->getServiceManagerFsmSnapshot().state == ServiceManagerState::Failed));
+    sm->shutdown();
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,

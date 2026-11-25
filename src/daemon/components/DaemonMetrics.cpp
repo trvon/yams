@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <yams/config/detail/config_parse_utils.h>
 #if !defined(_WIN32) && !defined(__APPLE__)
 #include <fstream>
 #include <iterator> // NOLINT(misc-include-cleaner) -- used by the POSIX /proc probes below.
@@ -26,7 +27,6 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/session_service.hpp>
-#include <yams/compression/compression_monitor.h>
 #include <yams/daemon/components/admission_control.h>
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
@@ -238,8 +238,7 @@ bool envFlagEnabled(const char* name) {
     if (!env || *env == '\0') {
         return false;
     }
-    const std::string_view value{env};
-    return value != "0" && value != "false" && value != "FALSE" && value != "off" && value != "OFF";
+    return yams::config::detail::parseTomlBool(env).value_or(true);
 }
 
 bool allocatorBreakdownEnabled() {
@@ -1636,7 +1635,7 @@ void DaemonMetrics::populateWorkerPipelineSnapshot(MetricsSnapshot& out) const {
             out.entityGraphDropped = bus.entityGraphDropped();
             out.entityGraphConsumed = bus.entityGraphConsumed();
         } else {
-            out.workerThreads = std::max(1u, std::thread::hardware_concurrency());
+            out.workerThreads = std::max(1u, TuneAdvisor::hardwareConcurrency());
         }
     } catch (...) {
         spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
@@ -2539,18 +2538,6 @@ void DaemonMetrics::enrichDetailedSnapshot(MetricsSnapshot& out) const {
                             static_cast<double>(cfg.graphScoringBudgetMs);
                     }
                 }
-            }
-
-            // WAL data-system optics: surface WALManager counters that were previously
-            // collected but never exposed to any queryable surface (WalMetricsProvider was
-            // dead code). Cheap atomic reads; safe to run on the detailed path.
-            if (auto walProvider = services_->getWalMetricsProvider()) {
-                const auto walStats = walProvider->getStats();
-                out.walActiveTransactions = walStats.activeTransactions;
-                out.walPendingEntries = walStats.pendingEntries;
-                out.walTotalEntries = walStats.totalEntries;
-                out.walTotalBytes = walStats.totalBytes;
-                out.walLogFileCount = walStats.logFileCount;
             }
         }
     } catch (...) {

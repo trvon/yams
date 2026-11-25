@@ -50,6 +50,11 @@ public:
     /// Hold the operation lock as reset() does, until testing_end_reset().
     YAMS_DAEMON_TEST_HOOK static void testing_begin_reset();
     YAMS_DAEMON_TEST_HOOK static void testing_end_reset() noexcept;
+    /// Announce a reset without taking the lock: the state a reader-preferring shared_mutex
+    /// (glibc) leaves while reset() waits behind shared holders. Undo with
+    /// testing_withdraw_reset().
+    YAMS_DAEMON_TEST_HOOK static void testing_announce_reset() noexcept;
+    YAMS_DAEMON_TEST_HOOK static void testing_withdraw_reset() noexcept;
 #endif
 
 private:

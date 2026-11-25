@@ -65,8 +65,23 @@ provision_main() {
 
 	pacman-key --init 2>/dev/null || true
 	pacman-key --populate archlinux 2>/dev/null || true
-	pacman -Syu --noconfirm --needed
-	pacman -S --noconfirm --needed \
+	pacman-key --populate archlinuxarm 2>/dev/null || true
+	pacman_retry() {
+		local attempt
+		for attempt in 1 2 3; do
+			if "$@"; then
+				return 0
+			fi
+			if [ "${attempt}" -lt 3 ]; then
+				log "pacman attempt ${attempt} failed; refreshing sync DB and retrying..."
+				sleep $((attempt * 5))
+				pacman -Syy --noconfirm || true
+			fi
+		done
+		return 1
+	}
+	pacman_retry pacman -Syyu --noconfirm --needed
+	pacman_retry pacman -S --noconfirm --needed \
 		base-devel \
 		clang \
 		cmake \
@@ -279,7 +294,7 @@ build_main() {
 	export YAMS_CONAN_ARCH="${arch}"
 	export YAMS_BUILD_DIR="${meson_build_dir}"
 	export YAMS_ENABLE_MOBILE_BINDINGS=false
-	export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${VERSION} -Dwerror=false -Dwarning_level=2 ${MESON_EXTRA_ARGS:-}"
+	export YAMS_EXTRA_MESON_FLAGS="-Dyams-version=${VERSION} -Denable-dcheck=false -Dwerror=false -Dwarning_level=2 ${MESON_EXTRA_ARGS:-}"
 	export YAMS_INSTALL_PREFIX="/usr"
 	export CC=clang
 	export CXX=clang++

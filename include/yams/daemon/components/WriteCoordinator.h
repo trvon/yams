@@ -3,7 +3,9 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -19,6 +21,7 @@
 
 #include <yams/core/types.h>
 #include <yams/daemon/components/knowledge_graph_completion.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
@@ -163,6 +166,99 @@ struct InsertRelationshipOp {
 struct AddSymSpellTermsOp {
     std::vector<std::string> terms;
 };
+// Caller-facing graph ingest (KgIngestRequest). Unlike UpsertNodesOp/AddDeferredEdgesOp it
+// classifies every row against this transaction's state, enforces namespace ownership, runs in
+// its own savepoint (all or nothing), and reports its outcome only after the KG transaction
+// that holds it committed.
+struct GraphIngestAlias {
+    std::string nodeKey;
+    std::string alias;
+    std::string source;
+    float confidence = 1.0f;
+};
+struct GraphIngestUnresolvedEdge {
+    std::string srcNodeKey;
+    std::string dstNodeKey;
+    std::string relation;
+    bool srcMissing = false;
+    bool dstMissing = false;
+};
+// A row refused because writing it would change who owns it (or would create an invalid owner).
+struct GraphIngestNsConflict {
+    std::string kind; // "node" or "edge"
+    std::string nodeKey;
+    std::string srcNodeKey;
+    std::string dstNodeKey;
+    std::string relation;
+    std::string existingNs; // empty when the stored row has no namespace
+    std::string requestedNs;
+    // "ns_change": the stored row is owned by a different (or no) namespace.
+    // "invalid_ns": properties.ns is present but not a non-empty string.
+    // "reserved_key": doc:/blob: nodes belong to YAMS and cannot take a namespace.
+    std::string reason;
+};
+struct GraphIngestOutcome {
+    std::uint64_t nodesInserted = 0;
+    std::uint64_t nodesUpdated = 0;
+    std::uint64_t nodesSkipped = 0;
+    std::uint64_t edgesInserted = 0;
+    std::uint64_t edgesUpdated = 0;
+    std::uint64_t edgesSkipped = 0;
+    std::uint64_t aliasesInserted = 0;
+    std::uint64_t aliasesUpdated = 0;
+    std::uint64_t aliasesSkipped = 0;
+    std::vector<GraphIngestUnresolvedEdge> unresolvedEdges;
+    std::vector<std::string> unresolvedAliasKeys;
+    std::vector<GraphIngestNsConflict> nsConflicts;
+};
+
+// One-shot result channel for a graph op. The writer settles it exactly once: with the staged
+// value after the KG transaction committed, or with an error when the op failed, the
+// transaction was rolled back, or the writer could not apply it. Destroying an unsettled
+// completion breaks the promise, which waiters observe as an error.
+template <typename T> struct GraphOpCompletion {
+    enum class Stage { None, Nodes, Edges, Aliases };
+    std::promise<Result<T>> promise;
+    T staged{};
+    std::optional<Error> opError;
+    Stage failedStage = Stage::None;
+    // Set by the writer: the op finished its writes (staged is the result).
+    bool applied = false;
+    // The op failed and its savepoint rollback undid everything it wrote, so the failure is
+    // reported here only and does not fail the rest of the apply.
+    bool contained = false;
+    // The savepoint rollback itself failed; the writer must not commit this apply.
+    bool rollbackFailed = false;
+    bool settled = false;
+
+    void settle(Result<T> result) {
+        if (settled)
+            return;
+        settled = true;
+        promise.set_value(std::move(result));
+    }
+};
+using GraphIngestCompletion = GraphOpCompletion<GraphIngestOutcome>;
+using GraphRemoveCompletion = GraphOpCompletion<metadata::NamespaceRemovalResult>;
+
+struct IngestGraphOp {
+    std::vector<metadata::KGNode> nodes;
+    std::vector<DeferredEdgeOp> edges;
+    std::vector<GraphIngestAlias> aliases;
+    bool skipExistingNodes = false;
+    bool skipExistingEdges = false;
+    // Namespace the request acts for; governs which nodes it may alias. Empty: no namespace.
+    std::string ns;
+    std::shared_ptr<GraphIngestCompletion> completion;
+};
+// Scoped removal by properties.ns. There is deliberately no relation-only form.
+struct DeleteGraphNamespaceOp {
+    std::string ns;
+    std::optional<std::string> relation;
+    bool dryRun = false;
+    bool includeForeignEdges = false;
+    std::shared_ptr<GraphRemoveCompletion> completion;
+};
 struct AcknowledgeKnowledgeGraphOp {
     std::int64_t documentId{0};
     std::string token;
@@ -178,7 +274,7 @@ using WriteOp =
                  UpsertTreeSnapshotOp, SetMetadataBatchOp, UpdateExtractionStatusOp,
                  UpdateEmbeddingStatusByHashOp, UpdateEmbeddingStatusByHashesOp,
                  CompleteDocumentEmbeddingsByHashesOp, InsertRelationshipOp, AddSymSpellTermsOp,
-                 AcknowledgeKnowledgeGraphOp>;
+                 AcknowledgeKnowledgeGraphOp, IngestGraphOp, DeleteGraphNamespaceOp>;
 
 struct WriteBatch {
     std::string source;
@@ -233,6 +329,13 @@ public:
         bool kgDedupEnabled = true;
         std::size_t kgDedupMaxEdges = 50000;
         std::chrono::milliseconds shutdownTimeout{std::chrono::seconds{30}};
+        // How long a graph ingest/remove request waits for its op to be settled before it
+        // reports the outcome as unknown.
+        std::chrono::milliseconds graphOpResultTimeout{std::chrono::seconds{60}};
+        // Optional pressure provider wired by daemon ServiceManager (keeps
+        // libyams_write_coordinator decoupled from libyams_daemon when linked by standalone tools
+        // like yams-mcp-server).
+        std::function<ResourcePressureLevel()> pressureLevelProvider{};
     };
 
     struct Stats {
@@ -312,12 +415,35 @@ public:
 
     std::size_t queuedBatches() const;
     [[nodiscard]] std::size_t channelCapacity() const noexcept { return config_.channelCapacity; }
+    [[nodiscard]] std::chrono::milliseconds graphOpResultTimeout() const noexcept {
+        return config_.graphOpResultTimeout;
+    }
     std::size_t inFlight() const { return inFlight_.load(); }
     Stats getStats() const;
 
+    /// Compute the dequeue batch limit under current ResourceGovernor pressure.
+    /// Always preserves forward progress (>= 1) and full drain speed when stopping.
+    [[nodiscard]] static std::size_t pressureAdjustedBatchLimit(std::size_t requestedMax,
+                                                                ResourcePressureLevel level,
+                                                                bool stopping) noexcept;
+
+#if defined(YAMS_TESTING)
+    // Runs on the writer right before the KG batch commits; an error is treated exactly like a
+    // failed commit (the batch rolls back). Install before work is enqueued.
+    void testing_setBeforeKgCommitHook(std::function<Result<void>()> hook) {
+        beforeKgCommitForTesting_ = std::move(hook);
+    }
+#endif
+
 private:
+    // Always present so YAMS_TESTING does not change WriteCoordinator's object layout: test
+    // binaries define YAMS_TESTING, the daemon library does not (same rule as ConnectionPool's
+    // beforeCreateForTesting_). Only the setter is test-gated; in production it stays empty.
+    std::function<Result<void>()> beforeKgCommitForTesting_;
     boost::asio::awaitable<void, boost::asio::any_io_executor> writerLoop();
     Result<void> applyBatches(std::vector<std::unique_ptr<WriteBatch>>& batches);
+    Result<std::optional<metadata::KGNode>>
+    lookupNodeForApply(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, const std::string& key);
     void prefetchDeferredNodeKeys(const std::vector<std::unique_ptr<WriteBatch>>& batches,
                                   std::unordered_map<std::string, std::int64_t>& nodeKeyToId);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, UpsertNodesOp& op,
@@ -346,11 +472,13 @@ private:
                          DeleteOrphanedEdgesOp& op);
     Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
                          DeleteOrphanedDocEntitiesOp& op);
+    Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, IngestGraphOp& op,
+                         std::unordered_map<std::string, std::int64_t>& nodeKeyToId);
+    Result<void> applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
+                         DeleteGraphNamespaceOp& op);
     Result<void> applyMetadataOp(UpdateRepairStatusOp& op);
     Result<void> applyMetadataOp(UpsertTreeSnapshotOp& op);
     Result<void> applyMetadataOp(SetMetadataBatchOp& op);
-    Result<void> applyMetadataOp(UpdateExtractionStatusOp& op);
-    Result<void> applyMetadataOp(UpdateEmbeddingStatusByHashOp& op);
     Result<void> applyMetadataOp(UpdateEmbeddingStatusByHashesOp& op);
     Result<EmbeddingCompletionAcknowledgement>
     applyMetadataOp(CompleteDocumentEmbeddingsByHashesOp& op);
@@ -386,7 +514,7 @@ private:
 
     mutable std::mutex queueMutex_;
     mutable std::condition_variable drainCv_;
-    std::vector<std::unique_ptr<WriteBatch>> pendingBatches_;
+    std::deque<std::unique_ptr<WriteBatch>> pendingBatches_;
     std::vector<std::weak_ptr<EmbeddingAcknowledgementState>> embeddingAcknowledgements_;
     std::optional<Error> lastApplyError_;
 

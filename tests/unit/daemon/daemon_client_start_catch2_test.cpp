@@ -7,7 +7,9 @@
 #include <yams/daemon/startup_handshake.h>
 
 #include <filesystem>
+#include <fstream>
 #include <string>
+#include <vector>
 
 #include "../../common/test_helpers_catch2.h"
 
@@ -53,6 +55,41 @@ TEST_CASE("startDaemon accepts a launcher that reports success", "[daemon][clien
     const auto result =
         yams::daemon::DaemonClient::startDaemon(isolatedConfig(tempDir.path(), "true"));
     CHECK(result.has_value());
+}
+
+TEST_CASE("startDaemon hands the daemon its socket, PID file and log file",
+          "[daemon][client][start][isolation]") {
+    yams::test::TempDirGuard tempDir{"yams_client_start_args_"};
+    const auto argvFile = tempDir.path() / "argv.txt";
+    const auto launcher = tempDir.path() / "record.sh";
+    {
+        std::ofstream out(launcher);
+        out << "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" << argvFile.string() << "'\nexit 0\n";
+    }
+    std::filesystem::permissions(launcher, std::filesystem::perms::owner_all,
+                                 std::filesystem::perm_options::add);
+
+    auto config = isolatedConfig(tempDir.path(), launcher.string());
+    config.logFile = tempDir.path() / "data" / "daemon.log";
+    REQUIRE(yams::daemon::DaemonClient::startDaemon(config).has_value());
+
+    std::vector<std::string> argv;
+    std::ifstream in(argvFile);
+    for (std::string line; std::getline(in, line);) {
+        argv.push_back(line);
+    }
+    const auto after = [&](const std::string& flag) -> std::string {
+        for (std::size_t i = 0; i + 1 < argv.size(); ++i) {
+            if (argv[i] == flag) {
+                return argv[i + 1];
+            }
+        }
+        return {};
+    };
+    CHECK(after("--socket") == config.socketPath.string());
+    CHECK(after("--pid-file") == config.pidFile.string());
+    CHECK(after("--log-file") == config.logFile.string());
+    CHECK(after("--data-dir") == config.dataDir.string());
 }
 
 TEST_CASE("startup handshake carries the daemon's start result to its launcher",

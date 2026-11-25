@@ -6,7 +6,6 @@
 #include <yams/daemon/components/thread_pool_naming.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/resource/plugin_content_extractor_adapter.h>
-#include <yams/extraction/external_plugin_extractor.hpp>
 #include <yams/manifest/manifest_manager.h>
 #include <yams/metadata/document_metadata.h>
 
@@ -443,9 +442,15 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
     fsmConfig.repair_backoff_ms = 250;
     fsmConfig.max_retries = static_cast<uint32_t>(shutdownState->config.maxRetries);
 
+    // One FSM cycle per batch taken off the pending queue: Scan (the batch was collected), Detect
+    // (detectMissingWork), Fix (dispatch embedding repair), Reindex (dispatch FTS5 indexing),
+    // Complete, then back to Idle. Fix and Reindex are entered only when the batch has that
+    // work; periodic maintenance and the startup scan coroutine are outside the cycle.
     core::RepairFsm fsm(fsmConfig);
-    fsm.set_on_state_change([](core::RepairFsm::State state) {
+    fsm.set_on_state_change([this](core::RepairFsm::State state) {
         spdlog::debug("RepairFsm state: {}", core::RepairFsm::to_string(state));
+        if (repairStageObserver_)
+            repairStageObserver_(state);
     });
 
     bool initialScanEnqueued = false;
@@ -611,12 +616,19 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             continue;
         }
 
-        if (!running_.load(std::memory_order_relaxed))
+        // A cycle exists only for a batch actually taken off the queue, so it is decided from
+        // the drained batch itself.
+        fsm.start(); // Scan: this cycle's candidates were collected above
+
+        if (!running_.load(std::memory_order_relaxed)) {
+            fsm.reset(); // stopping: the cycle is abandoned
             continue;
+        }
 
         if (state_)
             state_->stats.repairBusyTicks++;
 
+        fsm.advance(core::RepairFsm::State::Detect);
         auto [missingEmbeddings, missingFts5] = detectMissingWork(batch);
         auto meta_repo = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
 
@@ -642,6 +654,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             }
             spdlog::debug("RepairService: deferring batch ({} docs) under {} pressure",
                           batch.size(), pressureLevelName(pressureLevel));
+            fsm.reset(); // cycle abandoned; the re-queued batch starts a new one
             timer.expires_after(std::chrono::milliseconds(500));
             co_await timer.async_wait(boost::asio::use_awaitable);
             continue;
@@ -675,6 +688,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
 
         // Queue embedding repair jobs
         if (!missingEmbeddings.empty()) {
+            fsm.advance(core::RepairFsm::State::Fix);
             if (state_)
                 state_->stats.repairBatchesAttempted++;
             submitRepairStatusUpdate(ctx_, meta_repo, missingEmbeddings,
@@ -698,6 +712,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
                                          yams::metadata::RepairStatus::Pending,
                                          "RepairService::queueEmbeddings/rollback");
                 InternalEventBus::instance().incEmbedDropped();
+                fsm.fail();
             }
         }
 
@@ -709,6 +724,9 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
                           (shutdownState->config.allowDegraded && activeConnFn_ &&
                            activeConnFn_() <= shutdownState->config.maxActiveDuringDegraded));
         if (!missingFts5.empty() && allowFts5) {
+            // Rejected when the embedding dispatch already failed the cycle; the FTS5 dispatch
+            // is independent of it and still runs.
+            fsm.advance(core::RepairFsm::State::Reindex);
             InternalEventBus::Fts5Job ftsJob{
                 .hashes = missingFts5,
                 .ids = {},
@@ -719,11 +737,16 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
                     "fts5_jobs", 512);
             bool queued = co_await queueWithBackoff(fts5Q, std::move(ftsJob), timer, running_,
                                                     "FTS5", missingFts5.size(), 100, 2000);
-            if (queued)
+            if (queued) {
                 InternalEventBus::instance().incFts5Queued();
-            else
+            } else {
                 InternalEventBus::instance().incFts5Dropped();
+                fsm.fail();
+            }
         }
+
+        fsm.advance(core::RepairFsm::State::Complete); // rejected after a failed dispatch
+        fsm.reset();
 
         timer.expires_after(100ms);
         co_await timer.async_wait(boost::asio::use_awaitable);
@@ -1380,9 +1403,6 @@ std::string RepairService::extractorFingerprint(
                 dynamic_cast<const PluginContentExtractorAdapter*>(extractor.get());
             plugin && !plugin->name().empty()) {
             names.push_back("plugin:" + plugin->name());
-        } else if (const auto* external =
-                       dynamic_cast<const extraction::ExternalPluginExtractor*>(extractor.get())) {
-            names.push_back("external:" + external->name());
         } else {
             const auto& self = *extractor;
             names.emplace_back(typeid(self).name());
@@ -2356,14 +2376,14 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
         if (batch.empty())
             break;
 
-        std::vector<std::pair<int64_t, std::string>> toRepair;
+        std::vector<std::pair<metadata::DocumentInfo, std::string>> toRepair;
         toRepair.reserve(batch.size());
         for (const auto& doc : batch) {
             ++totalScanned;
             if (shouldRedetectMime(doc)) {
                 const auto detectedMime = bestEffortMimeForDocument(doc, store);
                 if (!detectedMime.empty() && detectedMime != doc.mimeType) {
-                    toRepair.push_back({doc.id, detectedMime});
+                    toRepair.push_back({doc, detectedMime});
                     ++totalCandidates;
                 }
             }
@@ -2375,15 +2395,8 @@ RepairOperationResult RepairService::repairMimeTypes(bool dryRun, bool verbose,
         if (dryRun) {
             result.skipped += toRepair.size();
         } else {
-            for (auto& [id, mimeType] : toRepair) {
-                auto docResult = meta->getDocument(id);
-                if (!(docResult && docResult.value())) {
-                    result.failed++;
-                    continue;
-                }
-
-                // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
-                auto doc = *docResult.value();
+            for (auto& [doc, mimeType] : toRepair) {
+                const int64_t id = doc.id;
                 const bool oldWasText = detector.isTextMimeType(doc.mimeType);
                 const bool newIsText = detector.isTextMimeType(mimeType);
                 doc.mimeType = std::move(mimeType);
@@ -2448,7 +2461,7 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
     auto* wc = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
     MetadataWriteFacade metaFacade(wc, meta.get());
 
-    auto docsResult = metadata::queryDocumentsByPattern(*meta, "%");
+    auto docsResult = metadata::queryDocumentsByPattern(*meta, "%://%");
     if (!docsResult) {
         result.message = "Failed to query";
         return result;
@@ -2936,6 +2949,17 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
             if (nodes.empty())
                 break;
 
+            std::vector<std::string> pageHashes;
+            pageHashes.reserve(nodes.size());
+            for (const auto& node : nodes) {
+                if (node.nodeKey.compare(0, prefix.size(), prefix) == 0 &&
+                    node.nodeKey.size() > prefix.size()) {
+                    pageHashes.push_back(node.nodeKey.substr(prefix.size()));
+                }
+            }
+            auto pageDocsRes = meta->batchGetDocumentsByHash(pageHashes);
+            const auto* pageDocsByHash = pageDocsRes ? &pageDocsRes.value() : nullptr;
+
             std::size_t deletedNodesInBatch = 0;
             for (const auto& node : nodes) {
                 ++stats.nodesScanned;
@@ -2946,14 +2970,20 @@ RepairService::KgCleanupStats RepairService::cleanOrphanedKgEntries(bool dryRun,
                 if (hash.empty())
                     continue;
 
-                auto docRes = meta->getDocumentByHash(hash);
-                if (!docRes) {
-                    ++stats.errors;
-                    stats.issues.push_back("getDocumentByHash failed for " + hash + ": " +
-                                           docRes.error().message);
-                    continue;
+                bool exists = false;
+                if (pageDocsByHash != nullptr) {
+                    exists = pageDocsByHash->contains(hash);
+                } else {
+                    auto docRes = meta->getDocumentByHash(hash);
+                    if (!docRes) {
+                        ++stats.errors;
+                        stats.issues.push_back("getDocumentByHash failed for " + hash + ": " +
+                                               docRes.error().message);
+                        continue;
+                    }
+                    exists = docRes.value().has_value();
                 }
-                if (!docRes.value().has_value()) {
+                if (!exists) {
                     ++stats.orphanNodes;
                     if (dryRun) {
                         ++stats.skipped;
@@ -3399,6 +3429,16 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
                 break;
             }
 
+            std::vector<int64_t> successDocIds;
+            successDocIds.reserve(docs.value().size());
+            for (const auto& d : docs.value()) {
+                if (d.extractionStatus == metadata::ExtractionStatus::Success) {
+                    successDocIds.push_back(d.id);
+                }
+            }
+            auto hasContentBatchRes = meta->batchHasContent(successDocIds);
+            const auto* hasContentSet = hasContentBatchRes ? &hasContentBatchRes.value() : nullptr;
+
             for (const auto& d : docs.value()) {
                 if (isCanceled()) {
                     result.message = "FTS5 rebuild canceled after scanning " +
@@ -3430,8 +3470,12 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
                 auto extractionStatus = d.extractionStatus;
                 bool successHasContent = false;
                 if (extractionStatus == metadata::ExtractionStatus::Success) {
-                    auto contentRes = meta->getContent(d.id);
-                    successHasContent = contentRes && contentRes.value().has_value();
+                    if (hasContentSet != nullptr) {
+                        successHasContent = hasContentSet->contains(d.id);
+                    } else {
+                        auto contentRes = meta->getContent(d.id);
+                        successHasContent = contentRes && contentRes.value().has_value();
+                    }
                     if (!successHasContent) {
                         metaFacade.updateExtractionStatus(d.id, false,
                                                           metadata::ExtractionStatus::Pending,

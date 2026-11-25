@@ -324,4 +324,50 @@ TEST_CASE("Parallel vector stage: a component that meets the deadline is collect
     CHECK(reported.debugStats.contains("vector_search_rows_visited_status"));
 }
 
+TEST_CASE("Hybrid parallel vector prefetch matches serial hybrid ranking and stats",
+          "[search][vector][prefetch][parity]") {
+    VectorTimeoutFixture fix;
+    auto generator = VectorTimeoutFixture::makeGenerator();
+
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    context.freshness.vectorReady = true;
+    context.freshness.kgReady = true;
+    context.freshness.topologyReady = true;
+    SearchExecutionContextGuard contextGuard(context);
+
+    auto makeHybridConfig = [](bool parallel) {
+        auto cfg = VectorTimeoutFixture::vectorOnlyConfig(std::chrono::milliseconds(0));
+        cfg.enableParallelExecution = parallel;
+        cfg.textWeight = 0.5F;
+        cfg.vectorWeight = 0.5F;
+        cfg.weakQueryMinTextHits = 1;
+        return cfg;
+    };
+
+    SearchEngine serialEngine(fix.repo, fix.vectorDb, generator, fix.kgStore,
+                              makeHybridConfig(false));
+    boost::asio::thread_pool workers(2);
+    SearchEngine parallelEngine(fix.repo, fix.vectorDb, generator, fix.kgStore,
+                                makeHybridConfig(true));
+    parallelEngine.setExecutor(workers.get_executor());
+
+    SearchParams params;
+    params.limit = 4;
+    auto serialResp = serialEngine.searchWithResponse("alpha one", params);
+    auto parallelResp = parallelEngine.searchWithResponse("alpha one", params);
+    workers.join();
+
+    REQUIRE(serialResp.has_value());
+    REQUIRE(parallelResp.has_value());
+    REQUIRE(serialResp.value().results.size() == parallelResp.value().results.size());
+    REQUIRE_FALSE(parallelResp.value().results.empty());
+    for (std::size_t i = 0; i < serialResp.value().results.size(); ++i) {
+        CHECK(serialResp.value().results[i].document.sha256Hash ==
+              parallelResp.value().results[i].document.sha256Hash);
+    }
+    CHECK(parallelEngine.getStatistics().vectorQueries.load() == 1);
+    CHECK(parallelEngine.getStatistics().timedOutQueries.load() == 0);
+}
+
 // NOLINTEND(cppcoreguidelines-avoid-do-while, readability-function-cognitive-complexity)

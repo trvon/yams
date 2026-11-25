@@ -98,6 +98,53 @@ TEST_CASE("legacy search environment applies typed benchmark overrides",
     CHECK(pins.similarityThreshold);
 }
 
+TEST_CASE("legacy search environment sets the fusion candidate limit",
+          "[search][config][environment][catch2]") {
+    SECTION("positive value overrides the automatic window") {
+        SearchEngineConfig config;
+        REQUIRE(static_cast<bool>(config.fusionCandidateLimit == 0));
+        const auto environment = environmentFrom({
+            {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+            {"YAMS_SEARCH_FUSION_CANDIDATE_LIMIT", "200"},
+        });
+        (void)environment.applyTo(config);
+        CHECK(static_cast<bool>(config.fusionCandidateLimit == 200));
+    }
+
+    SECTION("zero restores the automatic window") {
+        SearchEngineConfig config;
+        config.fusionCandidateLimit = 150;
+        const auto environment = environmentFrom({
+            {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+            {"YAMS_SEARCH_FUSION_CANDIDATE_LIMIT", "0"},
+        });
+        (void)environment.applyTo(config);
+        CHECK(static_cast<bool>(config.fusionCandidateLimit == 0));
+    }
+
+    SECTION("negative or malformed values leave the config unchanged") {
+        for (const char* raw : {"-5", "many"}) {
+            SearchEngineConfig config;
+            config.fusionCandidateLimit = 150;
+            const auto environment = environmentFrom({
+                {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
+                {"YAMS_SEARCH_FUSION_CANDIDATE_LIMIT", raw},
+            });
+            (void)environment.applyTo(config);
+            CHECK(static_cast<bool>(config.fusionCandidateLimit == 150));
+        }
+    }
+
+    SECTION("ignored unless overrides are enabled") {
+        SearchEngineConfig config;
+        const auto environment = environmentFrom({
+            {"YAMS_SEARCH_FUSION_CANDIDATE_LIMIT", "200"},
+        });
+        (void)environment.applyTo(config);
+        CHECK(static_cast<bool>(config.fusionCandidateLimit == 0));
+    }
+}
+
 namespace {
 
 // Overlays retired because nothing outside product code set, benched, or documented them

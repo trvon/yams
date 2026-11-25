@@ -15,7 +15,6 @@
 #include <unistd.h>
 #endif
 #include <yams/compression/compression_header.h>
-#include <yams/compression/compression_monitor.h>
 #include <yams/compression/compression_stats.h>
 #include <yams/compression/compression_utils.h>
 #include <yams/compression/compressor_interface.h>
@@ -484,7 +483,7 @@ private:
     Result<std::vector<std::byte>> compressData(std::span<const std::byte> data,
                                                 const DecisionType& decision) {
         auto& registry = compression::CompressionRegistry::instance();
-        auto compressor = registry.createCompressor(decision.algorithm);
+        auto* compressor = registry.getThreadLocalCompressor(decision.algorithm);
         if (!compressor) {
             return Result<std::vector<std::byte>>(
                 Error{ErrorCode::InvalidArgument, "Compressor not available"});
@@ -550,17 +549,6 @@ private:
             stats.onDemandCompressions++;
         });
 
-        // Update global statistics for DaemonMetrics visibility
-        {
-            auto& globalStats = compression::CompressionMonitor::getGlobalStats();
-            auto& globalMutex = compression::CompressionMonitor::getGlobalStatsMutex();
-            std::lock_guard lock(globalMutex);
-            globalStats.totalCompressedFiles++;
-            globalStats.totalCompressedBytes += output.size();
-            globalStats.totalUncompressedBytes += data.size();
-            globalStats.totalSpaceSaved += data.size() - output.size();
-        }
-
         return output;
     }
 
@@ -597,7 +585,7 @@ private:
         // Get decompressor
         auto algorithm = static_cast<compression::CompressionAlgorithm>(header.algorithm);
         auto& registry = compression::CompressionRegistry::instance();
-        auto decompressor = registry.createCompressor(algorithm);
+        auto* decompressor = registry.getThreadLocalCompressor(algorithm);
         if (!decompressor) {
             return Result<std::vector<std::byte>>(
                 Error{ErrorCode::InvalidArgument, "Decompressor not available"});

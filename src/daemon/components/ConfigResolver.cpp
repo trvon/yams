@@ -63,19 +63,8 @@ std::optional<bool> parseBool01(std::string_view raw) {
     return *parsed != 0;
 }
 
-std::optional<bool> parseBoolValue(std::string raw) {
-    raw.erase(std::remove_if(raw.begin(), raw.end(),
-                             [](unsigned char c) { return std::isspace(c) != 0; }),
-              raw.end());
-    std::transform(raw.begin(), raw.end(), raw.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (raw == "true" || raw == "yes" || raw == "on" || raw == "1") {
-        return true;
-    }
-    if (raw == "false" || raw == "no" || raw == "off" || raw == "0") {
-        return false;
-    }
-    return std::nullopt;
+std::optional<bool> parseBoolValue(std::string_view raw) {
+    return yams::config::detail::parseTomlBool(raw);
 }
 
 std::string embeddingDispatchEnvSignature() {
@@ -1057,6 +1046,27 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             }
             if (auto it = kv.find("search.topology.rrf_k"); it != kv.end()) {
                 policy.rrfK = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.fusion_strategy"); it != kv.end()) {
+                policy.fusionStrategy = std::string(trimView(it->second));
+            }
+            if (auto it = kv.find("search.rerank_top_k"); it != kv.end()) {
+                policy.rerankTopK = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.rerank_snippet_max_chars"); it != kv.end()) {
+                policy.rerankSnippetMaxChars = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.lexical_floor_top_n"); it != kv.end()) {
+                policy.lexicalFloorTopN = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.vector_weight"); it != kv.end()) {
+                policy.vectorWeight = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.lexical_rerank_depth"); it != kv.end()) {
+                policy.lexicalRerankDepth = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.lexical_rerank_weight"); it != kv.end()) {
+                policy.lexicalRerankWeight = parseFloat(it->second);
             }
         }
     } catch (const std::exception& e) {

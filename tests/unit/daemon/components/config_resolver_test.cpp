@@ -931,9 +931,6 @@ batch_size = 32
     EnvGuard configEnvironment{"YAMS_CONFIG_PATH", configPath.string()};
     EnvGuard rerankerEnvironment{"YAMS_RERANKER_MODEL", std::nullopt};
 
-    const auto values = ConfigResolver::parseSimpleTomlFlat(configPath);
-    CHECK((values.at("search.reranker_model") == "compat-reranker"));
-
     DaemonConfig daemonConfig;
     daemonConfig.configFilePath = configPath;
     CHECK((ConfigResolver::resolveRerankerModel(daemonConfig) == "compat-reranker"));

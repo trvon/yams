@@ -42,9 +42,10 @@ float normalizedBm25Score(double rawScore, float divisor, double minScore, doubl
     return std::clamp(static_cast<float>(-rawScore) / divisor, 0.0f, 1.0f);
 }
 
-float filenamePathBoost(const std::string& query, const std::string& filePath,
-                        const std::string& fileName) {
-    const auto queryTokens = tokenizeLower(query);
+namespace {
+
+float filenamePathBoostFromTokens(const std::vector<std::string>& queryTokens,
+                                  const std::string& filePath, const std::string& fileName) {
     if (queryTokens.empty()) {
         return 1.0f;
     }
@@ -55,15 +56,17 @@ float filenamePathBoost(const std::string& query, const std::string& filePath,
         return 1.0f;
     }
 
-    std::unordered_set<std::string> nameSet(nameTokens.begin(), nameTokens.end());
-    std::unordered_set<std::string> pathSet(pathTokens.begin(), pathTokens.end());
+    const auto containsExact = [](const std::vector<std::string>& tokens,
+                                  const std::string& target) {
+        return std::find(tokens.begin(), tokens.end(), target) != tokens.end();
+    };
 
     std::size_t nameMatches = 0;
     std::size_t pathMatches = 0;
     for (const auto& tok : queryTokens) {
-        if (nameSet.count(tok)) {
+        if (containsExact(nameTokens, tok)) {
             nameMatches++;
-        } else if (pathSet.count(tok)) {
+        } else if (containsExact(pathTokens, tok)) {
             pathMatches++;
         } else {
             for (const auto& nameTok : nameTokens) {
@@ -92,6 +95,13 @@ float filenamePathBoost(const std::string& query, const std::string& filePath,
     return 1.0f;
 }
 
+} // namespace
+
+float filenamePathBoost(const std::string& query, const std::string& filePath,
+                        const std::string& fileName) {
+    return filenamePathBoostFromTokens(tokenizeLower(query), filePath, fileName);
+}
+
 namespace {
 
 float intentAdaptiveNonCodeMultiplier(QueryIntent intent) {
@@ -117,29 +127,45 @@ LexicalScoringOutput scoreLexicalBatch(const LexicalScoringInputs& inputs) {
 
     const auto range = computeBm25Range(rows);
 
+    float maxAbsRawScore = 0.0f;
+    for (const auto& sr : rows) {
+        const float absRaw = static_cast<float>(std::abs(sr.score));
+        if (std::isfinite(absRaw)) {
+            maxAbsRawScore = std::max(maxAbsRawScore, absRaw);
+        }
+    }
+    const float effectiveDivisor = (std::isfinite(inputs.bm25NormDivisor) &&
+                                    inputs.bm25NormDivisor > 0.0f && maxAbsRawScore > 0.0f)
+                                       ? std::max(inputs.bm25NormDivisor, maxAbsRawScore)
+                                       : inputs.bm25NormDivisor;
+
     const float nonCodeFileMultiplier =
         inputs.applyIntentAdaptiveWeighting ? intentAdaptiveNonCodeMultiplier(inputs.intent) : 1.0f;
 
     const std::string queryStr{inputs.query};
+    const auto queryTokens =
+        inputs.applyFilenameBoost ? tokenizeLower(queryStr) : std::vector<std::string>{};
 
     for (size_t rank = 0; rank < rows.size(); ++rank) {
         const auto& sr = rows[rank];
         const auto& filePath = sr.document.filePath;
         const auto& fileName = sr.document.fileName;
 
-        const auto pruneCategory = yams::magic::getPruneCategory(filePath);
-        const bool isCodeFile = pruneCategory == yams::magic::PruneCategory::BuildObject ||
-                                pruneCategory == yams::magic::PruneCategory::None;
-
-        float scoreMultiplier = isCodeFile ? 1.0f : nonCodeFileMultiplier;
+        float scoreMultiplier = 1.0f;
+        if (nonCodeFileMultiplier != 1.0f) {
+            const auto pruneCategory = yams::magic::getPruneCategory(filePath);
+            const bool isCodeFile = pruneCategory == yams::magic::PruneCategory::BuildObject ||
+                                    pruneCategory == yams::magic::PruneCategory::None;
+            scoreMultiplier = isCodeFile ? 1.0f : nonCodeFileMultiplier;
+        }
         if (inputs.applyFilenameBoost) {
-            scoreMultiplier *= filenamePathBoost(queryStr, filePath, fileName);
+            scoreMultiplier *= filenamePathBoostFromTokens(queryTokens, filePath, fileName);
         }
         scoreMultiplier *= inputs.penalty;
 
         const float rawScore = static_cast<float>(sr.score);
         const float normalized =
-            normalizedBm25Score(rawScore, inputs.bm25NormDivisor, range.minScore, range.maxScore);
+            normalizedBm25Score(rawScore, effectiveDivisor, range.minScore, range.maxScore);
         const float finalScore = std::clamp(scoreMultiplier * normalized, 0.0f, 1.0f);
 
         if (inputs.admissionMinScore && finalScore < *inputs.admissionMinScore) {
@@ -149,17 +175,22 @@ LexicalScoringOutput scoreLexicalBatch(const LexicalScoringInputs& inputs) {
         }
 
         ComponentResult cr;
+        cr.documentId = sr.document.id;
         cr.documentHash = sr.document.sha256Hash;
         cr.filePath = filePath;
         cr.score = finalScore;
         cr.source = inputs.sourceTag;
         cr.rank = inputs.startRank + rank;
         cr.snippet = sr.snippet.empty() ? std::nullopt : std::optional<std::string>(sr.snippet);
-        cr.debugInfo["score_multiplier"] = fmt::format("{:.3f}", scoreMultiplier);
-        // Absolute scale: the single-hit branch of normalizedBm25Score (no batch range).
-        cr.absoluteLexicalScore = std::clamp(
-            scoreMultiplier * normalizedBm25Score(rawScore, inputs.bm25NormDivisor, 0.0, 0.0), 0.0f,
-            1.0f);
+        if (inputs.includeDebugInfo) {
+            cr.debugInfo["score_multiplier"] = fmt::format("{:.3f}", scoreMultiplier);
+        }
+        // Absolute scale: single-hit branch of normalizedBm25Score, with effectiveDivisor
+        // expanding above bm25NormDivisor on strong queries so top hits keep relative margins
+        // instead of saturating at 1.0.
+        cr.absoluteLexicalScore =
+            std::clamp(scoreMultiplier * normalizedBm25Score(rawScore, effectiveDivisor, 0.0, 0.0),
+                       0.0f, 1.0f);
 
         out.results.emplace_back(std::move(cr));
     }

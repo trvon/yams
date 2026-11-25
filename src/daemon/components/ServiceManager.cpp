@@ -899,11 +899,6 @@ ServiceManager::initializeImpl(const std::function<void()>& beforePoolConfigure)
     std::atomic_store_explicit(&embeddingConfig_, std::move(resolvedEmbeddingConfig),
                                std::memory_order_release);
 
-    // Initialize WALManager via DatabaseManager (owns lifecycle + metrics provider)
-    if (databaseManager_) {
-        databaseManager_->initializeWal(resolvedDataDir_);
-    }
-
     // File type detector init skipped to reduce compile-time deps; non-fatal fallback remains.
 
     // io_context and workers already created in constructor; proceed with initialization
@@ -1814,7 +1809,8 @@ Result<std::filesystem::path> ServiceManager::initializeDataDirAndContentStore()
 
 boost::asio::awaitable<bool>
 ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
-                                             yams::compat::stop_token token) {
+                                             yams::compat::stop_token token,
+                                             std::string* failureReason) {
     auto database = std::make_shared<metadata::Database>();
     const int open_timeout = read_timeout_ms("YAMS_DB_OPEN_TIMEOUT_MS", 0, 0);
 
@@ -1854,7 +1850,8 @@ ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath
         migrationOk = co_await init::await_record_duration(
             "migrations",
             [&]() -> boost::asio::awaitable<bool> {
-                co_return co_await co_migrateDatabase(migrationTimeout, token, database);
+                co_return co_await co_migrateDatabase(migrationTimeout, token, database,
+                                                      failureReason);
             },
             state_.initDurationsMs);
         if (migrationOk) {
@@ -2184,15 +2181,20 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
 
     const auto dbPath = dataDir / "yams.db";
-    const bool dbOk = co_await initializeMetadataDatabaseAt(dbPath, token);
+    std::string dbFailureReason;
+    const bool dbOk = co_await initializeMetadataDatabaseAt(dbPath, token, &dbFailureReason);
     if (token.stop_requested()) {
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
     }
     if (!dbOk) {
-        const std::string errMsg =
+        // The caller (startAsyncInit) dispatches InitializationFailedEvent with this message;
+        // dispatching here too would repeat it in the Failed state, which the FSM rejects.
+        std::string errMsg =
             "Failed to open or migrate the metadata database at " + dbPath.string();
+        if (!dbFailureReason.empty()) {
+            errMsg += ": " + dbFailureReason;
+        }
         spdlog::error("[ServiceManager] {}", errMsg);
-        serviceFsm_.dispatch(InitializationFailedEvent{errMsg});
         co_return Error{ErrorCode::InternalError, errMsg};
     }
 
@@ -2485,6 +2487,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             if (wcTuning.kgDedupMaxEdges.has_value()) {
                 wcConfig.kgDedupMaxEdges = *wcTuning.kgDedupMaxEdges;
             }
+            wcConfig.pressureLevelProvider = []() {
+                return ResourceGovernor::instance().getPressureLevel();
+            };
             writeCoordinator_ = std::make_unique<WriteCoordinator>(
                 *workCoordinator_->getIOContext(), kgStore, getMetadataRepo(), wcConfig);
             writeCoordinator_->start();
@@ -2572,7 +2577,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                         piq->setExtractors(refreshedExtractors);
                     }
                     if (auto titleExtractor =
-                            createGlinerExtractionFunc(pluginManager_->getEntityExtractors())) {
+                            createEntityExtractionFunc(pluginManager_->getEntityExtractors())) {
                         piq->setTitleExtractor(std::move(titleExtractor));
                     }
                 }
@@ -2620,6 +2625,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     {
         auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
         if (piq) {
+            if (!piq->hasTitleExtractor()) {
+                if (auto titleExtractor = createEntityExtractionFunc(getEntityExtractors())) {
+                    piq->setTitleExtractor(std::move(titleExtractor));
+                }
+            }
             piq->start();
         }
     }
@@ -3565,7 +3575,8 @@ ServiceManager::co_openDatabase(const std::filesystem::path& dbPath, int /*timeo
 
 boost::asio::awaitable<bool>
 ServiceManager::co_migrateDatabase(int /*timeout_ms*/, yams::compat::stop_token token,
-                                   const std::shared_ptr<metadata::Database>& database) {
+                                   const std::shared_ptr<metadata::Database>& database,
+                                   std::string* failureReason) {
     auto ex = co_await boost::asio::this_coro::executor;
 
     if (token.stop_requested())
@@ -3583,6 +3594,22 @@ ServiceManager::co_migrateDatabase(int /*timeout_ms*/, yams::compat::stop_token 
         co_return false;
     }
     mm->registerMigrations(metadata::YamsMetadataMigrations::getAllMigrations());
+
+    // A store written by a newer YAMS has migrations this binary does not know. migrate()
+    // refuses it too; check here so the user gets a reason they can act on.
+    if (auto current = mm->getCurrentVersion();
+        current && current.value() > mm->getLatestVersion()) {
+        const std::string message =
+            "This data directory was created by a newer version of YAMS (metadata schema "
+            "version " +
+            std::to_string(current.value()) + "; this build supports up to " +
+            std::to_string(mm->getLatestVersion()) + "). Upgrade YAMS to open it.";
+        spdlog::error("[ServiceManager] {}", message);
+        if (failureReason) {
+            *failureReason = message;
+        }
+        co_return false;
+    }
 
     auto completed = std::make_shared<std::atomic<bool>>(false);
     const auto startedAt = std::chrono::steady_clock::now();
@@ -3616,19 +3643,28 @@ ServiceManager::co_migrateDatabase(int /*timeout_ms*/, yams::compat::stop_token 
         boost::asio::detached);
 
     // Package the blocking migration and run it off the event loop.
-    auto task = std::make_shared<std::packaged_task<bool()>>([mm]() {
+    // On failure, names the migration and the SQLite error (from migration_history) so the
+    // daemon's error and `yams daemon status` say what stopped startup.
+    auto failure = std::make_shared<std::string>();
+    auto task = std::make_shared<std::packaged_task<bool()>>([mm, failure]() {
         bool ok = false;
         try {
             auto r = mm->migrate();
             ok = static_cast<bool>(r);
             if (!ok) {
+                *failure = mm->describePendingFailure();
+                if (failure->empty()) {
+                    *failure = "migration failed: " + r.error().message;
+                }
                 spdlog::warn("Database migration failed: {}", r.error().message);
             } else {
                 spdlog::info("Database migrations completed");
             }
         } catch (const std::exception& e) {
+            *failure = std::string("migration threw: ") + e.what();
             spdlog::warn("Database migration threw exception: {}", e.what());
         } catch (...) {
+            *failure = "migration failed (unknown exception)";
             spdlog::warn("Database migration failed (unknown exception)");
         }
         return ok;
@@ -3644,10 +3680,14 @@ ServiceManager::co_migrateDatabase(int /*timeout_ms*/, yams::compat::stop_token 
                      "treating as failure");
         co_return false;
     }
-    if (ok) {
+    {
         std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
-        state_.readiness.databasePhase = std::string(dbphase::kReady);
+        state_.readiness.databasePhase =
+            std::string(ok ? dbphase::kReady : dbphase::kMigrationFailed);
         state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
+    }
+    if (!ok && failureReason) {
+        *failureReason = *failure;
     }
     co_return ok;
 }
@@ -3706,12 +3746,12 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
 
     engine->setStaticEmbedding(loadStaticEmbeddingTable());
 
-    cachedQueryConceptExtractor_ = createGlinerExtractionFunc(getEntityExtractors());
+    cachedQueryConceptExtractor_ = createEntityExtractionFunc(getEntityExtractors());
     engine->setConceptExtractor(cachedQueryConceptExtractor_);
     if (cachedQueryConceptExtractor_) {
-        spdlog::info("[{}] GLiNER concept extractor wired to search engine", contextLabel);
+        spdlog::info("[{}] Entity/concept extractor wired to search engine", contextLabel);
     } else {
-        spdlog::debug("[{}] GLiNER concept extractor unavailable", contextLabel);
+        spdlog::debug("[{}] Entity/concept extractor unavailable", contextLabel);
     }
 
     std::string rerankerBackend = "auto";

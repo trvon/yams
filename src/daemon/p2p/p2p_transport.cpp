@@ -3,6 +3,7 @@
 
 #define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 #include <yams/core/thread_name.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/p2p/p2p_transport.h>
 #include <yams/profiling.h>
 #undef YAMS_DAEMON_TEST_HOOKS_IMPL
@@ -928,6 +929,12 @@ public:
             if (sessionWorkers.size() >= retainedLimit ||
                 preAuthCount.load(std::memory_order_acquire) >= options.maxConcurrentHandshakes) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+            if (ResourceGovernor::instance().getPressureLevel() >=
+                    ResourcePressureLevel::Emergency ||
+                !ResourceGovernor::instance().canAdmitWork()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 continue;
             }
             auto session = std::make_shared<P2pConnection::Impl>(

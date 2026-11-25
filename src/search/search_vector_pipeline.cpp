@@ -304,6 +304,11 @@ queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& 
     try {
         vector::VectorSearchParams params;
         params.k = vectorRawCandidateLimit(config, limit, candidates != nullptr);
+        params.search_snippet_only = true;
+        params.deduplicate_by_document =
+            (candidates == nullptr &&
+             candidateFilterMode == vector::CandidateFilterMode::BackendDefault &&
+             config.chunkAggregation == SearchEngineConfig::ChunkAggregation::MAX);
         params.similarity_threshold =
             candidateFilterMode == vector::CandidateFilterMode::ExactDocumentComplete
                 ? -1.0F

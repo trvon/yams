@@ -2,6 +2,9 @@
 
 #include <yams/search/query_router.h>
 
+#include <cstddef>
+#include <string_view>
+
 namespace yams::search {
 
 TEST_CASE("QueryRouter: prose sentences classify as prose intent", "[search][router][intent]") {
@@ -105,6 +108,53 @@ TEST_CASE("QueryRouter: route returns both intent and community labels", "[searc
     CHECK(decision.retrievalMode.label == QueryRetrievalMode::Semantic);
     REQUIRE(decision.community.has_value());
     CHECK(decision.community->label == QueryCommunity::Scientific);
+}
+
+TEST_CASE("QueryRouter: whitespace terms keep identifiers and paths whole",
+          "[search][router][budget]") {
+    CHECK(countWhitespaceTerms("") == std::size_t{0});
+    CHECK(countWhitespaceTerms("   ") == std::size_t{0});
+    CHECK(countWhitespaceTerms("src/search/search_engine.cpp") == std::size_t{1});
+    CHECK(countWhitespaceTerms("  SearchEngine::search \t fusion\n") == std::size_t{2});
+}
+
+TEST_CASE("QueryRouter: short-query budget applies to short code and path lookups",
+          "[search][router][budget]") {
+    QueryRouter router;
+    const auto budgeted = [&](std::string_view query) {
+        return isShortQueryBudgeted(router.classifyIntent(query).label, query);
+    };
+
+    // Genuine lookups: one or two terms, whatever the intent.
+    CHECK(budgeted("resolveGraphCandidateNodeId"));
+    CHECK(budgeted("src/app/services/search_service.cpp"));
+    CHECK(budgeted("SearchEngine::search fusion"));
+    CHECK(budgeted("search_engine.cpp tuner"));
+    CHECK(budgeted("statin"));
+    CHECK(budgeted("statin risk"));
+
+    // Boundary: three terms is prose length, as in the router's own prose rule.
+    CHECK(router.classifyIntent("parse SearchEngine config").label == QueryIntent::Code);
+    CHECK_FALSE(budgeted("parse SearchEngine config"));
+    CHECK(router.classifyIntent("src/search two terms").label == QueryIntent::Path);
+    CHECK_FALSE(budgeted("src/search two terms"));
+}
+
+TEST_CASE("QueryRouter: prose with one code-like token keeps the full semantic budget",
+          "[search][router][budget]") {
+    QueryRouter router;
+    const auto check = [&](std::string_view query, QueryIntent expectedIntent) {
+        const auto intent = router.classifyIntent(query).label;
+        CHECK(intent == expectedIntent);
+        CHECK_FALSE(isShortQueryBudgeted(intent, query));
+    };
+
+    // One CamelCase token labels the sentence Code; one slash labels it Path.
+    check("The DdrB protein from Deinococcus radiodurans is an alternative SSB.",
+          QueryIntent::Code);
+    check("share one init-waiter body between runLoop and test helper", QueryIntent::Code);
+    check("what should I pack before the 7/22 trip?", QueryIntent::Path);
+    check("Can statin treatment reduce inflammatory disease risk", QueryIntent::Prose);
 }
 
 } // namespace yams::search

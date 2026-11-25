@@ -23,6 +23,7 @@
 #include <thread>
 #include <vector>
 
+#include "../../common/isolated_daemon_env.h"
 #include "../../common/test_helpers_catch2.h"
 
 #ifndef _WIN32
@@ -305,6 +306,102 @@ TEST_CASE("DaemonCommand - parses equals-style flags with help", "[cli][daemon][
         FAIL("Unexpected parse error: " << parseErrorMsg);
     }
 }
+
+#if defined(__linux__)
+namespace {
+
+std::vector<std::string> readLines(const fs::path& file) {
+    std::vector<std::string> lines;
+    std::ifstream in(file);
+    for (std::string line; std::getline(in, line);) {
+        lines.push_back(line);
+    }
+    return lines;
+}
+
+std::optional<std::string> argAfter(const std::vector<std::string>& argv, const std::string& flag) {
+    for (std::size_t i = 0; i + 1 < argv.size(); ++i) {
+        if (argv[i] == flag) {
+            return argv[i + 1];
+        }
+    }
+    return std::nullopt;
+}
+
+// A stand-in for yams-daemon that records its arguments and reports a successful start.
+fs::path writeRecordingLauncher(const fs::path& dir, const fs::path& argvFile) {
+    fs::create_directories(dir);
+    const auto script = dir / "record-daemon.sh";
+    {
+        std::ofstream out(script);
+        out << "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" << argvFile.string() << "'\nexit 0\n";
+    }
+    fs::permissions(script, fs::perms::owner_all, fs::perm_options::add);
+    return script;
+}
+
+} // namespace
+
+TEST_CASE("DaemonCommand - start with --socket keeps it, its own PID file and log, and leaves "
+          "the live default daemon alone",
+          "[cli][daemon][start][isolation][catch2]") {
+    // Reproduces the 2026-11-22 report in isolation: the user's config names a shared socket
+    // and PID file, a live daemon holds that PID file, and YAMS_DAEMON_SOCKET points elsewhere.
+    yams::test::IsolatedDaemonEnv env{"yams_cli_iso_"};
+    const auto sharedSocket = env.root() / "shared" / "yams-daemon.sock";
+    const auto sharedPid = env.root() / "shared" / "yams-daemon.pid";
+    env.writeUserConfig(sharedSocket, sharedPid);
+    fs::create_directories(sharedPid.parent_path());
+
+    yams::test::FakeLiveDaemon liveDefault(env.root() / "fakebin", sharedSocket);
+    const nlohmann::json record = {
+        {"v", 1},
+        {"pid", liveDefault.pid()},
+        {"start_ns", yams::daemon::client::processStartTimeNs(liveDefault.pid())},
+        {"token", "live-default"},
+        {"exe", fs::weakly_canonical(liveDefault.exe()).string()},
+    };
+    std::ofstream(sharedPid) << record.dump();
+    REQUIRE(yams::daemon::client::pidFileIdentifiesLiveDaemon(sharedPid, liveDefault.pid()));
+
+    const auto scratchSocket = env.root() / "x" / "yft.sock";
+    const auto scratchData = env.root() / "scratch";
+    fs::create_directories(scratchData);
+    env.set("YAMS_DAEMON_SOCKET", env.root() / "env" / "other.sock");
+
+    const auto argvFile = env.root() / "launched-argv.txt";
+    const auto launcher = writeRecordingLauncher(env.root() / "bin", argvFile);
+
+    auto cli = std::make_unique<yams::cli::YamsCLI>();
+    std::vector<std::string> args = {"yams",
+                                     "daemon",
+                                     "start",
+                                     "--socket",
+                                     scratchSocket.string(),
+                                     "--data-dir",
+                                     scratchData.string(),
+                                     "--daemon-binary",
+                                     launcher.string()};
+    std::vector<char*> argv;
+    for (auto& a : args) {
+        argv.push_back(a.data());
+    }
+    CHECK(cli->run(static_cast<int>(argv.size()), argv.data()) == 0);
+
+    const auto launched = readLines(argvFile);
+    REQUIRE_FALSE(launched.empty());
+    // 1. The explicit socket wins over config socket_path, YAMS_DAEMON_SOCKET and discovery.
+    CHECK(argAfter(launched, "--socket") == scratchSocket.string());
+    // 2. The PID file is derived from that socket, never the shared one.
+    CHECK(argAfter(launched, "--pid-file") == (env.root() / "x" / "yft.pid").string());
+    CHECK(argAfter(launched, "--pid-file") != sharedPid.string());
+    // 5. The log goes under the scratch data dir, not the default state log.
+    CHECK(argAfter(launched, "--log-file") == (scratchData / "daemon.log").string());
+    CHECK(argAfter(launched, "--data-dir") == scratchData.string());
+    // 4. The live daemon of the other store is untouched.
+    CHECK(liveDefault.alive());
+}
+#endif
 
 TEST_CASE("DaemonCommand - parses status detailed UX flags", "[cli][daemon][catch2]") {
     CLI::App app{"yams"};

@@ -108,6 +108,18 @@ yams graph --relations
 The graph links documents to their paths, versions, extracted entities and
 semantically similar neighbours.
 
+Other tools can add their own nodes and edges and remove them by namespace:
+
+```bash
+yams graph ingest --file graph.json --json   # or --file - for stdin
+yams graph remove --ns paperbridge --relation cites --dry-run
+```
+
+Mark rows with `"properties": {"ns": "<tool>"}` so document cleanup leaves them
+alone. Ingest never changes an existing row's owner, and removal refuses to drop
+other owners' edges unless `--include-foreign-edges` is given. Payload, counts,
+ownership and cleanup rules: [External graph ingest](architecture/graph-ingest.md).
+
 ## Check health
 
 ```bash
@@ -115,3 +127,23 @@ yams status            # daemon state, data directory, document count
 yams doctor            # connectivity and plugin checks
 yams daemon log -n 50
 ```
+
+### Metadata migration failed
+
+`yams daemon status` shows `Database ✗ Migration failed` and the error names
+the migration and the SQLite error. `string or blob too big` means a stored
+value exceeds SQLite's length limit (1e9 bytes), so the migration cannot read
+it. Migration 47 removes oversized topology snapshots itself; they are a cache
+and rebuild after the next ingest. For any other value, stop the daemon, back
+up `yams.db`, and list the largest graph rows:
+
+```bash
+yams daemon stop
+cp ~/.local/share/yams/yams.db ~/yams.db.bak
+sqlite3 ~/.local/share/yams/yams.db \
+  "SELECT id, node_key, type, octet_length(properties) AS bytes
+   FROM kg_nodes ORDER BY bytes DESC LIMIT 10"
+```
+
+`octet_length()` reads the size without loading the value. Open an issue with
+that list before deleting rows that are not a cache.

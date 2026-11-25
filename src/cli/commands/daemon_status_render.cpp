@@ -537,6 +537,10 @@ void renderDaemonStatusBrief(const yams::daemon::StatusResponse& s,
             label = "Migrating";
             extra = elapsedSec;
             dbSev = Severity::Warn;
+        } else if (phase == dbphase::kMigrationFailed) {
+            label = "Migration failed";
+            extra = "see the error below";
+            dbSev = Severity::Bad;
         } else if (phase == dbphase::kReady ||
                    s.readinessStates.count(std::string(readiness::kDatabase))) {
             auto it = s.readinessStates.find(std::string(readiness::kDatabase));

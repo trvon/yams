@@ -3,15 +3,18 @@
 #include <yams/core/assert.hpp>
 #include <yams/daemon/components/WriteCoordinator.h>
 
-#include <spdlog/spdlog.h>
-
 #include <cstddef>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace yams::daemon {
+
+namespace detail {
+void logWriteBatchCoalescerWarn(std::string_view source, std::string_view message);
+} // namespace detail
 
 class WriteBatchCoalescer {
 public:
@@ -37,9 +40,8 @@ public:
             }
         }
         if (toFlush && !wc.tryEnqueue(toFlush)) {
-            spdlog::warn("[WriteBatchCoalescer:{}] tryEnqueue rejected at "
-                         "threshold; retaining batch",
-                         source_);
+            detail::logWriteBatchCoalescerWarn(source_,
+                                               "tryEnqueue rejected at threshold; retaining batch");
             std::lock_guard<std::mutex> lock(mtx_);
             batch_ = std::move(toFlush);
         }
@@ -57,9 +59,8 @@ public:
             b = std::move(batch_);
         }
         if (b && !b->ops.empty() && !wc.tryEnqueue(b)) {
-            spdlog::warn("[WriteBatchCoalescer:{}] flush rejected; "
-                         "re-queuing batch for retry",
-                         source_);
+            detail::logWriteBatchCoalescerWarn(source_,
+                                               "flush rejected; re-queuing batch for retry");
             std::lock_guard<std::mutex> lock(mtx_);
             if (!batch_) {
                 batch_ = std::move(b);

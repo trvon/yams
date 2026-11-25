@@ -137,6 +137,27 @@ TEST_CASE("daemon status names a running integrity check instead of 'Opening'",
     CHECK(out.find("Opening") == std::string::npos);
 }
 
+TEST_CASE("daemon status reports a failed migration instead of 'Migrating'",
+          "[cli][daemon][status][catch2]") {
+    PlainColors plain;
+    StatusResponse s = readyDaemon();
+    s.ready = false;
+    s.lifecycleState = "failed";
+    s.readinessStates[std::string(yams::daemon::readiness::kDatabase)] = false;
+    s.databasePhase = std::string(yams::daemon::dbphase::kMigrationFailed);
+    s.lastError = "Failed to open or migrate the metadata database at /srv/yams/yams.db: "
+                  "migration 47 (Rebuild graph cleanup indexes on the guarded expression) "
+                  "failed: string or blob too big";
+
+    const std::string out = renderBrief(s, {});
+    INFO(out);
+
+    CHECK(lineContaining(out, "Database").find("Migration failed") != std::string::npos);
+    CHECK(out.find("Migrating") == std::string::npos);
+    CHECK(out.find("Error: Failed to open or migrate the metadata database at /srv/yams/yams.db: "
+                   "migration 47 (") != std::string::npos);
+}
+
 TEST_CASE("daemon status shows the vector index as pending while vectors initialize",
           "[cli][daemon][status][catch2]") {
     PlainColors plain;

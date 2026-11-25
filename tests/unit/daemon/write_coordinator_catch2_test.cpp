@@ -1455,3 +1455,285 @@ TEST_CASE("WriteCoordinator: derivation completions publish only current tokens"
     }
     repo.reset();
 }
+
+TEST_CASE("WriteCoordinator: a contained graph op failure fails only its own completion",
+          "[unit][daemon][write-coordinator][kg][graph-ingest]") {
+    KgCoordinatorFixture fix("wc_kg_graph_contained_");
+    boost::asio::io_context io;
+    WriteCoordinator::Config config;
+    config.maxBatchDelayMs = std::chrono::milliseconds{1};
+    WriteCoordinator coordinator(io, fix.kg, {}, config);
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+
+    // One batch, so both ops share one apply and one transaction.
+    auto removal = std::make_shared<yams::daemon::GraphRemoveCompletion>();
+    auto removalResult = removal->promise.get_future();
+    auto ingest = std::make_shared<yams::daemon::GraphIngestCompletion>();
+    auto ingestResult = ingest->promise.get_future();
+    auto batch = std::make_unique<WriteBatch>();
+    batch->source = "test/graph_contained";
+    yams::daemon::DeleteGraphNamespaceOp badRemoval;
+    badRemoval.completion = removal; // empty ns: fails before writing anything
+    batch->ops.emplace_back(std::move(badRemoval));
+    batch->ops.emplace_back(yams::daemon::UpsertNodesOp{{makeNode("plain:after")}});
+    yams::daemon::IngestGraphOp goodIngest;
+    goodIngest.nodes.push_back(makeNode("paper:ok"));
+    goodIngest.completion = ingest;
+    batch->ops.emplace_back(std::move(goodIngest));
+    coordinator.enqueue(std::move(batch));
+
+    // The failure belongs to the removal's caller, not to whoever flushes next.
+    REQUIRE(coordinator.flush(std::chrono::seconds{10}).has_value());
+    REQUIRE(removalResult.wait_for(std::chrono::seconds{10}) == std::future_status::ready);
+    auto removed = removalResult.get();
+    REQUIRE_FALSE(removed.has_value());
+    CHECK(removed.error().code == yams::ErrorCode::InvalidArgument);
+    auto ingested = ingestResult.get();
+    REQUIRE(ingested.has_value());
+    CHECK(ingested.value().nodesInserted == 1);
+
+    for (const auto* key : {"plain:after", "paper:ok"}) {
+        auto node = fix.kg->getNodeByKey(key);
+        REQUIRE(node.has_value());
+        CHECK(node.value().has_value());
+    }
+
+    coordinator.shutdown();
+    io.stop();
+    if (writerLoop.joinable()) {
+        writerLoop.join();
+    }
+}
+
+TEST_CASE("WriteCoordinator: graph op completions fail when the commit fails",
+          "[unit][daemon][write-coordinator][kg][graph-ingest]") {
+    KgCoordinatorFixture fix("wc_kg_graph_commit_");
+    boost::asio::io_context io;
+    WriteCoordinator::Config config;
+    config.maxBatchDelayMs = std::chrono::milliseconds{1};
+    WriteCoordinator coordinator(io, fix.kg, {}, config);
+    coordinator.testing_setBeforeKgCommitHook(
+        []() -> yams::Result<void> { return yams::Error{yams::ErrorCode::DatabaseError, "boom"}; });
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+
+    auto ingest = std::make_shared<yams::daemon::GraphIngestCompletion>();
+    auto ingestResult = ingest->promise.get_future();
+    auto batch = std::make_unique<WriteBatch>();
+    batch->source = "test/graph_commit_failure";
+    yams::daemon::IngestGraphOp op;
+    op.nodes.push_back(makeNode("paper:rolled-back"));
+    op.completion = ingest;
+    batch->ops.emplace_back(std::move(op));
+    coordinator.enqueue(std::move(batch));
+
+    REQUIRE(ingestResult.wait_for(std::chrono::seconds{10}) == std::future_status::ready);
+    auto result = ingestResult.get();
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message == "boom");
+    auto node = fix.kg->getNodeByKey("paper:rolled-back");
+    REQUIRE(node.has_value());
+    CHECK_FALSE(node.value().has_value());
+
+    coordinator.shutdown();
+    io.stop();
+    if (writerLoop.joinable()) {
+        writerLoop.join();
+    }
+}
+
+namespace {
+
+struct GraphCoordinatorRun {
+    explicit GraphCoordinatorRun(std::shared_ptr<yams::metadata::KnowledgeGraphStore> kg) {
+        WriteCoordinator::Config config;
+        config.maxBatchDelayMs = std::chrono::milliseconds{1};
+        coordinator = std::make_unique<WriteCoordinator>(io, std::move(kg), nullptr, config);
+        coordinator->start();
+        writer = std::thread([this] { io.run(); });
+    }
+    ~GraphCoordinatorRun() {
+        coordinator->shutdown();
+        io.stop();
+        if (writer.joinable()) {
+            writer.join();
+        }
+    }
+    boost::asio::io_context io;
+    std::unique_ptr<WriteCoordinator> coordinator;
+    std::thread writer;
+};
+
+yams::metadata::KGNode nsNode(const std::string& key, const std::string& ns) {
+    auto node = makeNode(key);
+    node.properties = std::string(R"({"ns":")") + ns + "\"}";
+    return node;
+}
+
+void execOn(const std::string& dbPath, const std::string& sql) {
+    yams::metadata::Database db;
+    REQUIRE(db.open(dbPath, yams::metadata::ConnectionMode::ReadWrite));
+    REQUIRE(db.execute(sql));
+    db.close();
+}
+
+} // namespace
+
+TEST_CASE("WriteCoordinator: a deferred edge after a namespace removal does not reuse ids",
+          "[unit][daemon][write-coordinator][kg][graph-ingest]") {
+    KgCoordinatorFixture fix("wc_kg_graph_stale_ids_");
+    REQUIRE(fix.kg->upsertNodes({nsNode("paper:gone", "pb"), makeNode("plain:target")}));
+    GraphCoordinatorRun run(fix.kg);
+
+    // Same batch: the prefetch resolves paper:gone before the removal deletes it.
+    auto removal = std::make_shared<yams::daemon::GraphRemoveCompletion>();
+    auto removed = removal->promise.get_future();
+    auto batch = std::make_unique<WriteBatch>();
+    batch->source = "test/graph_stale_ids";
+    yams::daemon::DeleteGraphNamespaceOp op;
+    op.ns = "pb";
+    op.includeForeignEdges = true;
+    op.completion = removal;
+    batch->ops.emplace_back(std::move(op));
+    yams::daemon::DeferredEdgeOp edge;
+    edge.srcNodeKey = "paper:gone";
+    edge.dstNodeKey = "plain:target";
+    edge.relation = "after_remove";
+    batch->ops.emplace_back(yams::daemon::AddDeferredEdgesOp{{edge}});
+    run.coordinator->enqueue(std::move(batch));
+
+    REQUIRE(run.coordinator->flush(std::chrono::seconds{10}).has_value());
+    auto result = removed.get();
+    REQUIRE(result.has_value());
+    CHECK(result.value().nodesDeleted == 1);
+    CHECK(queryEdgesForRelation(fix.dbPath, "after_remove").count == 0);
+}
+
+TEST_CASE("WriteCoordinator: a mid-op ingest failure undoes the op's earlier writes",
+          "[unit][daemon][write-coordinator][kg][graph-ingest]") {
+    KgCoordinatorFixture fix("wc_kg_graph_midop_");
+    execOn(fix.dbPath, "CREATE TRIGGER fail_boom BEFORE INSERT ON kg_edges "
+                       "WHEN NEW.relation = 'boom' BEGIN SELECT RAISE(ABORT, 'boom edge'); END");
+    GraphCoordinatorRun run(fix.kg);
+    const auto before = run.coordinator->getStats();
+
+    auto ingest = std::make_shared<yams::daemon::GraphIngestCompletion>();
+    auto ingested = ingest->promise.get_future();
+    auto batch = std::make_unique<WriteBatch>();
+    batch->source = "test/graph_midop";
+    yams::daemon::IngestGraphOp op;
+    op.nodes = {nsNode("paper:a", "pb"), nsNode("paper:b", "pb")};
+    yams::daemon::DeferredEdgeOp edge;
+    edge.srcNodeKey = "paper:a";
+    edge.dstNodeKey = "paper:b";
+    edge.relation = "boom";
+    edge.properties = std::string(R"({"ns":"pb"})");
+    op.edges = {edge};
+    op.completion = ingest;
+    batch->ops.emplace_back(std::move(op));
+    batch->ops.emplace_back(yams::daemon::UpsertNodesOp{{makeNode("plain:survivor")}});
+    run.coordinator->enqueue(std::move(batch));
+
+    REQUIRE(run.coordinator->flush(std::chrono::seconds{10}).has_value());
+    auto result = ingested.get();
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find("boom edge") != std::string::npos);
+    CHECK(ingest->failedStage == yams::daemon::GraphIngestCompletion::Stage::Edges);
+    for (const auto* key : {"paper:a", "paper:b"}) {
+        auto node = fix.kg->getNodeByKey(key);
+        REQUIRE(node.has_value());
+        CHECK_FALSE(node.value().has_value()); // written in the node stage, then undone
+    }
+    auto survivor = fix.kg->getNodeByKey("plain:survivor");
+    REQUIRE(survivor.has_value());
+    CHECK(survivor.value().has_value());
+    // A rolled-back op contributes nothing to the write counters.
+    CHECK(run.coordinator->getStats().nodesUpserted - before.nodesUpserted == 1);
+}
+
+TEST_CASE("WriteCoordinator: a failed savepoint rollback aborts the whole apply",
+          "[unit][daemon][write-coordinator][kg][graph-ingest]") {
+    KgCoordinatorFixture fix("wc_kg_graph_abort_");
+    // RAISE(ROLLBACK) ends the whole transaction, so the op's ROLLBACK TO has nothing to undo.
+    execOn(fix.dbPath, "CREATE TRIGGER kill_tx BEFORE INSERT ON kg_edges "
+                       "WHEN NEW.relation = 'kill' BEGIN SELECT RAISE(ROLLBACK, 'tx gone'); END");
+    GraphCoordinatorRun run(fix.kg);
+
+    auto ingest = std::make_shared<yams::daemon::GraphIngestCompletion>();
+    auto ingested = ingest->promise.get_future();
+    auto later = std::make_shared<yams::daemon::GraphIngestCompletion>();
+    auto laterResult = later->promise.get_future();
+    auto batch = std::make_unique<WriteBatch>();
+    batch->source = "test/graph_abort";
+    batch->ops.emplace_back(yams::daemon::UpsertNodesOp{{makeNode("plain:before")}});
+    yams::daemon::IngestGraphOp op;
+    op.nodes = {nsNode("paper:x", "pb"), nsNode("paper:y", "pb")};
+    yams::daemon::DeferredEdgeOp edge;
+    edge.srcNodeKey = "paper:x";
+    edge.dstNodeKey = "paper:y";
+    edge.relation = "kill";
+    edge.properties = std::string(R"({"ns":"pb"})");
+    op.edges = {edge};
+    op.completion = ingest;
+    batch->ops.emplace_back(std::move(op));
+    yams::daemon::IngestGraphOp after;
+    after.nodes = {nsNode("paper:after", "pb")};
+    after.completion = later;
+    batch->ops.emplace_back(std::move(after));
+    run.coordinator->enqueue(std::move(batch));
+
+    auto flushed = run.coordinator->flush(std::chrono::seconds{10});
+    CHECK_FALSE(flushed.has_value());
+    REQUIRE_FALSE(ingested.get().has_value());
+    auto afterResult = laterResult.get();
+    REQUIRE_FALSE(afterResult.has_value()); // never ran outside a transaction
+    CHECK(afterResult.error().message.find("aborted") != std::string::npos);
+    for (const auto* key : {"plain:before", "paper:x", "paper:after"}) {
+        auto node = fix.kg->getNodeByKey(key);
+        REQUIRE(node.has_value());
+        INFO(key);
+        CHECK_FALSE(node.value().has_value());
+    }
+}
+
+TEST_CASE("WriteCoordinator: graph ops without a KG store fail with a KG error",
+          "[unit][daemon][write-coordinator][kg][graph-ingest]") {
+    GraphCoordinatorRun run(nullptr);
+    auto ingest = std::make_shared<yams::daemon::GraphIngestCompletion>();
+    auto ingested = ingest->promise.get_future();
+    auto batch = std::make_unique<WriteBatch>();
+    batch->source = "test/graph_no_kg";
+    yams::daemon::IngestGraphOp op;
+    op.nodes = {makeNode("paper:none")};
+    op.completion = ingest;
+    batch->ops.emplace_back(std::move(op));
+    run.coordinator->enqueue(std::move(batch));
+
+    REQUIRE(ingested.wait_for(std::chrono::seconds{10}) == std::future_status::ready);
+    auto result = ingested.get();
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message == "Knowledge graph store unavailable");
+}
+
+TEST_CASE("WriteCoordinator: pressureAdjustedBatchLimit scales down under pressure and drains on "
+          "stop",
+          "[unit][daemon][write-coordinator][resource-governor]") {
+    using yams::daemon::ResourcePressureLevel;
+    using yams::daemon::WriteCoordinator;
+
+    CHECK(WriteCoordinator::pressureAdjustedBatchLimit(64, ResourcePressureLevel::Normal, false) ==
+          64);
+    CHECK(WriteCoordinator::pressureAdjustedBatchLimit(64, ResourcePressureLevel::Warning, false) ==
+          64);
+    CHECK(WriteCoordinator::pressureAdjustedBatchLimit(64, ResourcePressureLevel::Critical,
+                                                       false) == 16);
+    CHECK(WriteCoordinator::pressureAdjustedBatchLimit(64, ResourcePressureLevel::Emergency,
+                                                       false) == 1);
+    // Forward progress floor even for small base limits.
+    CHECK(WriteCoordinator::pressureAdjustedBatchLimit(2, ResourcePressureLevel::Critical, false) ==
+          1);
+    // Shutdown drain keeps full batch speed.
+    CHECK(WriteCoordinator::pressureAdjustedBatchLimit(64, ResourcePressureLevel::Emergency,
+                                                       true) == 64);
+}

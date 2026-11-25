@@ -263,11 +263,23 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
     auto startTime = std::chrono::steady_clock::now();
     std::size_t skipped = 0;
     std::optional<Error> firstError;
-    auto acknowledge = [&](const DocumentGraphContext& ctx) {
-        auto result = acknowledgeKnowledgeGraph(
-            metadataRepo_, ctx.documentDbId, ctx.knowledgeGraphToken, ctx.knowledgeGraphCompletion);
-        if (!result && !firstError)
-            firstError = result.error();
+    std::vector<std::pair<int64_t, std::string>> pendingAcks;
+    pendingAcks.reserve(contexts.size());
+    auto queueAcknowledge = [&](const DocumentGraphContext& ctx) {
+        if (ctx.knowledgeGraphToken.empty()) {
+            return;
+        }
+        if (ctx.knowledgeGraphCompletion &&
+            !ctx.knowledgeGraphCompletion->markCommitted(KnowledgeGraphCompletionStage::Graph)) {
+            return;
+        }
+        if (!metadataRepo_) {
+            if (!firstError) {
+                firstError = Error{ErrorCode::NotInitialized, "KG completion metadata unavailable"};
+            }
+            return;
+        }
+        pendingAcks.emplace_back(ctx.documentDbId, ctx.knowledgeGraphToken);
     };
 
     if (!entityService_ || !serviceManager_) {
@@ -288,7 +300,7 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
 
     for (auto& ctx : contexts) {
         if (ctx.skipEntityExtraction) {
-            acknowledge(ctx);
+            queueAcknowledge(ctx);
             skipped++;
             continue;
         }
@@ -320,7 +332,7 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
         if (!hasNlExtractor) {
             spdlog::debug("[GraphComponent] No extractor for {} (ext='{}'), skipping extraction",
                           ctx.filePath, ext);
-            acknowledge(ctx);
+            queueAcknowledge(ctx);
             skipped++;
             continue;
         }
@@ -334,6 +346,14 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
         job.knowledgeGraphCompletion = std::move(ctx.knowledgeGraphCompletion);
 
         extractionJobs.push_back(std::move(job));
+    }
+
+    if (!pendingAcks.empty()) {
+        metadata::MetadataOpScope opScope("graph_kg_acknowledgement");
+        auto ackResult = metadataRepo_->completeKnowledgeGraphEnrichmentBatch(pendingAcks);
+        if (!ackResult && !firstError) {
+            firstError = ackResult.error();
+        }
     }
 
     // Submit all extraction jobs in batch

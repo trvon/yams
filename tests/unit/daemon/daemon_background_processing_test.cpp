@@ -30,6 +30,7 @@
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -1782,4 +1783,42 @@ TEST_CASE("Auto-repair treats executing requests, not open connections, as busy"
     stats.repairQueueDepth.store(0);
 
     CHECK_FALSE(yams::daemon::BackgroundTaskManager::autoRepairMayRun(stats, true));
+}
+
+TEST_CASE("BackgroundTaskManager periodic maintenance respects ResourceGovernor pressure",
+          "[daemon][background][resource-governor]") {
+    using yams::daemon::BackgroundTaskManager;
+    using yams::daemon::DeferrableWork;
+    using yams::daemon::ResourceGovernor;
+    using yams::daemon::ResourcePressureLevel;
+
+    struct GovernorResetGuard {
+        std::chrono::steady_clock::time_point prevStartup;
+        GovernorResetGuard() : prevStartup(ResourceGovernor::instance().testing_endStartupGrace()) {
+            ResourceGovernor::instance().testing_resetDeferralGates();
+            ResourceGovernor::instance().testing_setPressureState(ResourcePressureLevel::Normal,
+                                                                  std::chrono::steady_clock::now());
+        }
+        ~GovernorResetGuard() {
+            ResourceGovernor::instance().testing_setPressureState(ResourcePressureLevel::Normal,
+                                                                  std::chrono::steady_clock::now());
+            ResourceGovernor::instance().testing_resetDeferralGates();
+            ResourceGovernor::instance().testing_restoreStartupTime(prevStartup);
+        }
+    };
+
+    GovernorResetGuard guard;
+    CHECK(BackgroundTaskManager::periodicMaintenanceAdmitted(DeferrableWork::RepairScan));
+
+    ResourceGovernor::instance().testing_setPressureState(ResourcePressureLevel::Critical,
+                                                          std::chrono::steady_clock::now());
+    CHECK_FALSE(BackgroundTaskManager::periodicMaintenanceAdmitted(DeferrableWork::RepairScan));
+
+    ResourceGovernor::instance().testing_setPressureState(ResourcePressureLevel::Emergency,
+                                                          std::chrono::steady_clock::now());
+    CHECK_FALSE(BackgroundTaskManager::periodicMaintenanceAdmitted(DeferrableWork::RepairScan));
+
+    ResourceGovernor::instance().testing_setPressureState(ResourcePressureLevel::Normal,
+                                                          std::chrono::steady_clock::now());
+    CHECK(BackgroundTaskManager::periodicMaintenanceAdmitted(DeferrableWork::RepairScan));
 }

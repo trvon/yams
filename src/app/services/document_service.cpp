@@ -35,7 +35,6 @@
 #include <yams/metadata/query_helpers.h>
 #include <yams/vector/vector_database.h>
 
-#include <tuple>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -54,6 +53,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -1715,7 +1715,17 @@ public:
                 ? pendingMetadata.size() * 2
                 : pendingMetadata.size();
         batchFuzzyTerms.reserve(fuzzyTermCapacity);
-        for (auto& pending : pendingMetadata) {
+        struct PendingPathRecord {
+            std::size_t pendingIndex{0};
+            int64_t documentId{0};
+        };
+        std::vector<PendingPathRecord> pendingPathRecords;
+        pendingPathRecords.reserve(pendingMetadata.size());
+        std::vector<std::pair<const metadata::DocumentInfo*, int64_t>> pendingPathTreeRecords;
+        pendingPathTreeRecords.reserve(pendingMetadata.size());
+
+        for (std::size_t idx = 0; idx < pendingMetadata.size(); ++idx) {
+            auto& pending = pendingMetadata[idx];
             auto inserted = pending.future.get();
             recordDocumentStorePhase("metadata_insert", pending.insertStartedAt);
             if (!inserted) {
@@ -1740,20 +1750,58 @@ public:
             if (!inserted.value().pathSeriesInitialized) {
                 applyStoreVersioning(pending.info, response.documentId);
             }
-            applyStorePathTree(request, pending.info, response.documentId);
-            syncStoreKnowledgeGraph(pending.info, pending.snapshotId);
-            auto pathStored = ctx_.metadataRepo->recordDocumentPath(
-                pending.info, response.documentId, pending.pathMetadata);
-            if (!pathStored) {
-                outcomes[pending.requestIndex] = pathStored.error();
-                continue;
+            if (!request.combineMetadataPathTree) {
+                pendingPathTreeRecords.emplace_back(&pending.info, response.documentId);
             }
-            auto documentTerms = collectDocumentTermsForFuzzySearch(pending.info);
-            batchFuzzyTerms.insert(batchFuzzyTerms.end(),
-                                   std::make_move_iterator(documentTerms.begin()),
-                                   std::make_move_iterator(documentTerms.end()));
-            applyStoreInlineContentIndex(request, pending.info, response.documentId,
-                                         pending.usePath);
+            syncStoreKnowledgeGraph(pending.info, pending.snapshotId);
+            pendingPathRecords.push_back({idx, response.documentId});
+        }
+
+        if (!pendingPathTreeRecords.empty()) {
+            const auto pathTreeStart = std::chrono::steady_clock::now();
+            try {
+                auto treeRes =
+                    ctx_.metadataRepo->upsertPathTreeForDocumentsBatch(pendingPathTreeRecords);
+                if (!treeRes) {
+                    spdlog::debug("Failed to batch update path tree ({} docs): {}",
+                                  pendingPathTreeRecords.size(), treeRes.error().message);
+                }
+            } catch (const std::exception& ex) {
+                spdlog::debug("Exception batch updating path tree ({} docs): {}",
+                              pendingPathTreeRecords.size(), ex.what());
+            } catch (...) {
+                spdlog::debug("Unknown exception batch updating path tree ({} docs)",
+                              pendingPathTreeRecords.size());
+            }
+            recordDocumentStorePhase("path_tree", pathTreeStart);
+        }
+
+        if (!pendingPathRecords.empty()) {
+            std::vector<metadata::MetadataRepository::DocumentPathRecordInput> pathInputs;
+            pathInputs.reserve(pendingPathRecords.size());
+            for (const auto& rec : pendingPathRecords) {
+                const auto& pending = pendingMetadata[rec.pendingIndex];
+                pathInputs.push_back({&pending.info, rec.documentId, &pending.pathMetadata});
+            }
+            auto batchPathRes = ctx_.metadataRepo->recordDocumentPathsBatch(pathInputs);
+            for (const auto& rec : pendingPathRecords) {
+                auto& pending = pendingMetadata[rec.pendingIndex];
+                if (!batchPathRes) {
+                    auto singleRes = ctx_.metadataRepo->recordDocumentPath(
+                        pending.info, rec.documentId, pending.pathMetadata);
+                    if (!singleRes) {
+                        outcomes[pending.requestIndex] = singleRes.error();
+                        continue;
+                    }
+                }
+                const auto& request = requests[pending.requestIndex];
+                auto documentTerms = collectDocumentTermsForFuzzySearch(pending.info);
+                batchFuzzyTerms.insert(batchFuzzyTerms.end(),
+                                       std::make_move_iterator(documentTerms.begin()),
+                                       std::make_move_iterator(documentTerms.end()));
+                applyStoreInlineContentIndex(request, pending.info, rec.documentId,
+                                             pending.usePath);
+            }
         }
         enqueueStoreFuzzyTerms(std::move(batchFuzzyTerms), "document batch");
 
@@ -1910,6 +1958,35 @@ public:
         recordDocumentStorePhase("path_tree", pathTreeStart);
     }
 
+    // True when the newest snapshot version recorded for this path already points at this
+    // content. Re-ingesting unchanged files used to mint a new path:<snapshot>:<path> node plus
+    // path_version and has_version edges on every store, so the graph grew without bound.
+    bool pathVersionUnchanged(const metadata::DocumentInfo& info) {
+        auto latest = ctx_.kgStore->latestPathVersionBlobKey(info.filePath);
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked in the same expression
+        return latest && latest.value() && *latest.value() == "blob:" + info.sha256Hash;
+    }
+
+    void linkSnapshotPathVersion(const metadata::DocumentInfo& info, const std::string& snapshotId,
+                                 std::int64_t blobNodeId) {
+        metadata::PathNodeDescriptor pathDesc;
+        pathDesc.snapshotId = snapshotId;
+        pathDesc.path = info.filePath;
+        pathDesc.isDirectory = false;
+
+        auto pathNodeResult = ctx_.kgStore->ensurePathNode(pathDesc);
+        if (!pathNodeResult) {
+            spdlog::debug("Failed to ensure KG path node for {}: {}", info.filePath,
+                          pathNodeResult.error().message);
+            return;
+        }
+        auto linkResult = ctx_.kgStore->linkPathVersion(pathNodeResult.value(), blobNodeId, 0);
+        if (!linkResult) {
+            spdlog::debug("Failed to link KG path version for {}: {}", info.filePath,
+                          linkResult.error().message);
+        }
+    }
+
     void syncStoreKnowledgeGraph(const metadata::DocumentInfo& info,
                                  const std::string& snapshotId) {
         // Keep the lightweight corpus graph in sync for single-document stores so
@@ -1918,6 +1995,7 @@ public:
         if (ctx_.kgStore) {
             try {
                 auto* writeCoord = getWriteCoordinator();
+                const bool versionUnchanged = pathVersionUnchanged(info);
                 if (writeCoord) {
                     std::string blobNodeKey = std::string("blob:") + info.sha256Hash;
                     std::string docNodeKey = std::string("doc:") + info.sha256Hash;
@@ -1951,25 +2029,33 @@ public:
                                                  "\",\"is_directory\":false,\"logical\":true}";
 
                     auto& kc = getKgSyncCoalescer();
-                    kc.addOp(daemon::UpsertNodesOp{{std::move(blobNode), std::move(docNode),
-                                                    std::move(snapshotPathNode),
-                                                    std::move(logicalPathNode)}},
-                             *writeCoord);
+                    // Unchanged content at this path keeps its existing version: no new
+                    // snapshot path node or version edges.
+                    std::vector<metadata::KGNode> nodes;
+                    nodes.push_back(std::move(blobNode));
+                    nodes.push_back(std::move(docNode));
+                    if (!versionUnchanged) {
+                        nodes.push_back(std::move(snapshotPathNode));
+                    }
+                    nodes.push_back(std::move(logicalPathNode));
+                    kc.addOp(daemon::UpsertNodesOp{std::move(nodes)}, *writeCoord);
 
-                    daemon::DeferredEdgeOp pathVerEdge;
-                    pathVerEdge.srcNodeKey = logicalPathKey;
-                    pathVerEdge.dstNodeKey = snapshotPathKey;
-                    pathVerEdge.relation = "path_version";
+                    if (!versionUnchanged) {
+                        daemon::DeferredEdgeOp pathVerEdge;
+                        pathVerEdge.srcNodeKey = logicalPathKey;
+                        pathVerEdge.dstNodeKey = snapshotPathKey;
+                        pathVerEdge.relation = "path_version";
 
-                    daemon::DeferredEdgeOp hasVerEdge;
-                    hasVerEdge.srcNodeKey = snapshotPathKey;
-                    hasVerEdge.dstNodeKey = blobNodeKey;
-                    hasVerEdge.relation = "has_version";
-                    hasVerEdge.properties = "{\"diff_id\":0}";
+                        daemon::DeferredEdgeOp hasVerEdge;
+                        hasVerEdge.srcNodeKey = snapshotPathKey;
+                        hasVerEdge.dstNodeKey = blobNodeKey;
+                        hasVerEdge.relation = "has_version";
+                        hasVerEdge.properties = "{\"diff_id\":0}";
 
-                    kc.addOp(
-                        daemon::AddDeferredEdgesOp{{std::move(pathVerEdge), std::move(hasVerEdge)}},
-                        *writeCoord);
+                        kc.addOp(daemon::AddDeferredEdgesOp{{std::move(pathVerEdge),
+                                                             std::move(hasVerEdge)}},
+                                 *writeCoord);
+                    }
                 } else {
                     auto blobNodeResult = ctx_.kgStore->ensureBlobNode(info.sha256Hash);
                     if (!blobNodeResult) {
@@ -1986,23 +2072,9 @@ public:
                                           info.sha256Hash.substr(0, 8), docNodeIds.error().message);
                         }
 
-                        metadata::PathNodeDescriptor pathDesc;
-                        pathDesc.snapshotId = snapshotId;
-                        pathDesc.path = info.filePath;
-                        pathDesc.isDirectory = false;
-
-                        auto pathNodeResult = ctx_.kgStore->ensurePathNode(pathDesc);
-                        if (!pathNodeResult) {
-                            spdlog::debug("Failed to ensure KG path node for {}: {}", info.filePath,
-                                          pathNodeResult.error().message);
-                        } else {
-                            auto linkResult = ctx_.kgStore->linkPathVersion(
-                                pathNodeResult.value(), blobNodeResult.value(), 0);
-                            if (!linkResult) {
-                                spdlog::debug("Failed to link KG path version for "
-                                              "{}: {}",
-                                              info.filePath, linkResult.error().message);
-                            }
+                        // Unchanged content at this path keeps its existing version.
+                        if (!versionUnchanged) {
+                            linkSnapshotPathVersion(info, snapshotId, blobNodeResult.value());
                         }
                     }
                 }

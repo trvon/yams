@@ -117,15 +117,6 @@ public:
     static void validateGraph(std::ostream& os, YamsCLI* cli);
     static void applyTuningBaseline(std::ostream& os, bool apply);
 
-    // ── Progress rendering (shared by runRepair) ────────────────────────────
-
-    static void
-    renderEmbeddingProgress(std::ostream& os, bool tty,
-                            std::chrono::steady_clock::time_point& lastPrint,
-                            const std::chrono::steady_clock::time_point& progressStarted,
-                            size_t current, size_t total, const std::string& details);
-    static void finishEmbeddingProgress(std::ostream& os, bool tty);
-
 private:
     YamsCLI* cli_{nullptr};
     mutable std::optional<std::filesystem::path> cachedDataDir_;

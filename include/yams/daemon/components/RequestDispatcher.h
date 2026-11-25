@@ -246,6 +246,7 @@ private:
 
     // KG ingest handler (PBI-093 Phase 2)
     boost::asio::awaitable<Response> handleKgIngestRequest(const KgIngestRequest& req);
+    boost::asio::awaitable<Response> handleKgRemoveRequest(const KgRemoveRequest& req);
 
     // Generic metadata value counts handler (MCP client mode)
     boost::asio::awaitable<Response>

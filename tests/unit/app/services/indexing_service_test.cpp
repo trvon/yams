@@ -3,7 +3,6 @@
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/services.hpp>
 #include <yams/compat/unistd.h>
-#include <yams/content/content_handler_registry.h>
 #include <yams/core/cpp23_features.hpp>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/connection_pool.h>
@@ -20,7 +19,6 @@
 using namespace yams;
 using namespace yams::app::services;
 using namespace yams::metadata;
-using namespace yams::content;
 using namespace yams::detection;
 using namespace yams::api;
 
@@ -70,9 +68,6 @@ struct IndexingFixture {
         auto& detector = FileTypeDetector::instance();
         auto detectorInit = detector.initializeWithMagicNumbers();
         REQUIRE(detectorInit);
-
-        auto& registry = ContentHandlerRegistry::instance();
-        registry.clear();
 
         initialized = true;
     }

@@ -19,6 +19,7 @@ using nlohmann::json;
 #include <yams/cli/cli_sync.h>
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/daemon_start_plan.h>
 #include <yams/daemon/client/process_discovery.h>
 #include <yams/daemon/components/LifecycleComponent.h>
 #include <yams/daemon/daemon.h>
@@ -155,6 +156,29 @@ Result<void> LifecycleComponent::initialize() {
             }
         }
 
+        // A PID file shared with a daemon that serves another data dir (for example the
+        // default PID file reused by a scratch start) never authorizes stopping that daemon.
+        if (haveInfo && existingPid > 0 && identity == PidIdentityStatus::Verified) {
+            const auto& ourDataDir = daemon_->config_.dataDir;
+            std::optional<std::filesystem::path> recordedDataDir;
+            if (!info.dataDir.empty()) {
+                recordedDataDir = std::filesystem::path(info.dataDir);
+            }
+            if (!client::mayReplaceDaemonHoldingPidFile(existingPid, recordedDataDir,
+                                                        client::readDataDirLockPid(ourDataDir),
+                                                        ourDataDir)) {
+                const std::string theirs = recordedDataDir
+                                               ? "data dir '" + recordedDataDir->string() + "'"
+                                               : std::string("another data dir");
+                return Error{ErrorCode::InvalidState,
+                             "PID file '" + pidFile_.string() + "' belongs to running daemon " +
+                                 std::to_string(existingPid) + " serving " + theirs +
+                                 "; not stopping it to start a daemon for data dir '" +
+                                 ourDataDir.string() +
+                                 "'. Pass a distinct --pid-file or --socket."};
+            }
+        }
+
         bool anotherStopped = false;
         if (haveInfo && existingPid > 0 && identity == PidIdentityStatus::Verified) {
             anotherStopped = requestExistingDaemonShutdown(existingPid);
@@ -220,6 +244,17 @@ Result<void> LifecycleComponent::initialize() {
     if (auto result = acquireDataDirLock(); !result) {
         cleanupPidOnError();
         return result;
+    }
+
+    // A socket another process still accepts connections on is not stale: never take it over.
+    if (const auto& sock = daemon_->config_.socketPath;
+        !sock.empty() && client::unixSocketAcceptsConnections(sock)) {
+        releaseDataDirLock();
+        cleanupPidOnError();
+        return Error{ErrorCode::InvalidState,
+                     "Socket '" + sock.string() +
+                         "' is in use by another daemon; not taking it over. Pass a different "
+                         "--socket."};
     }
 
     // Proactively remove a stale socket file left by a previous crash before binding.
@@ -352,6 +387,9 @@ Result<void> LifecycleComponent::createPidFile() {
     payload["pid"] = static_cast<std::int64_t>(currentProcessId());
     payload["start_ns"] = startTimeNs_;
     payload["token"] = instanceToken_;
+    if (!daemon_->config_.dataDir.empty()) {
+        payload["data_dir"] = daemon_->config_.dataDir.string();
+    }
     if (!exePath.empty()) {
         payload["exe"] = exePath;
     }
@@ -521,6 +559,7 @@ bool LifecycleComponent::readPidFileInfo(PidFileInfo& info) const {
             info.startTimeNs = parsed.value("start_ns", 0ull);
             info.token = parsed.value("token", std::string{});
             info.exePath = parsed.value("exe", std::string{});
+            info.dataDir = parsed.value("data_dir", std::string{});
             return info.pid > 0;
         }
     }

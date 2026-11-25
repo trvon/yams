@@ -172,6 +172,14 @@ public:
         /// GraphNeighbors seed ANN k; 0 disables (Tier-1 seeds only).
         std::optional<std::size_t> graphVectorSeedProbe;
         std::optional<float> rrfK;
+        // rrf | convex_min_max
+        std::optional<std::string> fusionStrategy;
+        std::optional<std::size_t> rerankTopK;
+        std::optional<std::size_t> rerankSnippetMaxChars;
+        std::optional<std::size_t> lexicalFloorTopN;
+        std::optional<float> vectorWeight;
+        std::optional<std::size_t> lexicalRerankDepth;
+        std::optional<float> lexicalRerankWeight;
     };
 
     struct TopologyEnginePolicy {
@@ -363,15 +371,6 @@ public:
      * @return Path to config file if found, empty path otherwise
      */
     static std::filesystem::path resolveDefaultConfigPath();
-
-    /**
-     * @brief Compatibility wrapper around yams::config::parse_simple_toml().
-     *
-     * New code should call the shared config reader directly. This installed API remains available
-     * for source and static-link compatibility.
-     */
-    static std::map<std::string, std::string>
-    parseSimpleTomlFlat(const std::filesystem::path& path);
 
     /**
      * @brief Read embedding dimension from vector database.

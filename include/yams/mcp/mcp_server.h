@@ -481,6 +481,7 @@ private:
     handleSemanticDedupe(const MCPSemanticDedupeRequest& req);
     boost::asio::awaitable<Result<MCPGraphResponse>> handleGraphQuery(const MCPGraphRequest& req);
     boost::asio::awaitable<Result<MCPGraphResponse>> handleKgIngest(const MCPGraphRequest& req);
+    boost::asio::awaitable<Result<MCPGraphResponse>> handleKgRemove(const MCPGraphRequest& req);
 
     // Session start/stop (simplified surface)
     boost::asio::awaitable<Result<MCPSessionStartResponse>>

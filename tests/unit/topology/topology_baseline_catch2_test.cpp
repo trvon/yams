@@ -22,7 +22,6 @@
 #include <yams/topology/topology_baseline.h>
 #include <yams/topology/topology_input_extractor.h>
 #include <yams/topology/topology_metadata_store.h>
-#include <yams/topology/topology_offline_analyzer.h>
 #include <yams/topology/topology_representatives.h>
 #include <yams/vector/vector_database.h>
 
@@ -249,15 +248,17 @@ TEST_CASE("Topology baseline records protected relation coverage",
         TopologyDocumentInput{
             .documentHash = "b",
             .embedding = {0.8F, 0.2F},
-            .neighbors = {{.documentHash = "c", .score = 0.70F, .reciprocal = true}}},
+            .neighbors = {{.documentHash = "a", .score = 0.95F, .reciprocal = true},
+                          {.documentHash = "c", .score = 0.70F, .reciprocal = true}}},
         TopologyDocumentInput{
             .documentHash = "c",
             .embedding = {0.0F, 1.0F},
-            .neighbors = {{.documentHash = "d", .score = 0.50F, .reciprocal = true}}},
+            .neighbors = {{.documentHash = "b", .score = 0.70F, .reciprocal = true},
+                          {.documentHash = "d", .score = 0.50F, .reciprocal = true}}},
         TopologyDocumentInput{
             .documentHash = "d",
             .embedding = {-1.0F, 0.0F},
-            .neighbors = {},
+            .neighbors = {{.documentHash = "c", .score = 0.50F, .reciprocal = true}},
         },
     };
 
@@ -289,9 +290,20 @@ TEST_CASE("Topology baseline enforces Lean edge-filter contract",
                     {.documentHash = "aaa", .score = 1.0F, .reciprocal = true},
                     {.documentHash = "", .score = 1.0F, .reciprocal = true},
                 }},
-        TopologyDocumentInput{.documentHash = "bbb", .filePath = "/repo/b.md", .neighbors = {}},
-        TopologyDocumentInput{.documentHash = "ccc", .filePath = "/repo/c.md", .neighbors = {}},
-        TopologyDocumentInput{.documentHash = "ddd", .filePath = "/repo/d.md", .neighbors = {}},
+        // Each reverse observation passes on its own: ccc is kept out by aaa's score below the
+        // floor and ddd by aaa's missing flag, since an edge needs both directions admitted.
+        TopologyDocumentInput{
+            .documentHash = "bbb",
+            .filePath = "/repo/b.md",
+            .neighbors = {{.documentHash = "aaa", .score = 0.9F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "ccc",
+            .filePath = "/repo/c.md",
+            .neighbors = {{.documentHash = "aaa", .score = 0.9F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "ddd",
+            .filePath = "/repo/d.md",
+            .neighbors = {{.documentHash = "aaa", .score = 0.9F, .reciprocal = true}}},
     };
 
     auto result = engine.buildArtifacts(docs, config);
@@ -443,10 +455,13 @@ TEST_CASE("Topology dirty regions include every protected overlap fiber",
     CHECK(containsHash(region.value().expandedDocumentHashes, "secondary-peer"));
 }
 
-TEST_CASE("Topology dirty-region expansion modes differ only in prior-cluster members",
+TEST_CASE("Topology dirty-region expansion modes all hold the touched prior cluster whole",
           "[unit][topology][update][expansion]") {
     // Characterizes each mode now that TopologyManager can select it from config. Before,
     // only PriorClusterAndNeighbors was ever produced, so NeighborsOnly and Adaptive ran nowhere.
+    // updateArtifacts replaces every prior cluster a region document belongs to, so the connected
+    // engine closes every region over prior clusters: NeighborsOnly still has to include the
+    // seed's prior peer, or the peer would drop out of the snapshot.
     TopologyArtifactBatch existing;
     existing.clusters = {
         ClusterArtifact{
@@ -473,8 +488,8 @@ TEST_CASE("Topology dirty-region expansion modes differ only in prior-cluster me
 
     const auto neighborsOnly = regionFor(DirtyRegionExpansionMode::NeighborsOnly);
     CHECK(containsHash(neighborsOnly.expandedDocumentHashes, "neighbor"));
-    CHECK_FALSE(containsHash(neighborsOnly.expandedDocumentHashes, "peer"));
-    CHECK_FALSE(neighborsOnly.includedPriorClusterMembers);
+    CHECK(containsHash(neighborsOnly.expandedDocumentHashes, "peer"));
+    CHECK(neighborsOnly.includedPriorClusterMembers);
 
     const auto prior = regionFor(DirtyRegionExpansionMode::PriorClusterAndNeighbors);
     CHECK(containsHash(prior.expandedDocumentHashes, "neighbor"));
@@ -485,6 +500,7 @@ TEST_CASE("Topology dirty-region expansion modes differ only in prior-cluster me
     // strategy. Pinned so a real adaptive policy has to change this test deliberately.
     const auto adaptive = regionFor(DirtyRegionExpansionMode::Adaptive);
     CHECK((adaptive.expandedDocumentHashes == prior.expandedDocumentHashes));
+    CHECK((neighborsOnly.expandedDocumentHashes == prior.expandedDocumentHashes));
 }
 
 TEST_CASE("Dirty-region expansion modes round-trip through their config names",
@@ -1434,19 +1450,13 @@ TEST_CASE("Topology extractor and offline analyzer use real stores",
     CHECK(aExtracted->metadata.contains("mime_type"));
 
     auto engine = std::make_shared<ConnectedComponentTopologyEngine>();
-    TopologyOfflineAnalyzer analyzer(extractor, engine);
-    auto analysis = analyzer.analyze(
-        TopologyExtractionConfig{.limit = 10,
-                                 .maxNeighborsPerDocument = 8,
-                                 .includeEmbeddings = true,
-                                 .includeMetadata = true,
-                                 .requireEmbeddings = true,
-                                 .requireGraphNode = true},
-        TopologyBuildConfig{.inputKind = TopologyInputKind::Hybrid, .reciprocalOnly = true});
-    REQUIRE(analysis.has_value());
-    CHECK((analysis.value().artifacts.clusters.size() == 2));
-    CHECK(analysis.value().artifacts.embeddingSpaceIdentity == "test-space-v1");
-    CHECK((analysis.value().extractionStats.documentsReturned == 3));
+    TopologyBuildConfig buildConfig{.inputKind = TopologyInputKind::Hybrid, .reciprocalOnly = true};
+    buildConfig.embeddingSpaceIdentity = extractionStats.embeddingSpaceIdentity;
+    auto built = engine->buildArtifacts(extracted.value(), buildConfig);
+    REQUIRE(built.has_value());
+    CHECK((built.value().clusters.size() == 2));
+    CHECK(built.value().embeddingSpaceIdentity == "test-space-v1");
+    CHECK((extractionStats.documentsReturned == 3));
 }
 
 TEST_CASE("Topology update replaces removed cluster memberships consistently",

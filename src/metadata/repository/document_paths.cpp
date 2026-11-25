@@ -62,48 +62,39 @@ std::string documentPathQueryCte(bool currentOnly) {
 Result<void> MetadataRepository::recordDocumentPath(
     const DocumentInfo& info, int64_t documentId,
     const std::vector<std::pair<std::string, MetadataValue>>& metadata) {
-    if (!hasDocumentPaths_)
+    DocumentPathRecordInput single{&info, documentId, &metadata};
+    return recordDocumentPathsBatch(std::span<const DocumentPathRecordInput>{&single, 1});
+}
+
+Result<void>
+MetadataRepository::recordDocumentPathsBatch(std::span<const DocumentPathRecordInput> entries) {
+    if (entries.empty()) {
+        return {};
+    }
+    if (!hasDocumentPaths_) {
         return Error{ErrorCode::InvalidState,
                      "Document path heads require the current metadata schema"};
-    if (info.filePath.empty() || documentId <= 0)
-        return Error{ErrorCode::InvalidArgument,
-                     "A document path and valid content id are required"};
-    const auto derived = computePathDerivedValues(info.filePath);
+    }
+    std::vector<PathDerivedValues> derivedList;
+    derivedList.reserve(entries.size());
+    for (const auto& entry : entries) {
+        if (!entry.info || entry.info->filePath.empty() || entry.documentId <= 0) {
+            return Error{ErrorCode::InvalidArgument,
+                         "A document path and valid content id are required"};
+        }
+        derivedList.push_back(computePathDerivedValues(entry.info->filePath));
+    }
+
     auto result = executeQuery<void>([&](Database& db) -> Result<void> {
         return db.transaction([&]() -> Result<void> {
-            auto previous = db.prepare("SELECT document_id, revision, deleted FROM "
-                                       "document_path_heads WHERE file_path = ?");
-            if (!previous)
-                return previous.error();
-            YAMS_TRY(previous.value().bind(1, derived.normalizedPath));
-            YAMS_TRY_UNWRAP(found, previous.value().step());
-            int64_t revision = 1;
-            if (found) {
-                revision = previous.value().getInt64(1);
-                if (previous.value().getInt64(0) != documentId || previous.value().getInt(2) != 0)
-                    ++revision;
-            } else {
-                // Adopt a canonical legacy series without resetting its version.
-                // An alias must not inherit another path's revision counter.
-                auto legacy =
-                    db.prepare("SELECT CAST(m.value AS INTEGER) FROM metadata m JOIN documents d "
-                               "ON d.id = m.document_id WHERE d.id = ? AND d.file_path = ? AND "
-                               "m.key = 'version'");
-                if (!legacy)
-                    return legacy.error();
-                YAMS_TRY(legacy.value().bindAll(documentId, derived.normalizedPath));
-                YAMS_TRY_UNWRAP(hasLegacyVersion, legacy.value().step());
-                if (hasLegacyVersion)
-                    revision = std::max<int64_t>(1, legacy.value().getInt64(0));
-            }
-            nlohmann::json values = nlohmann::json::object();
-            for (const auto& [key, value] : metadata)
-                values[key] = value.asString();
-            values["series_key"] = derived.normalizedPath;
-            values["version"] = std::to_string(revision);
-            values["is_latest"] = "1";
-            const auto encoded = values.dump();
-            auto statement = db.prepare(R"(
+            static constexpr const char* kPrevSql =
+                "SELECT document_id, revision, deleted FROM document_path_heads "
+                "WHERE file_path = ?";
+            static constexpr const char* kLegacySql =
+                "SELECT CAST(m.value AS INTEGER) FROM metadata m JOIN documents d "
+                "ON d.id = m.document_id WHERE d.id = ? AND d.file_path = ? AND "
+                "m.key = 'version'";
+            static constexpr const char* kUpsertSql = R"(
                 INSERT INTO document_path_heads
                     (file_path, document_id, file_name, file_extension, path_prefix, reverse_path,
                      path_hash, parent_hash, path_depth, revision, indexed_time, modified_time,
@@ -116,19 +107,61 @@ Result<void> MetadataRepository::recordDocumentPath(
                     path_depth = excluded.path_depth, revision = excluded.revision,
                     indexed_time = excluded.indexed_time, modified_time = excluded.modified_time,
                     metadata_json = excluded.metadata_json, deleted = 0
-            )");
-            if (!statement)
-                return statement.error();
-            YAMS_TRY(statement.value().bindAll(
-                derived.normalizedPath, documentId,
-                info.fileName.empty()
-                    ? std::filesystem::path(derived.normalizedPath).filename().string()
-                    : info.fileName,
-                info.fileExtension, derived.pathPrefix, derived.reversePath, derived.pathHash,
-                derived.parentHash, derived.pathDepth, revision,
-                info.indexedTime.time_since_epoch().count(),
-                info.modifiedTime.time_since_epoch().count(), encoded));
-            return statement.value().execute();
+            )";
+
+            YAMS_TRY_UNWRAP(prevStmt, db.prepareCached(kPrevSql));
+            YAMS_TRY_UNWRAP(legacyStmt, db.prepareCached(kLegacySql));
+            YAMS_TRY_UNWRAP(upsertStmt, db.prepareCached(kUpsertSql));
+
+            for (std::size_t i = 0; i < entries.size(); ++i) {
+                const auto& info = *entries[i].info;
+                const int64_t documentId = entries[i].documentId;
+                const auto& derived = derivedList[i];
+
+                prevStmt->reset();
+                prevStmt->clearBindings();
+                YAMS_TRY(prevStmt->bind(1, derived.normalizedPath));
+                YAMS_TRY_UNWRAP(found, prevStmt->step());
+                int64_t revision = 1;
+                if (found) {
+                    revision = prevStmt->getInt64(1);
+                    if (prevStmt->getInt64(0) != documentId || prevStmt->getInt(2) != 0)
+                        ++revision;
+                } else {
+                    // Adopt a canonical legacy series without resetting its version.
+                    // An alias must not inherit another path's revision counter.
+                    legacyStmt->reset();
+                    legacyStmt->clearBindings();
+                    YAMS_TRY(legacyStmt->bindAll(documentId, derived.normalizedPath));
+                    YAMS_TRY_UNWRAP(hasLegacyVersion, legacyStmt->step());
+                    if (hasLegacyVersion)
+                        revision = std::max<int64_t>(1, legacyStmt->getInt64(0));
+                }
+
+                nlohmann::json values = nlohmann::json::object();
+                if (entries[i].metadata) {
+                    for (const auto& [key, value] : *entries[i].metadata)
+                        values[key] = value.asString();
+                }
+                values["series_key"] = derived.normalizedPath;
+                values["version"] = std::to_string(revision);
+                values["is_latest"] = "1";
+                const auto encoded = values.dump();
+
+                upsertStmt->reset();
+                upsertStmt->clearBindings();
+                YAMS_TRY(upsertStmt->bindAll(
+                    derived.normalizedPath, documentId,
+                    info.fileName.empty()
+                        ? std::filesystem::path(derived.normalizedPath).filename().string()
+                        : info.fileName,
+                    info.fileExtension, derived.pathPrefix, derived.reversePath, derived.pathHash,
+                    derived.parentHash, derived.pathDepth, revision,
+                    info.indexedTime.time_since_epoch().count(),
+                    info.modifiedTime.time_since_epoch().count(), encoded));
+                YAMS_TRY(upsertStmt->execute());
+            }
+            return Result<void>{};
         });
     });
     if (result)

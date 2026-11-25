@@ -340,6 +340,23 @@ struct SearchEngineConfig {
     }
 
     bool bypassCorpusWarmingGate = false;
+    enum class FusionStrategy {
+        Rrf,          // Reciprocal Rank Fusion weighted by component weight + raw score factor
+        ConvexMinMax, // Convex combination over per-query min-max normalized scores (Bruch et al.
+                      // 2023)
+    } fusionStrategy = FusionStrategy::Rrf;
+
+    [[nodiscard]] static constexpr const char*
+    fusionStrategyToString(FusionStrategy strategy) noexcept {
+        switch (strategy) {
+            case FusionStrategy::Rrf:
+                return "rrf";
+            case FusionStrategy::ConvexMinMax:
+                return "convex_min_max";
+        }
+        return "rrf";
+    }
+
     float rrfK = 12.0f;
     float bm25NormDivisor = 25.0f;
     bool enableAdaptiveFusion = false;
@@ -355,6 +372,8 @@ struct SearchEngineConfig {
 
     bool enableIntentAdaptiveWeighting = true;
     size_t lexicalFloorTopN = 0;
+    std::optional<size_t> lexicalFloorTopNOverride;
+    std::optional<float> vectorWeightOverride;
     float lexicalFloorBoost = 0.0f;
     bool enableLexicalTieBreak = false;
     float lexicalTieBreakEpsilon = 0.0f;
@@ -411,6 +430,8 @@ struct SearchEngineConfig {
     // before the cross rerank. 0 disables it.
     size_t lexicalRerankDepth = 20;
     float lexicalRerankWeight = 0.5f;
+    std::optional<size_t> lexicalRerankDepthOverride;
+    std::optional<float> lexicalRerankWeightOverride;
     // With a static embedding table loaded: rerank the fused top-N by
     // (1 - wl - ws) * z(fused) + wl * z(bm25) + ws * z(static cosine). 0 disables the static part.
     size_t staticRerankDepth = 50;
@@ -584,6 +605,27 @@ struct SearchEngineConfig {
     /// weights. These switches define which implementation runs and are not tuning outputs.
     void applyExecutionPolicyFrom(const SearchEngineConfig& source) {
         applyTopologyPolicyFrom(source);
+        fusionStrategy = source.fusionStrategy;
+        if (source.rerankTopK != SearchEngineConfig{}.rerankTopK) {
+            rerankTopK = source.rerankTopK;
+        }
+        rerankSnippetMaxChars = source.rerankSnippetMaxChars;
+        if (source.lexicalFloorTopNOverride.has_value()) {
+            lexicalFloorTopN = *source.lexicalFloorTopNOverride;
+            lexicalFloorTopNOverride = source.lexicalFloorTopNOverride;
+        }
+        if (source.vectorWeightOverride.has_value()) {
+            vectorWeight = *source.vectorWeightOverride;
+            vectorWeightOverride = source.vectorWeightOverride;
+        }
+        if (source.lexicalRerankDepthOverride.has_value()) {
+            lexicalRerankDepth = *source.lexicalRerankDepthOverride;
+            lexicalRerankDepthOverride = source.lexicalRerankDepthOverride;
+        }
+        if (source.lexicalRerankWeightOverride.has_value()) {
+            lexicalRerankWeight = *source.lexicalRerankWeightOverride;
+            lexicalRerankWeightOverride = source.lexicalRerankWeightOverride;
+        }
     }
 };
 

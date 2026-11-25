@@ -20,6 +20,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 #include <boost/asio/io_context.hpp>
 #include <yams/common/utf8_utils.h>
 #include <yams/daemon/components/MetadataWriteFacade.h>
@@ -4714,6 +4715,58 @@ TEST_CASE("batchGetDocumentsWithContentPreview: preview truncation",
     auto& [info, preview] = result.value().at("truncate_hash");
     CHECK((preview.size() <= 200));
     CHECK_FALSE(preview.empty());
+}
+
+TEST_CASE("batchGetDocumentsWithContentPreviewByIds: empty, mixed, and truncated",
+          "[metadata-repo][batch-docs-preview]") {
+    MetadataRepositoryFixture fix;
+
+    auto emptyResult = fix.repository_->batchGetDocumentsWithContentPreviewByIds({}, 240);
+    REQUIRE(emptyResult.has_value());
+    CHECK(emptyResult.value().empty());
+
+    auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+
+    DocumentInfo withContent;
+    withContent.sha256Hash = "by_id_with_content";
+    withContent.fileName = "with_content.txt";
+    withContent.filePath = "/test/with_content.txt";
+    withContent.fileSize = 1000;
+    withContent.mimeType = "text/plain";
+    withContent.createdTime = now;
+    withContent.modifiedTime = now;
+    auto withContentId = fix.repository_->insertDocument(withContent);
+    REQUIRE(withContentId.has_value());
+
+    std::string largeContent(2000, 'a');
+    std::vector<BatchContentEntry> entries = {
+        makeBatchContentEntry(withContentId.value(), "Title", largeContent)};
+    REQUIRE(fix.repository_->batchInsertContentAndIndex(entries).has_value());
+
+    DocumentInfo withoutContent;
+    withoutContent.sha256Hash = "by_id_without_content";
+    withoutContent.fileName = "without_content.txt";
+    withoutContent.filePath = "/test/without_content.txt";
+    withoutContent.fileSize = 42;
+    withoutContent.mimeType = "text/plain";
+    withoutContent.createdTime = now;
+    withoutContent.modifiedTime = now;
+    auto withoutContentId = fix.repository_->insertDocument(withoutContent);
+    REQUIRE(withoutContentId.has_value());
+
+    std::vector<int64_t> ids = {withContentId.value(), withoutContentId.value(), 99999999};
+    auto result = fix.repository_->batchGetDocumentsWithContentPreviewByIds(ids, 200);
+    REQUIRE(result.has_value());
+    REQUIRE(result.value().size() == 2);
+
+    const auto& [docA, previewA] = result.value().at(withContentId.value());
+    CHECK(docA.sha256Hash == "by_id_with_content");
+    CHECK(docA.filePath == "/test/with_content.txt");
+    CHECK(previewA.size() == 200);
+
+    const auto& [docB, previewB] = result.value().at(withoutContentId.value());
+    CHECK(docB.sha256Hash == "by_id_without_content");
+    CHECK(previewB.empty());
 }
 
 TEST_CASE("MetadataRepository: setMetadataBatch preserves typed values and latest write wins",

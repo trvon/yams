@@ -307,6 +307,7 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
     }
 
     std::unordered_map<detail::PairKey, float, detail::PairKeyHash> pairWeights;
+    detail::ReciprocalPairScores<detail::PairKey, detail::PairKeyHash> reciprocalScores;
     for (std::size_t i = 0; i < effectiveDocuments.size(); ++i) {
         for (const auto& neighbor : effectiveDocuments[i].neighbors) {
             if (neighbor.documentHash.empty()) {
@@ -334,7 +335,13 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
             } else {
                 wt->second = std::max(wt->second, neighbor.score);
             }
+            if (config.reciprocalOnly) {
+                reciprocalScores.observe(key, i < j, neighbor.score);
+            }
         }
+    }
+    if (config.reciprocalOnly) {
+        reciprocalScores.apply(pairWeights);
     }
 
     Adjacency adjacency(effectiveDocuments.size());
@@ -530,6 +537,40 @@ Result<TopologyDirtyRegion> ConnectedComponentTopologyEngine::defineDirtyRegion(
         }
         for (const auto& hash : secondWave) {
             includePriorClusterMembers(hash);
+            if (region.requiresWiderRebuild) {
+                break;
+            }
+        }
+    }
+
+    // updateArtifacts replaces every prior cluster that holds a region document, so a cluster
+    // the region touches must be in it whole: a member left out would vanish from the snapshot.
+    // Close the region over prior clusters whatever the mode. NeighborsOnly leaves prior clusters
+    // out above and relies on this; the other modes, with depth >= 2 and no overlap, already
+    // hold every touched cluster and gain nothing here.
+    for (std::size_t i = 0;
+         !region.requiresWiderRebuild && i < region.expandedDocumentHashes.size(); ++i) {
+        const auto clustersIt = clusterIdsByDocument.find(region.expandedDocumentHashes[i]);
+        if (clustersIt == clusterIdsByDocument.end()) {
+            continue;
+        }
+        for (const auto& clusterId : clustersIt->second) {
+            const auto membersIt = clusterMembersById.find(clusterId);
+            if (membersIt == clusterMembersById.end()) {
+                continue;
+            }
+            for (const auto& memberHash : membersIt->second) {
+                if (memberHash.empty() || !seen.insert(memberHash).second) {
+                    continue;
+                }
+                region.includedPriorClusterMembers = true;
+                region.expandedDocumentHashes.push_back(memberHash);
+                if (region.expandedDocumentHashes.size() >= config.maxDirtyRegionDocs) {
+                    region.exceededRegionBudget = true;
+                    region.requiresWiderRebuild = true;
+                    break;
+                }
+            }
             if (region.requiresWiderRebuild) {
                 break;
             }
@@ -844,12 +885,14 @@ SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(
         centroids.push_back(centroid);
     }
     if (buildDenseAnnIndex && !centroids.empty()) {
+        YAMS_ZONE_SCOPED_N("topology::route::buildDenseAnn");
         auto annIndex = yams::vector::StaticCosineAnnIndex::build(centroidIds, centroids);
         if (annIndex) {
             index.centroidAnnIndex = std::move(annIndex).value();
         }
     }
     if (buildBqIndex && !centroids.empty()) {
+        YAMS_ZONE_SCOPED_N("topology::route::buildBq");
         auto bqIndex = yams::vector::BinaryQuantizedIndex::build(
             centroidIds, centroids, bqPrefixDimension, bqRotation,
             yams::vector::kDefaultBinaryRotationSeed);
@@ -860,32 +903,36 @@ SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(
         }
     }
 
-    auto addMembership = [&](const std::string& hash, const std::string& clusterId) {
-        const auto clusterIt = clusterIndexById.find(clusterId);
-        if (hash.empty() || clusterIt == clusterIndexById.end()) {
-            return;
-        }
-        auto& clusters = index.clustersByDocumentHash[hash];
-        if (std::ranges::find(clusters, clusterIt->second) == clusters.end()) {
-            clusters.push_back(clusterIt->second);
-        }
-    };
-    if (!artifacts.memberships.empty()) {
-        for (const auto& membership : artifacts.memberships) {
-            addMembership(membership.documentHash, membership.clusterId);
-            if (membership.parentClusterId.has_value()) {
-                addMembership(membership.documentHash, *membership.parentClusterId);
+    {
+        YAMS_ZONE_SCOPED_N("topology::route::buildMemberships");
+        index.clustersByDocumentHash.reserve(artifacts.memberships.size());
+        auto addMembership = [&](const std::string& hash, const std::string& clusterId) {
+            const auto clusterIt = clusterIndexById.find(clusterId);
+            if (hash.empty() || clusterIt == clusterIndexById.end()) {
+                return;
             }
-            for (const auto& overlapClusterId : membership.overlapClusterIds) {
-                addMembership(membership.documentHash, overlapClusterId);
+            auto& clusters = index.clustersByDocumentHash[hash];
+            if (std::ranges::find(clusters, clusterIt->second) == clusters.end()) {
+                clusters.push_back(clusterIt->second);
             }
-        }
-    } else {
-        // Compatibility for lightweight callers that construct cluster-only artifacts.
-        for (std::size_t clusterIndex = 0; clusterIndex < artifacts.clusters.size();
-             ++clusterIndex) {
-            for (const auto& hash : artifacts.clusters[clusterIndex].memberDocumentHashes) {
-                index.clustersByDocumentHash[hash].push_back(clusterIndex);
+        };
+        if (!artifacts.memberships.empty()) {
+            for (const auto& membership : artifacts.memberships) {
+                addMembership(membership.documentHash, membership.clusterId);
+                if (membership.parentClusterId.has_value()) {
+                    addMembership(membership.documentHash, *membership.parentClusterId);
+                }
+                for (const auto& overlapClusterId : membership.overlapClusterIds) {
+                    addMembership(membership.documentHash, overlapClusterId);
+                }
+            }
+        } else {
+            // Compatibility for lightweight callers that construct cluster-only artifacts.
+            for (std::size_t clusterIndex = 0; clusterIndex < artifacts.clusters.size();
+                 ++clusterIndex) {
+                for (const auto& hash : artifacts.clusters[clusterIndex].memberDocumentHashes) {
+                    index.clustersByDocumentHash[hash].push_back(clusterIndex);
+                }
             }
         }
     }

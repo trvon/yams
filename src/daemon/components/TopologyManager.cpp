@@ -8,6 +8,7 @@
 #include <string_view>
 #include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
+#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/profiling.h>
 
 #include <yams/daemon/components/TopologyTuner.h>
@@ -101,6 +102,26 @@ std::string computeCellIdentity() {
     identity.append(";max_neighbors=");
     identity.append(envOr("YAMS_TOPOLOGY_MAX_NEIGHBORS", "default"));
     return identity;
+}
+
+bool shouldDeferRebuildForPressure(ResourcePressureLevel& levelOut) noexcept {
+    const auto& governor = ResourceGovernor::instance();
+    levelOut = governor.getPressureLevel();
+    return levelOut >= ResourcePressureLevel::Critical || !governor.canAdmitWork();
+}
+
+TopologyManager::RebuildStats makePressureDeferredStats(const std::string& reason, bool dryRun,
+                                                        bool fullRebuild, const char* phase,
+                                                        ResourcePressureLevel level) {
+    TopologyManager::RebuildStats deferred;
+    deferred.skipped = true;
+    deferred.dryRun = dryRun;
+    deferred.fullRebuild = fullRebuild;
+    deferred.reason = reason;
+    deferred.issues.push_back(std::string("deferred topology rebuild during ") + phase +
+                              " under resource pressure (" + std::string(pressureLevelName(level)) +
+                              ")");
+    return deferred;
 }
 
 } // namespace
@@ -443,6 +464,15 @@ Result<TopologyManager::RebuildStats>
 TopologyManager::runRebuild(const std::string& reason, bool dryRun,
                             const std::vector<std::string>& documentHashes,
                             const std::string& topologyAlgorithm) {
+    YAMS_ZONE_SCOPED_N("TopologyManager::runRebuild");
+    ResourcePressureLevel pressureLevel = ResourcePressureLevel::Normal;
+    if (shouldDeferRebuildForPressure(pressureLevel)) {
+        spdlog::info("[topology] deferring rebuild before loadLatest under {} pressure (reason={})",
+                     pressureLevelName(pressureLevel), reason);
+        return makePressureDeferredStats(reason, dryRun, documentHashes.empty(), "pre_load",
+                                         pressureLevel);
+    }
+
     auto metadataRepo = deps_.getMetadataRepo();
     auto kgStore = deps_.getKgStore();
     auto vectorDb = deps_.getVectorDatabase();
@@ -466,6 +496,7 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
 
     std::optional<topology::TopologyArtifactBatch> latestBatch;
     {
+        YAMS_ZONE_SCOPED_N("TopologyManager::loadLatest");
         auto latestResult = store.loadLatest();
         if (!latestResult) {
             return Result<RebuildStats>(latestResult.error());
@@ -493,8 +524,12 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
                         [&](const auto& hash) { return !existingHashes.value().contains(hash); });
     }
 
+    // With no snapshot there is nothing to update: a dirty set covers only recent documents, and
+    // building from it alone would publish a topology of those. This is a fresh store, or one
+    // whose snapshot was removed (migration 47 drops snapshots too large to read).
+    const bool noPriorSnapshot = !latestBatch.has_value() && !documentHashes.empty();
     std::vector<std::string> rebuildHashes =
-        replacingStaleSnapshot ? std::vector<std::string>{} : documentHashes;
+        (replacingStaleSnapshot || noPriorSnapshot) ? std::vector<std::string>{} : documentHashes;
     topology::TopologyDirtyRegion dirtyRegion;
     bool widerRebuild = false;
     topology::TopologyExtractionStats seedExtractionStats;
@@ -574,8 +609,20 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     buildConfig.roadOrder = roadOrder();
     applyConstructionPurityDefaults(buildConfig);
 
+    if (shouldDeferRebuildForPressure(pressureLevel)) {
+        spdlog::info("[topology] deferring rebuild before extract under {} pressure (reason={})",
+                     pressureLevelName(pressureLevel), reason);
+        return makePressureDeferredStats(reason, dryRun,
+                                         documentHashes.empty() || replacingStaleSnapshot ||
+                                             widerRebuild || noPriorSnapshot,
+                                         "extract", pressureLevel);
+    }
+
     topology::TopologyExtractionStats extractionStats;
-    auto extracted = extractor->extract(extractionConfig, &extractionStats);
+    auto extracted = [&]() {
+        YAMS_ZONE_SCOPED_N("TopologyManager::extractInputs");
+        return extractor->extract(extractionConfig, &extractionStats);
+    }();
     if (!extracted) {
         return Result<RebuildStats>(extracted.error());
     }
@@ -600,11 +647,22 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
         return skipped;
     }
 
+    if (shouldDeferRebuildForPressure(pressureLevel)) {
+        spdlog::info(
+            "[topology] deferring rebuild before artifact build under {} pressure (reason={})",
+            pressureLevelName(pressureLevel), reason);
+        return makePressureDeferredStats(reason, dryRun,
+                                         documentHashes.empty() || replacingStaleSnapshot ||
+                                             widerRebuild || noPriorSnapshot,
+                                         "build", pressureLevel);
+    }
+
     // True when the snapshot is built from the extracted documents alone, with nothing carried
     // over: an explicit full rebuild, or the first snapshot of a corpus even though that one is
     // requested by document hash.
     const bool builtFromExtractedOnly = !(latestBatch.has_value() && !rebuildHashes.empty());
     Result<topology::TopologyArtifactBatch> artifactResult = [&]() {
+        YAMS_ZONE_SCOPED_N("TopologyManager::buildOrUpdateArtifacts");
         if (!builtFromExtractedOnly) {
             return engine->updateArtifacts(*latestBatch, extracted.value(), buildConfig,
                                            &updateStats);
@@ -619,11 +677,16 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     if (artifacts.topologyEpoch == 0) {
         artifacts.topologyEpoch = latestBatch.has_value() ? latestBatch->topologyEpoch + 1 : 1;
     }
+    YAMS_POSTCONDITION(artifacts.topologyEpoch > 0,
+                       "topology rebuild must assign a positive topologyEpoch");
+    YAMS_PLOT("Topology.DocsProcessed", extractionStats.documentsReturned);
+    YAMS_PLOT("Topology.ClustersBuilt", artifacts.clusters.size());
 
     RebuildStats stats;
     stats.reason = reason;
     stats.dryRun = dryRun;
-    stats.fullRebuild = documentHashes.empty() || replacingStaleSnapshot || widerRebuild;
+    stats.fullRebuild =
+        documentHashes.empty() || replacingStaleSnapshot || widerRebuild || noPriorSnapshot;
     stats.snapshotId = artifacts.snapshotId;
     stats.algorithm = artifacts.algorithm;
     stats.documentsRequested = extractionStats.documentsRequested;
@@ -762,6 +825,8 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     if (replacingStaleSnapshot) {
         stats.issues.push_back("prior topology members are missing from metadata; rebuilding from "
                                "the current corpus");
+    } else if (noPriorSnapshot) {
+        stats.issues.push_back("no prior topology snapshot; rebuilding from the current corpus");
     } else if (!documentHashes.empty()) {
         if (widerRebuild) {
             stats.issues.push_back("incremental topology rebuild of " +

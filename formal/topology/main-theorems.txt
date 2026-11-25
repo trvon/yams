@@ -1,0 +1,89 @@
+# Main theorems for scripts/formal/check-lean.sh.
+# Each must depend only on propext, Classical.choice and Quot.sound.
+# One fully qualified name per line. Review changes here like proofs.
+
+# SystemContract.lean: end-to-end storage/pipeline/topology/search contract
+Yams.Topology.SystemContract.batchedCommit_preservesStorageToSearch
+Yams.Topology.SystemContract.pipelineCompletion_impliesSourceSearchability
+Yams.Topology.SystemContract.wellFormedBatch_impliesValidMemberships
+Yams.Topology.SystemContract.wellFormedBatch_noOverlap_impliesPrimaryMemberships
+Yams.Topology.SystemContract.clusterArtifactToTopologyCluster_preservesId
+Yams.Topology.SystemContract.clusterArtifactToTopologyCluster_preservesDocs
+Yams.Topology.SystemContract.batchToTopologyClusters_preservesIds
+Yams.Topology.SystemContract.endToEnd_documentTraceability
+
+# Contracts.lean: topology construction and post-ingest completion
+Yams.Topology.neighborEdge_knownCorpus
+Yams.Topology.neighborEdge_noSelf
+Yams.Topology.neighborEdge_reciprocalWhenRequired
+Yams.Topology.neighborEdge_minScore
+Yams.Topology.componentMember_reachable
+Yams.Topology.component_respectsCap
+Yams.Topology.component_crossEdgesOnlyFromSplit
+Yams.Topology.component_noCrossEdges
+Yams.Topology.component_noCrossEdges_uncapped
+Yams.Topology.dirtyRegion_containsSeeds
+Yams.Topology.dirtyRegion_budgetOrWiderRebuild
+Yams.Topology.routedCluster_known
+Yams.Topology.routedCluster_limit
+Yams.Topology.applyRouteLimit_zero
+Yams.Topology.applyRouteLimit_contract
+Yams.Pipeline.postIngestPass_completionContract
+Yams.Pipeline.completion_keywordSearchable
+Yams.Pipeline.completion_semanticSearchable
+Yams.Pipeline.completion_graphNavigable
+
+# Pipeline.lean: search-mode prerequisites
+Yams.Pipeline.keyword_independent_of_kg
+Yams.Pipeline.semantic_search_requires_embedding
+Yams.Pipeline.graph_navigation_requires_core
+
+# Storage.lean, Bridge.lean: commit and storage-to-search contracts
+Yams.Storage.batchedCommit_contract
+Yams.Topology.Bridge.storageToSearch_contractHolds
+
+# SearchEngine.lean: search provenance, limits and semantic-mode sources
+Yams.SearchEngine.runSearch_resultsComeFromEnabledCandidates
+Yams.SearchEngine.runSearch_respectsLimit
+Yams.SearchEngine.runSearch_degradedFlag
+Yams.SearchEngine.semanticMode_noStructuralCandidates
+Yams.SearchEngine.semanticMode_admitsLexicalEvidence
+Yams.SearchEngine.semanticMode_contract
+
+# TopologyInfluence.lean: topology-augmented search
+Yams.SearchEngine.runSearchWithTopology_disabled_baseline
+Yams.SearchEngine.runSearchWithTopology_rerankOnly_baseline
+Yams.SearchEngine.runSearchWithTopology_respectsLimit
+Yams.SearchEngine.topologyCandidates_noArbitraryDocs
+Yams.SearchEngine.selectedTopologyClusters_respectsClusterCap
+Yams.SearchEngine.selectedTopologyClusters_unlimited
+
+# SelectiveRouting.lean, AllowedSetRetrieval.lean, RetrievalCoordinates.lean
+Yams.SearchEngine.selectiveRoute_preservesProtected
+Yams.SearchEngine.refinement_noArbitraryDocuments
+Yams.SearchEngine.generalizedMemoryFloor_rejectsCorpusRegression
+Yams.SearchEngine.retrieveRoutes_noInvent
+Yams.SearchEngine.routedScorerComplete_preservesProtected
+Yams.SearchEngine.coordinateRoute_narrow_iff_admissible
+Yams.SearchEngine.coordinateRoute_admitted_routeCertified
+Yams.SearchEngine.coordinateRoute_unobserved_neverNarrows
+
+# CandidateExpansion.lean: relation expansion
+Yams.SearchEngine.augmentCandidates_preservesBaseline
+Yams.SearchEngine.admissibleSeedBoundedExpansion_strictlyImprovesBudgetedRecall
+
+# SearchImpact.lean: probe observation contract
+Yams.Pipeline.keywordObservation_contract
+
+# ConstructionGates.lean, ClusterObjective.lean, Connected.lean, Artifacts.lean, SGC.lean
+Yams.Topology.certificate_edgesHaveNonHubWitness
+Yams.Topology.certificate_edgesHaveReciprocalWitness
+Yams.Topology.certificate_componentsRespectCap
+Yams.Topology.validScheme_noOverbroadClusters
+Yams.Topology.validScheme_respectsExpansionCaps
+Yams.Topology.validScheme_respectsCohesionFloor
+Yams.Topology.wellFormed_membershipsReferenceClusters
+Yams.Topology.wellFormed_membersHaveMemberships
+Yams.Topology.wellFormed_noOverlap_primaryMemberships
+Yams.Topology.wellFormedBatch_withRoads_iff
+Yams.Topology.smooth_preserves_hashes_topology

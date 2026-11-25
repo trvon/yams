@@ -29,6 +29,9 @@ using nlohmann::json;
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 
+#include <yams/daemon/client/process_discovery.h>
+
+#include "tests/common/isolated_daemon_env.h"
 #include "tests/common/test_helpers_catch2.h"
 
 #ifdef _WIN32
@@ -1519,6 +1522,41 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon async init barrier stress test",
         std::this_thread::sleep_for(50ms);
     }
 }
+
+#if defined(__linux__)
+TEST_CASE_METHOD(DaemonFixture,
+                 "Daemon start never stops a live daemon of another store that holds its PID file",
+                 "[daemon][lifecycle][single-instance][isolation]") {
+    // A scratch start that reuses the shared PID file must not shut down (or kill) the user's
+    // daemon serving another data dir, even in the production aggressive single-instance mode.
+    yams::test::IsolatedDaemonEnv env{"ydiso_"};
+    env.set("YAMS_DAEMON_KILL_OTHERS", "1");
+    yams::test::ScopedEnvVar safeGuard{"YAMS_TEST_SAFE_SINGLE_INSTANCE", std::nullopt};
+
+    yams::test::FakeLiveDaemon otherStore(env.root() / "fakebin", env.root() / "other.sock");
+    json record = {
+        {"v", 1},
+        {"pid", otherStore.pid()},
+        {"start_ns", yams::daemon::client::processStartTimeNs(otherStore.pid())},
+        {"token", "other-store"},
+        {"exe", fs::weakly_canonical(otherStore.exe()).string()},
+        // Daemons before data_dir was recorded (0.23.1) leave it out: the decision then rests
+        // on this data dir's lock, which the other daemon does not hold.
+    };
+    fs::create_directories(config_.pidFile.parent_path());
+    std::ofstream(config_.pidFile) << record.dump();
+
+    config_.enableModelProvider = false;
+    config_.autoLoadPlugins = false;
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+    auto started = daemon_->start();
+
+    CHECK(otherStore.alive());
+    REQUIRE_FALSE(started);
+    CHECK(started.error().message.find(config_.dataDir.string()) != std::string::npos);
+    CHECK(started.error().message.find(config_.pidFile.string()) != std::string::npos);
+}
+#endif
 
 } // namespace yams::daemon::test
 

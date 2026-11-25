@@ -824,6 +824,120 @@ TopologyInputExtractor::extract(const TopologyExtractionConfig& config,
         matryoshkaWeights = computeVarianceWeights(sample, fc.matryoshkaTargetDim);
     }
 
+    // Bulk-load document KG nodes once instead of issuing N individual getNodeByKey queries.
+    constexpr std::size_t kBatchChunkSize = 500;
+    std::unordered_map<std::string, std::int64_t> docNodeIdByHash;
+    std::unordered_map<std::int64_t, std::string> docHashByNodeId;
+    docNodeIdByHash.reserve(documents.size());
+    docHashByNodeId.reserve(documents.size());
+    {
+        std::vector<std::string> keyChunk;
+        keyChunk.reserve(std::min(documents.size(), kBatchChunkSize));
+        for (std::size_t offset = 0; offset < documents.size(); offset += kBatchChunkSize) {
+            keyChunk.clear();
+            const auto end = std::min(documents.size(), offset + kBatchChunkSize);
+            for (std::size_t i = offset; i < end; ++i) {
+                keyChunk.push_back(nodeKeyForDocumentHash(documents[i].sha256Hash));
+            }
+            auto nodesRes = kgStore_->getNodesByKeys(keyChunk);
+            if (!nodesRes) {
+                return nodesRes.error();
+            }
+            for (const auto& node : nodesRes.value()) {
+                if (auto hash = documentHashFromNodeKey(node.nodeKey); hash.has_value()) {
+                    docNodeIdByHash.emplace(*hash, node.id);
+                    docHashByNodeId.emplace(node.id, std::move(*hash));
+                }
+            }
+        }
+    }
+
+    // Bulk-load document metadata once when requested instead of N individual getAllMetadata calls.
+    std::unordered_map<std::int64_t, std::unordered_map<std::string, metadata::MetadataValue>>
+        metadataByDocId;
+    if (config.includeMetadata && !documents.empty()) {
+        std::vector<std::int64_t> docIds;
+        docIds.reserve(documents.size());
+        for (const auto& doc : documents) {
+            docIds.push_back(doc.id);
+        }
+        auto metaRes = metadataRepo_->getMetadataForDocuments(docIds);
+        if (!metaRes) {
+            return metaRes.error();
+        }
+        metadataByDocId = std::move(metaRes.value());
+    }
+
+    // For large/full extractions, stream semantic_neighbor edges once instead of issuing
+    // 3*N individual SQLite queries (getEdgesFrom + getEdgesTo + getNodesByIds per document).
+    const bool useBulkNeighborScan = documents.size() >= 64 && !docNodeIdByHash.empty();
+    std::unordered_map<std::int64_t, std::vector<std::pair<std::int64_t, float>>> bulkOutgoing;
+    std::unordered_map<std::int64_t, std::vector<std::pair<std::int64_t, float>>> bulkIncoming;
+    if (useBulkNeighborScan) {
+        bulkOutgoing.reserve(docNodeIdByHash.size());
+        bulkIncoming.reserve(docNodeIdByHash.size());
+        auto streamRes = kgStore_->forEachEdgeByRelation(
+            std::string_view{"semantic_neighbor"},
+            [&](std::int64_t /*edgeId*/, std::int64_t srcNodeId, std::int64_t dstNodeId,
+                float weight) {
+                if (docHashByNodeId.contains(srcNodeId)) {
+                    bulkOutgoing[srcNodeId].emplace_back(dstNodeId, weight);
+                }
+                if (docHashByNodeId.contains(dstNodeId)) {
+                    bulkIncoming[dstNodeId].emplace_back(srcNodeId, weight);
+                }
+                return true;
+            });
+        if (!streamRes) {
+            return streamRes.error();
+        }
+        const std::size_t outLimit = std::max<std::size_t>(config.maxNeighborsPerDocument, 1);
+        const std::size_t inLimit = std::max<std::size_t>(config.maxNeighborsPerDocument * 4, 1);
+        std::unordered_set<std::int64_t> missingNeighborNodeIds;
+        for (auto& [srcId, edges] : bulkOutgoing) {
+            if (edges.size() > outLimit) {
+                std::partial_sort(
+                    edges.begin(), edges.begin() + static_cast<std::ptrdiff_t>(outLimit),
+                    edges.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+                edges.resize(outLimit);
+            }
+            for (const auto& [dstId, _] : edges) {
+                if (!docHashByNodeId.contains(dstId)) {
+                    missingNeighborNodeIds.insert(dstId);
+                }
+            }
+        }
+        for (auto& [dstId, edges] : bulkIncoming) {
+            if (edges.size() > inLimit) {
+                std::partial_sort(edges.begin(),
+                                  edges.begin() + static_cast<std::ptrdiff_t>(inLimit), edges.end(),
+                                  [](const auto& a, const auto& b) { return a.second > b.second; });
+                edges.resize(inLimit);
+            }
+        }
+        if (!missingNeighborNodeIds.empty()) {
+            std::vector<std::int64_t> allMissing(missingNeighborNodeIds.begin(),
+                                                 missingNeighborNodeIds.end());
+            std::vector<std::int64_t> idChunk;
+            idChunk.reserve(std::min(allMissing.size(), kBatchChunkSize));
+            for (std::size_t offset = 0; offset < allMissing.size(); offset += kBatchChunkSize) {
+                idChunk.assign(allMissing.begin() + static_cast<std::ptrdiff_t>(offset),
+                               allMissing.begin() +
+                                   static_cast<std::ptrdiff_t>(
+                                       std::min(allMissing.size(), offset + kBatchChunkSize)));
+                auto resolvedRes = kgStore_->getNodesByIds(idChunk);
+                if (!resolvedRes) {
+                    return resolvedRes.error();
+                }
+                for (const auto& node : resolvedRes.value()) {
+                    if (auto hash = documentHashFromNodeKey(node.nodeKey); hash.has_value()) {
+                        docHashByNodeId.emplace(node.id, std::move(*hash));
+                    }
+                }
+            }
+        }
+    }
+
     std::vector<TopologyDocumentInput> extracted;
     extracted.reserve(documents.size());
     for (const auto& document : documents) {
@@ -866,11 +980,12 @@ TopologyInputExtractor::extract(const TopologyExtractionConfig& config,
             }
         }
 
-        auto nodeResult = kgStore_->getNodeByKey(nodeKeyForDocumentHash(document.sha256Hash));
-        if (!nodeResult) {
-            return nodeResult.error();
+        std::optional<std::int64_t> docNodeId;
+        if (auto nodeIt = docNodeIdByHash.find(document.sha256Hash);
+            nodeIt != docNodeIdByHash.end()) {
+            docNodeId = nodeIt->second;
         }
-        if (!nodeResult.value().has_value()) {
+        if (!docNodeId.has_value()) {
             ++localStats.documentsMissingGraphNodes;
             if (config.requireGraphNode) {
                 continue;
@@ -918,13 +1033,13 @@ TopologyInputExtractor::extract(const TopologyExtractionConfig& config,
         input.embedding = std::move(composed);
 
         if (config.includeMetadata) {
-            auto metadataResult = metadataRepo_->getAllMetadata(document.id);
-            if (!metadataResult) {
-                return metadataResult.error();
-            }
-            input.metadata.reserve(metadataResult.value().size() + 3);
-            for (const auto& [key, value] : metadataResult.value()) {
-                input.metadata[key] = value.asString();
+            if (auto metaIt = metadataByDocId.find(document.id); metaIt != metadataByDocId.end()) {
+                input.metadata.reserve(metaIt->second.size() + 3);
+                for (const auto& [key, value] : metaIt->second) {
+                    input.metadata[key] = value.asString();
+                }
+            } else {
+                input.metadata.reserve(3);
             }
             input.metadata["mime_type"] = document.mimeType;
             input.metadata["file_name"] = document.fileName;
@@ -933,9 +1048,58 @@ TopologyInputExtractor::extract(const TopologyExtractionConfig& config,
         }
         resolveTypedInputFields(input, document, localStats);
 
-        if (nodeResult.value().has_value()) {
-            input.neighbors = collectNeighborsForDocument(
-                *kgStore_, nodeResult.value()->id, config.maxNeighborsPerDocument, &localStats);
+        if (docNodeId.has_value()) {
+            if (useBulkNeighborScan) {
+                const auto outIt = bulkOutgoing.find(*docNodeId);
+                const auto inIt = bulkIncoming.find(*docNodeId);
+                const std::size_t outCount = outIt != bulkOutgoing.end() ? outIt->second.size() : 0;
+                const std::size_t inCount = inIt != bulkIncoming.end() ? inIt->second.size() : 0;
+                localStats.neighborEdgesScanned += outCount + inCount;
+                if (outCount > 0) {
+                    std::unordered_map<std::int64_t, float> outgoingScores;
+                    outgoingScores.reserve(outCount);
+                    for (const auto& [dstId, weight] : outIt->second) {
+                        auto [it, inserted] = outgoingScores.emplace(dstId, weight);
+                        if (!inserted) {
+                            it->second = std::max(it->second, weight);
+                        }
+                    }
+                    std::unordered_set<std::int64_t> incomingIds;
+                    if (inCount > 0) {
+                        incomingIds.reserve(inCount);
+                        for (const auto& [srcId, _] : inIt->second) {
+                            incomingIds.insert(srcId);
+                        }
+                    }
+                    std::vector<TopologyNeighbor> neighbors;
+                    neighbors.reserve(outgoingScores.size());
+                    for (const auto& [dstId, score] : outgoingScores) {
+                        const auto hashIt = docHashByNodeId.find(dstId);
+                        if (hashIt == docHashByNodeId.end()) {
+                            continue;
+                        }
+                        neighbors.push_back(
+                            TopologyNeighbor{.documentHash = hashIt->second,
+                                             .score = score,
+                                             .reciprocal = incomingIds.contains(dstId)});
+                    }
+                    std::sort(neighbors.begin(), neighbors.end(),
+                              [](const TopologyNeighbor& lhs, const TopologyNeighbor& rhs) {
+                                  if (lhs.score != rhs.score) {
+                                      return lhs.score > rhs.score;
+                                  }
+                                  return lhs.documentHash < rhs.documentHash;
+                              });
+                    if (neighbors.size() > config.maxNeighborsPerDocument) {
+                        neighbors.resize(config.maxNeighborsPerDocument);
+                    }
+                    localStats.neighborsReturned += neighbors.size();
+                    input.neighbors = std::move(neighbors);
+                }
+            } else {
+                input.neighbors = collectNeighborsForDocument(
+                    *kgStore_, *docNodeId, config.maxNeighborsPerDocument, &localStats);
+            }
         }
 
         extracted.push_back(std::move(input));

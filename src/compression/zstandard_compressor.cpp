@@ -8,7 +8,6 @@
 #include <memory>
 #include <span>
 #include <vector>
-#include <yams/compression/compression_monitor.h>
 #include <yams/profiling.h>
 
 namespace yams::compression {
@@ -200,7 +199,9 @@ public:
 
         std::vector<std::byte> decompressed(decompressedSize);
 
-        auto start = std::chrono::steady_clock::now();
+        const bool debugLog = spdlog::should_log(spdlog::level::debug);
+        const auto start =
+            debugLog ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
         // Perform decompression
         const size_t result = ZSTD_decompressDCtx(dctx.get(), decompressed.data(),
@@ -210,14 +211,15 @@ public:
             return makeZstdError("ZSTD_decompressDCtx", result);
         }
 
-        auto end = std::chrono::steady_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
         // Resize to actual decompressed size
         decompressed.resize(result);
 
-        spdlog::debug("Zstandard decompressed {} bytes to {} bytes in {}μs", data.size(), result,
-                      duration.count());
+        if (debugLog) {
+            const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start);
+            spdlog::debug("Zstandard decompressed {} bytes to {} bytes in {}μs", data.size(),
+                          result, duration.count());
+        }
 
         return decompressed;
     }
@@ -242,39 +244,13 @@ ZstandardCompressor::~ZstandardCompressor() = default;
 Result<CompressionResult> ZstandardCompressor::compress(std::span<const std::byte> data,
                                                         uint8_t level) {
     YAMS_ZONE_SCOPED_N("ZstandardCompressor::compress");
-
-    // Start tracking
-    CompressionTracker tracker(CompressionAlgorithm::Zstandard, data.size());
-
-    auto result = pImpl->compress(data, level);
-
-    // Record result
-    if (result.has_value()) {
-        tracker.complete(result.value());
-    } else {
-        tracker.failed();
-    }
-
-    return result;
+    return pImpl->compress(data, level);
 }
 
 Result<std::vector<std::byte>> ZstandardCompressor::decompress(std::span<const std::byte> data,
                                                                size_t expectedSize) {
     YAMS_ZONE_SCOPED_N("ZstandardCompressor::decompress");
-
-    // Start tracking
-    DecompressionTracker tracker(CompressionAlgorithm::Zstandard, data.size());
-
-    auto result = pImpl->decompress(data, expectedSize);
-
-    // Record result
-    if (result.has_value()) {
-        tracker.complete(result.value().size());
-    } else {
-        tracker.failed();
-    }
-
-    return result;
+    return pImpl->decompress(data, expectedSize);
 }
 
 std::unique_ptr<IStreamingCompressor> ZstandardCompressor::createStreamCompressor(uint8_t level) {

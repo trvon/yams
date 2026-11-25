@@ -25,7 +25,6 @@
 #include <functional>
 #include <map>
 #include <optional>
-#include <regex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -344,7 +343,7 @@ struct SearchResponse {
     std::vector<std::string> contributingComponents;
 
     // Tiered search (PBI-075)
-    std::vector<std::string> skippedComponents; // Components skipped due to early termination
+    std::vector<std::string> skippedComponents; // Not run: zero weight, budget guard or no signal
     std::map<std::string, int64_t>
         componentTimingMicros;        // Per-component execution time (microseconds)
     bool usedEarlyTermination{false}; // True if later tiers were skipped

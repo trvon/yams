@@ -2832,9 +2832,12 @@ struct KgIngestRequest {
     // Optional: associate all entities with a document
     std::string documentHash; // If set, links entities to this document
 
-    // Options
-    bool skipExistingNodes{true}; // Skip nodes that already exist (by nodeKey)
-    bool skipExistingEdges{true}; // Skip edges that already exist (by src/dst/relation)
+    // Options. Default is upsert: existing nodes/edges are refreshed and counted as updated.
+    bool skipExistingNodes{false}; // Leave nodes that already exist (by nodeKey) untouched
+    bool skipExistingEdges{false}; // Leave edges that already exist (src/dst/relation) untouched
+    // Namespace the request acts for (appended; older peers omit it). Aliases may only be added
+    // to nodes owned by this namespace, or to un-namespaced nodes when it is empty.
+    std::string ns;
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -2854,7 +2857,7 @@ struct KgIngestRequest {
         for (const auto& alias : aliases) {
             alias.serialize(ser);
         }
-        ser << documentHash << skipExistingNodes << skipExistingEdges;
+        ser << documentHash << skipExistingNodes << skipExistingEdges << ns;
     }
 
     template <typename Deserializer>
@@ -2912,6 +2915,9 @@ struct KgIngestRequest {
             req.skipExistingEdges = r.value();
         else
             return r.error();
+
+        if (auto r = deser.readString(); r)
+            req.ns = std::move(r.value());
 
         return req;
     }
@@ -3193,6 +3199,34 @@ struct UnlinkPathRequest {
     }
 };
 
+// Scoped graph removal. A distinct operation, never a KgIngestRequest flag: an older daemon
+// would ignore the flag and ingest. The namespace is required; there is no relation-only form.
+struct KgRemoveRequest {
+    std::string ns;       // Matches properties.ns on nodes and edges. Must not be empty.
+    std::string relation; // Optional: only edges with this relation (nodes are kept).
+    bool dryRun{false};
+    // Also remove other owners' edges incident to the namespace's nodes. Without it a removal
+    // that would touch any such edge is refused and deletes nothing.
+    bool includeForeignEdges{false};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << ns << relation << dryRun << includeForeignEdges;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<KgRemoveRequest> deserialize(Deserializer& deser) {
+        KgRemoveRequest request;
+        YAMS_TRY(ipc_detail::readField(deser, request.ns));
+        YAMS_TRY(ipc_detail::readField(deser, request.relation));
+        YAMS_TRY(ipc_detail::readField(deser, request.dryRun));
+        YAMS_TRY(ipc_detail::readField(deser, request.includeForeignEdges));
+        return request;
+    }
+};
+
 // Variant type for all requests
 using Request = std::variant<
     SearchRequest, GetRequest, GetInitRequest, GetChunkRequest, GetEndRequest, DeleteRequest,
@@ -3206,6 +3240,6 @@ using Request = std::variant<
     RestoreCollectionRequest, RestoreSnapshotRequest, GraphQueryRequest, GraphExploreRequest,
     GraphSymbolLookupRequest, GraphTraceRequest, GraphRepairRequest, GraphValidateRequest,
     KgIngestRequest, MetadataValueCountsRequest, MemorySyncRequest, RepairRequest,
-    UnlinkPathRequest>;
+    UnlinkPathRequest, KgRemoveRequest>;
 
 } // namespace yams::daemon

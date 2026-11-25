@@ -1,7 +1,7 @@
 #include <yams/search/search_engine.h>
 
-#include "../../include/yams/search/evidence_search_pipeline.h"
 #include <yams/search/bandit_reward.h>
+#include <yams/search/evidence_search_pipeline.h>
 
 #include <spdlog/spdlog.h>
 #include "concept_boost_internal.h"
@@ -12,6 +12,8 @@
 #include "search_lexical_pipeline_internal.h"
 #include "search_vector_pipeline_internal.h"
 #include "search_vector_stage.h"
+#include <yams/config/detail/config_parse_utils.h>
+#include <yams/core/assert.hpp>
 #include <yams/core/cpp23_features.hpp>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/crypto/hasher.h>
@@ -408,11 +410,7 @@ std::vector<float> computeReciprocalCommunitySupport(
 bool envFlagEnabled(const char* name) {
     if (const char* env = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe) — read-only; env
                                                // vars not modified concurrently
-        std::string value(env);
-        std::transform(value.begin(), value.end(), value.begin(), [](char c) {
-            return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        });
-        return value == "1" || value == "true" || value == "yes" || value == "on";
+        return yams::config::detail::parseTomlBool(env).value_or(false);
     }
     return false;
 }
@@ -1078,6 +1076,13 @@ public:
         return lookup.value().snapshot != nullptr;
     }
 
+    void adoptTopologySnapshotCache(const Impl& previous) {
+        if (previous.topologySnapshotCache_ && metadataRepo_ == previous.metadataRepo_ &&
+            kgStore_ == previous.kgStore_) {
+            topologySnapshotCache_ = previous.topologySnapshotCache_;
+        }
+    }
+
     const SearchEngine::Statistics& getStatistics() const { return stats_; }
 
     void resetStatistics() {
@@ -1509,7 +1514,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::optional<std::vector<float>> queryEmbedding;
     const bool needsEmbedding =
         (workingConfig.vectorWeight > 0.0f || workingConfig.entityVectorWeight > 0.0f);
-    std::future<std::vector<float>> embeddingFuture;
+    std::shared_future<std::pair<std::vector<float>, int64_t>> embeddingFuture;
     std::chrono::steady_clock::time_point embStart;
     bool embeddingStarted = false;
     bool embeddingAwaited = false;
@@ -1525,11 +1530,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             embStart = std::chrono::steady_clock::now();
             // The task owns its inputs so a canceled search can stop waiting for it.
             embeddingFuture = postWork(
-                [generator = embeddingGen_, queryText = query]() {
-                    YAMS_ZONE_SCOPED_N("embedding::generate_async");
-                    return generator->generateEmbedding(queryText);
-                },
-                executor_);
+                                  [generator = embeddingGen_, queryText = query]() {
+                                      YAMS_ZONE_SCOPED_N("embedding::generate_async");
+                                      const auto workerStart = std::chrono::steady_clock::now();
+                                      auto vec = generator->generateEmbedding(queryText);
+                                      const auto elapsedUs =
+                                          std::chrono::duration_cast<std::chrono::microseconds>(
+                                              std::chrono::steady_clock::now() - workerStart)
+                                              .count();
+                                      return std::make_pair(std::move(vec), elapsedUs);
+                                  },
+                                  executor_)
+                                  .share();
             embeddingStarted = true;
             embeddingStatus = "launched";
         }
@@ -1599,9 +1611,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                         return;
                     }
                 }
-                auto embResult = embeddingFuture.get();
+                const auto& [embResult, embWorkerUs] = embeddingFuture.get();
+                componentTiming["embedding"] = embWorkerUs;
                 if (!embResult.empty()) {
-                    queryEmbedding = std::move(embResult);
+                    queryEmbedding = embResult;
                     embeddingStatus = "ready";
                 } else {
                     embeddingStatus = "empty_result";
@@ -1611,14 +1624,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 embeddingFailed = true;
                 embeddingStatus = "failed";
                 auto embEnd = std::chrono::steady_clock::now();
-                traceCollector.markStageFailure(
-                    "embedding",
+                componentTiming["embedding"] =
                     std::chrono::duration_cast<std::chrono::microseconds>(embEnd - embStart)
-                        .count());
+                        .count();
+                traceCollector.markStageFailure("embedding", componentTiming["embedding"]);
             }
-            auto embEnd = std::chrono::steady_clock::now();
-            componentTiming["embedding"] =
-                std::chrono::duration_cast<std::chrono::microseconds>(embEnd - embStart).count();
             if (!embeddingFailed) {
                 traceCollector.markValueStageResult("embedding", queryEmbedding.has_value(),
                                                     componentTiming["embedding"]);
@@ -1866,10 +1876,15 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         YAMS_ZONE_SCOPED_N("search_engine::fanout_parallel");
         SearchCandidateFanout fanout;
 
-        auto schedule = [&]([[maybe_unused]] const char* name, float weight,
+        auto schedule = [&](const char* name, float weight,
                             [[maybe_unused]] std::atomic<uint64_t>& queryCount,
                             [[maybe_unused]] std::atomic<uint64_t>& avgTime,
                             auto&& fn) -> std::future<Result<std::vector<ComponentResult>>> {
+            if (weight <= 0.0f) {
+                // A disabled source is skipped, not degraded (SearchObservability).
+                skipped.push_back(name);
+                traceCollector.markStageSkipped(name, "disabled_by_weight");
+            }
             return detail::scheduleComponent(weight, executor_, std::forward<decltype(fn)>(fn));
         };
 
@@ -1903,6 +1918,64 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                          &textExpansionStats, &graphExpansionTerms,
                                          &simeonRouteRecipe);
                 });
+
+            // Overlap global vector retrieval with Tier 1 text when vector does not narrow to
+            // Tier 1 candidates (Disabled / Shadow / Augment all run the same global vector leg).
+            // If weak-query boost changes effectiveVectorMaxResults after Tier 1, Tier 2 falls
+            // back to a fresh query so ranking stays bit-identical.
+            struct PrefetchedGlobalVector {
+                SearchEngineConfig config;
+                bool relaxedRetryEnabled{false};
+                RelaxedVectorRetryStats relaxedRetry;
+                vector::VectorSearchDiagnostics diag;
+                Result<std::vector<ComponentResult>> results{std::vector<ComponentResult>{}};
+                bool executed{false};
+            };
+            std::shared_ptr<PrefetchedGlobalVector> prefetchedGlobalVector;
+            std::future<void> prefetchedGlobalVectorFuture;
+            std::size_t prefetchedVectorLimit = 0;
+            const bool canPrefetchGlobalVector =
+                executor_ != nullptr && embeddingStarted && !delayEmbeddingUntilTier1 &&
+                !workingConfig.tieredNarrowVectorSearch && workingConfig.vectorWeight > 0.0f &&
+                (workingConfig.textWeight > 0.0f || workingConfig.simeonTextWeight > 0.0f) &&
+                vectorDb_ != nullptr &&
+                (topologyRoutingMode == SearchEngineConfig::TopologyRoutingMode::Disabled ||
+                 workingConfig.topologyVectorPolicy ==
+                     SearchEngineConfig::TopologyVectorPolicy::Shadow ||
+                 workingConfig.topologyVectorPolicy ==
+                     SearchEngineConfig::TopologyVectorPolicy::Augment);
+            if (canPrefetchGlobalVector) {
+                prefetchedVectorLimit =
+                    semanticBudgetActive
+                        ? std::min(workingConfig.vectorMaxResults,
+                                   std::max<std::size_t>(
+                                       1, workingConfig.semanticBudgetVectorMaxResults))
+                        : workingConfig.vectorMaxResults;
+                prefetchedGlobalVector = std::make_shared<PrefetchedGlobalVector>();
+                prefetchedGlobalVector->config = workingConfig;
+                prefetchedGlobalVector->relaxedRetryEnabled = relaxedVectorRetryEnabled;
+                prefetchedGlobalVectorFuture = postWork(
+                    [embFuture = embeddingFuture, state = prefetchedGlobalVector,
+                     repo = metadataRepo_, vdb = vectorDb_, limit = prefetchedVectorLimit,
+                     expectedDim = vectorDbEmbeddingDim]() {
+                        YAMS_ZONE_SCOPED_N("component::vector_prefetch");
+                        try {
+                            const auto& [emb, _] = embFuture.get();
+                            if (emb.empty() || (expectedDim > 0 && emb.size() != expectedDim)) {
+                                return;
+                            }
+                            auto queryFn = makeQueryVectorWithRelaxedRetry(
+                                repo, vdb, state->config, state->relaxedRetryEnabled,
+                                state->relaxedRetry);
+                            state->results = queryFn(emb, limit, nullptr, &state->diag,
+                                                     vector::CandidateFilterMode::BackendDefault);
+                            state->executed = true;
+                        } catch (...) {
+                            state->executed = false;
+                        }
+                    },
+                    executor_);
+            }
 
             fanout.path =
                 schedule("path", workingConfig.pathTreeWeight, stats_.pathTreeQueries,
@@ -2257,9 +2330,43 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 vectorStageState->relaxedRetryEnabled = relaxedVectorRetryEnabled;
                 detail::VectorStageRequest vectorStageRequest;
                 vectorStageRequest.queryEmbedding = queryEmbedding.value();
-                vectorStageRequest.queryVector = makeQueryVectorWithRelaxedRetry(
+                auto baseQueryVector = makeQueryVectorWithRelaxedRetry(
                     metadataRepo_, vectorDb_, vectorStageState->config,
                     vectorStageState->relaxedRetryEnabled, vectorStageState->relaxedRetry);
+                const bool adoptPrefetch = prefetchedGlobalVectorFuture.valid() &&
+                                           prefetchedGlobalVector != nullptr &&
+                                           effectiveVectorMaxResults == prefetchedVectorLimit;
+                if (adoptPrefetch) {
+                    auto sharedPrefetchFuture = std::make_shared<std::future<void>>(
+                        std::move(prefetchedGlobalVectorFuture));
+                    vectorStageRequest.queryVector =
+                        [baseQueryVector = std::move(baseQueryVector),
+                         prefetchFuture = std::move(sharedPrefetchFuture),
+                         prefetchState = prefetchedGlobalVector, stageState = vectorStageState,
+                         prefetchLimit = prefetchedVectorLimit](
+                            const std::vector<float>& emb, std::size_t limit,
+                            const std::unordered_set<std::string>* candidates,
+                            vector::VectorSearchDiagnostics* diagnostics,
+                            vector::CandidateFilterMode candidateFilterMode)
+                        -> Result<std::vector<ComponentResult>> {
+                        if (candidates == nullptr && limit == prefetchLimit &&
+                            candidateFilterMode == vector::CandidateFilterMode::BackendDefault &&
+                            prefetchFuture && prefetchFuture->valid()) {
+                            prefetchFuture->get();
+                            if (prefetchState->executed) {
+                                stageState->relaxedRetry = prefetchState->relaxedRetry;
+                                if (diagnostics != nullptr) {
+                                    *diagnostics = prefetchState->diag;
+                                }
+                                return std::move(prefetchState->results);
+                            }
+                        }
+                        return baseQueryVector(emb, limit, candidates, diagnostics,
+                                               candidateFilterMode);
+                    };
+                } else {
+                    vectorStageRequest.queryVector = std::move(baseQueryVector);
+                }
                 vectorStageRequest.baselineCandidates = baselineTier2Candidates;
                 vectorStageRequest.shadow = topologyVectorShadow;
                 vectorStageRequest.augment = topologyVectorAugment;
@@ -2491,6 +2598,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                  std::atomic<uint64_t>& queryCount,
                                  std::atomic<uint64_t>& avgTime) {
             if (weight <= 0.0f) {
+                skipped.push_back(name);
                 traceCollector.markStageSkipped(name, "disabled_by_weight");
                 return;
             }
@@ -2948,9 +3056,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
         response.results = std::move(fused.value());
     }
-    if (!response.results.empty()) {
-        postFusionSnapshot = response.results;
-    }
+    const std::size_t postFusionResultCount = response.results.size();
+    std::vector<std::string> postFusionAllDocIds = collectRankedResultDocIds(response.results);
+    YAMS_DCHECK(postFusionAllDocIds.size() == postFusionResultCount,
+                "post-fusion doc ID count must match result count");
+    YAMS_PLOT("search.post_fusion_results", postFusionResultCount);
     if (!topologyMedoidHashes.empty() && workingConfig.topologyMedoidBoost > 0.0f &&
         !response.results.empty()) {
         bool needsSort = false;
@@ -2971,6 +3081,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
     if (stageTraceEnabled) {
         postFusionSnapshot = response.results;
+        postFusionAllDocIds = collectRankedResultDocIds(postFusionSnapshot);
         std::vector<ComponentResult> graphlessComponentResults;
         graphlessComponentResults.reserve(allComponentResults.size());
         for (const auto& comp : allComponentResults) {
@@ -3393,9 +3504,65 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 return detail::staticEmbeddingScores(*table, *repo, q, hashes);
             };
         }
+        auto* simeonLex = simeonLexical_.get();
         auto lexical = detail::applyLexicalDeepRerank(
             response.results, query, workingConfig,
-            [repo](const std::vector<std::string>& terms, const std::vector<std::string>& hashes) {
+            [repo, simeonLex, &query, &results = response.results,
+             arm = workingConfig.simeonBanditArm](const std::vector<std::string>& terms,
+                                                  const std::vector<std::string>& hashes)
+                -> Result<std::unordered_map<std::string, double>> {
+                // Prefer the in-RAM Simeon lexical index (reusing the cached query score vector
+                // from queryFullTextPipeline) to avoid SQLite FTS5's full posting-list scan in
+                // bm25ForDocuments. Fall back to FTS5 if Simeon is unavailable or any doc id is
+                // unpopulated.
+                if (simeonLex && simeonLex->ready() && !hashes.empty()) {
+                    std::vector<std::int64_t> docIds(hashes.size(), 0);
+                    std::vector<std::string> missingHashes;
+                    std::vector<std::size_t> missingIndices;
+                    for (std::size_t i = 0; i < hashes.size(); ++i) {
+                        if (i < results.size() && results[i].document.sha256Hash == hashes[i] &&
+                            results[i].document.id > 0) {
+                            docIds[i] = results[i].document.id;
+                        } else {
+                            missingHashes.push_back(hashes[i]);
+                            missingIndices.push_back(i);
+                        }
+                    }
+                    if (!missingHashes.empty()) {
+                        auto resolved = repo->batchGetDocumentsByHash(missingHashes);
+                        if (resolved) {
+                            const auto& docMap = resolved.value();
+                            for (std::size_t m = 0; m < missingHashes.size(); ++m) {
+                                if (auto it = docMap.find(missingHashes[m]);
+                                    it != docMap.end() && it->second.id > 0) {
+                                    const std::size_t idx = missingIndices[m];
+                                    docIds[idx] = it->second.id;
+                                    if (idx < results.size() &&
+                                        results[idx].document.sha256Hash == missingHashes[m]) {
+                                        results[idx].document.id = it->second.id;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    const bool allResolved = std::all_of(docIds.begin(), docIds.end(),
+                                                         [](std::int64_t id) { return id > 0; });
+                    if (allResolved) {
+                        SimeonLexicalBackend::QuerySession session(*simeonLex, query, arm);
+                        auto scored = session.score(docIds);
+                        if (scored && scored.value().scores.size() == docIds.size()) {
+                            std::unordered_map<std::string, double> out;
+                            out.reserve(docIds.size());
+                            for (std::size_t i = 0; i < docIds.size(); ++i) {
+                                if (scored.value().scores[i] > 0.0f) {
+                                    out.emplace(hashes[i],
+                                                static_cast<double>(scored.value().scores[i]));
+                                }
+                            }
+                            return out;
+                        }
+                    }
+                }
                 return repo->bm25ForDocuments(terms, hashes);
             },
             semanticScorer);
@@ -3449,14 +3616,16 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (!outcome.errorMessage.empty()) {
             response.debugStats["cross_rerank_error"] = outcome.errorMessage;
         }
-        for (const auto& docTrace : outcome.docTraces) {
-            rerankWindowTrace.push_back({
-                {"doc_id", documentIdForTrace(docTrace.filePath, docTrace.documentHash)},
-                {"original_score", docTrace.originalScore},
-                {"rerank_score", docTrace.rerankScore},
-                {"rerank_norm", docTrace.rerankNorm},
-                {"final_score", docTrace.finalScore},
-            });
+        if (stageTraceEnabled) {
+            for (const auto& docTrace : outcome.docTraces) {
+                rerankWindowTrace.push_back({
+                    {"doc_id", documentIdForTrace(docTrace.filePath, docTrace.documentHash)},
+                    {"original_score", docTrace.originalScore},
+                    {"rerank_score", docTrace.rerankScore},
+                    {"rerank_norm", docTrace.rerankNorm},
+                    {"final_score", docTrace.finalScore},
+                });
+            }
         }
 
         switch (outcome.status) {
@@ -3498,7 +3667,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     }
     response.debugStats["compact_pre_fusion_count"] = std::to_string(preFusionDocIds.size());
     response.debugStats["compact_post_fusion_count"] = std::to_string(
-        postFusionSnapshot.empty() ? response.results.size() : postFusionSnapshot.size());
+        postFusionResultCount == 0 ? response.results.size() : postFusionResultCount);
     response.debugStats["compact_rerank_window_count"] = std::to_string(compactRerankWindow);
     response.debugStats["compact_final_count"] = std::to_string(response.results.size());
     response.debugStats["compact_effective_vector_max_results"] =
@@ -3936,7 +4105,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     response.debugStats.try_emplace(
         "graph_community_weight",
         fmt::format("{:.4f}", std::clamp(workingConfig.graphCommunityWeight, 0.0f, 1.0f)));
-    response.debugStats["rerank_window_trace_json"] = rerankWindowTrace.dump();
+    if (stageTraceEnabled) {
+        response.debugStats["rerank_window_trace_json"] = rerankWindowTrace.dump();
+    }
     if (workingConfig.semanticRescueSlots > 0 && !response.results.empty()) {
         spdlog::debug(
             "[semantic_rescue] final_count={} target={} rate={:.3f} min_vector_score={:.4f}",
@@ -3991,8 +4162,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     };
     observability.applyComponentStatus(response);
 
-    const std::vector<std::string> postFusionAllDocIds =
-        collectRankedResultDocIds(postFusionSnapshot);
     const std::vector<std::string> fusionDroppedDocIds =
         setDifferenceIds(preFusionDocIds, postFusionAllDocIds);
     fusionDroppedDocCount = fusionDroppedDocIds.size();
@@ -4306,18 +4475,20 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         populateRuntimeTelemetrySignals(telemetry, stageSummary, fusionSummary);
 
         tuner_->observe(telemetry);
-        const auto tunerState = tuner_->adaptiveStateToJson();
         response.debugStats["tuner_adaptive_active"] = "1";
-        response.debugStats["tuner_decision_reason"] =
-            tunerState.value("last_decision", std::string{"unknown"});
-        response.debugStats["tuner_adjustments_json"] = tunerState.dump();
-        response.debugStats["tuner_runtime_config_json"] = tuner_->getParams().toJson().dump();
-        // R3: emit the stable bucket key so users can see which context
-        // bucket drove a given query's policy decision. The rules policy
-        // ignores the bucket; R5's orchestrator reads it for per-bucket
-        // handoff gating.
-        response.debugStats["tuner_context_bucket"] = bucketize(tuningCtx);
-        response.debugStats["tuner_backend"] = "rules";
+        if (stageTraceEnabled) {
+            const auto tunerState = tuner_->adaptiveStateToJson();
+            response.debugStats["tuner_decision_reason"] =
+                tunerState.value("last_decision", std::string{"unknown"});
+            response.debugStats["tuner_adjustments_json"] = tunerState.dump();
+            response.debugStats["tuner_runtime_config_json"] = tuner_->getParams().toJson().dump();
+            // R3: emit the stable bucket key so users can see which context
+            // bucket drove a given query's policy decision. The rules policy
+            // ignores the bucket; R5's orchestrator reads it for per-bucket
+            // handoff gating.
+            response.debugStats["tuner_context_bucket"] = bucketize(tuningCtx);
+            response.debugStats["tuner_backend"] = "rules";
+        }
     } else {
         response.debugStats["tuner_adaptive_active"] = "0";
     }
@@ -4937,6 +5108,12 @@ const SearchEngineConfig& SearchEngine::getConfig() const {
 
 Result<bool> SearchEngine::prewarmTopologyRouting() {
     return pImpl_->prewarmTopologyRouting();
+}
+
+void SearchEngine::adoptTopologySnapshotCache(const SearchEngine& previous) {
+    if (pImpl_ && previous.pImpl_) {
+        pImpl_->adoptTopologySnapshotCache(*previous.pImpl_);
+    }
 }
 
 const SearchEngine::Statistics& SearchEngine::getStatistics() const {

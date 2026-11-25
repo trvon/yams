@@ -84,6 +84,14 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
         // (path/entity/tag still weighted despite zero stage contribution).
         auto statsResult = metadataRepo_->getCorpusStats();
         if (statsResult.has_value()) {
+            // Entity vectors live in the vector DB, which getCorpusStats() does not read.
+            // Leave the count unknown (-1) when the vector DB cannot answer.
+            if (vectorDatabase_) {
+                if (auto entityCount = vectorDatabase_->getEntityVectorCountChecked()) {
+                    statsResult.value().entityVectorCount =
+                        static_cast<int64_t>(entityCount.value());
+                }
+            }
             runtimeTuner = std::make_shared<SearchTuner>(statsResult.value());
             // Prefer tuner config (dead-source gates already applied) over the
             // raw BuildOptions defaults sitting in options.config.
@@ -137,6 +145,22 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
         // seedRuntimeConfig re-applies dead-source gates; push the gated view
         // back into cfg so the engine and tuner share one weight package.
         cfg = runtimeTuner->getConfig();
+        if (options.config.lexicalFloorTopNOverride.has_value()) {
+            cfg.lexicalFloorTopN = *options.config.lexicalFloorTopNOverride;
+            cfg.lexicalFloorTopNOverride = options.config.lexicalFloorTopNOverride;
+        }
+        if (options.config.vectorWeightOverride.has_value() && !environmentPins.vector) {
+            cfg.vectorWeight = *options.config.vectorWeightOverride;
+            cfg.vectorWeightOverride = options.config.vectorWeightOverride;
+        }
+        if (options.config.lexicalRerankDepthOverride.has_value()) {
+            cfg.lexicalRerankDepth = *options.config.lexicalRerankDepthOverride;
+            cfg.lexicalRerankDepthOverride = options.config.lexicalRerankDepthOverride;
+        }
+        if (options.config.lexicalRerankWeightOverride.has_value()) {
+            cfg.lexicalRerankWeight = *options.config.lexicalRerankWeightOverride;
+            cfg.lexicalRerankWeightOverride = options.config.lexicalRerankWeightOverride;
+        }
         if (!options.tunerStatePath.empty()) {
             auto loaded = runtimeTuner->loadAdaptiveState(options.tunerStatePath);
             if (!loaded) {

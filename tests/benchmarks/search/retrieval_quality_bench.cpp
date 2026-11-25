@@ -6591,11 +6591,59 @@ struct BenchFixture {
                     }
                     yams::bench::writeTopologyDisabledEmbeddingSelection(configOut,
                                                                          topologyDisabled);
-                    if (envSet(simeonOuterMaxSimEnv)) {
+                    const auto benchFusionStrategy =
+                        yams::config::getenv_optional("YAMS_BENCH_FUSION_STRATEGY");
+                    const auto benchRerankTopK =
+                        yams::config::getenv_optional("YAMS_BENCH_RERANK_TOP_K");
+                    const auto benchRerankSnippetChars =
+                        yams::config::getenv_optional("YAMS_BENCH_RERANK_SNIPPET_MAX_CHARS");
+                    const auto benchLexicalFloorTopN =
+                        yams::config::getenv_optional("YAMS_BENCH_LEXICAL_FLOOR_TOP_N");
+                    const auto benchVectorWeight =
+                        yams::config::getenv_optional("YAMS_BENCH_VECTOR_WEIGHT");
+                    const auto benchLexicalRerankDepth =
+                        yams::config::getenv_optional("YAMS_BENCH_LEXICAL_RERANK_DEPTH");
+                    const auto benchLexicalRerankWeight =
+                        yams::config::getenv_optional("YAMS_BENCH_LEXICAL_RERANK_WEIGHT");
+                    if (envSet(simeonOuterMaxSimEnv) ||
+                        (benchFusionStrategy && !benchFusionStrategy->empty()) ||
+                        (benchRerankTopK && !benchRerankTopK->empty()) ||
+                        (benchRerankSnippetChars && !benchRerankSnippetChars->empty()) ||
+                        (benchLexicalFloorTopN && !benchLexicalFloorTopN->empty()) ||
+                        (benchVectorWeight && !benchVectorWeight->empty()) ||
+                        (benchLexicalRerankDepth && !benchLexicalRerankDepth->empty()) ||
+                        (benchLexicalRerankWeight && !benchLexicalRerankWeight->empty())) {
                         configOut << "\n[search]\n";
-                        configOut << "simeon_rerank_outer_maxsim = "
-                                  << (envTruthy(simeonOuterMaxSimEnv->c_str()) ? "true" : "false")
-                                  << "\n";
+                        if (envSet(simeonOuterMaxSimEnv)) {
+                            configOut
+                                << "simeon_rerank_outer_maxsim = "
+                                << (envTruthy(simeonOuterMaxSimEnv->c_str()) ? "true" : "false")
+                                << "\n";
+                        }
+                        if (benchFusionStrategy && !benchFusionStrategy->empty()) {
+                            configOut << "fusion_strategy = \"" << *benchFusionStrategy << "\"\n";
+                        }
+                        if (benchRerankTopK && !benchRerankTopK->empty()) {
+                            configOut << "rerank_top_k = " << *benchRerankTopK << "\n";
+                        }
+                        if (benchRerankSnippetChars && !benchRerankSnippetChars->empty()) {
+                            configOut << "rerank_snippet_max_chars = " << *benchRerankSnippetChars
+                                      << "\n";
+                        }
+                        if (benchLexicalFloorTopN && !benchLexicalFloorTopN->empty()) {
+                            configOut << "lexical_floor_top_n = " << *benchLexicalFloorTopN << "\n";
+                        }
+                        if (benchVectorWeight && !benchVectorWeight->empty()) {
+                            configOut << "vector_weight = " << *benchVectorWeight << "\n";
+                        }
+                        if (benchLexicalRerankDepth && !benchLexicalRerankDepth->empty()) {
+                            configOut << "lexical_rerank_depth = " << *benchLexicalRerankDepth
+                                      << "\n";
+                        }
+                        if (benchLexicalRerankWeight && !benchLexicalRerankWeight->empty()) {
+                            configOut << "lexical_rerank_weight = " << *benchLexicalRerankWeight
+                                      << "\n";
+                        }
                     }
                     configOut << "\n[vector_database]\n";
                     configOut << "search_engine = \"" << g_benchmark_search_engine << "\"\n";

@@ -114,12 +114,12 @@ struct StoreFixture {
         return node.value().has_value();
     }
 
+    // The payload stored under `nodeKey`, reassembled from its chunks.
     std::string nodeProperties(const std::string& nodeKey) {
-        auto node = kgStore->getNodeByKey(nodeKey);
-        REQUIRE(node.has_value());
-        REQUIRE(node.value().has_value());
-        REQUIRE(node.value()->properties.has_value());
-        return *node.value()->properties;
+        auto payload = MetadataKgTopologyArtifactStore::readStoredPayload(*kgStore, nodeKey);
+        REQUIRE(payload.has_value());
+        REQUIRE(payload.value().has_value());
+        return *payload.value();
     }
 
     std::filesystem::path dbPath;
@@ -511,8 +511,8 @@ TEST_CASE("MetadataKgTopologyArtifactStore persists roads in a sidecar node and 
     REQUIRE(node.has_value());
     REQUIRE(node.value().has_value());
     CHECK(node.value()->type == std::string(kRoadNodeType));
-    REQUIRE(node.value()->properties.has_value());
-    auto sidecar = deserializeTopologyRoadSidecarCompressed(*node.value()->properties);
+    auto sidecar =
+        deserializeTopologyRoadSidecarCompressed(fixture.nodeProperties(roadNodeKey("snap-1")));
     REQUIRE(sidecar.has_value());
     CHECK(sidecar.value().snapshotId == "snap-1");
     CHECK(sidecar.value().maxPerCluster == 2);

@@ -293,8 +293,6 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
     // Create builder and configure
     auto builder = std::make_shared<yams::search::SearchEngineBuilder>();
     builder->withMetadataRepo(std::move(metadataRepo));
-    // Capture kgStore for the entity-export callback before it moves into the builder.
-    auto entityExportKg = kgStore;
     if (kgStore)
         builder->withKGStore(std::move(kgStore));
     if (vectorEnabled && vectorDatabase)
@@ -406,48 +404,8 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             // Test env: YAMS_SIMEON_STRATEGY_ROUTER_ENABLED=1
             lexicalCfg.strategy_router_enabled = bm25Policy.strategyRouterEnabled.value_or(false);
 
-            // Enable concept mining and wire its entity export to the KG
-            // store so the graph reranker can match query concepts against
-            // per-document concept bigrams.
+            // Concept mining blends corpus bigram concepts into BM25 scores at query time.
             lexicalCfg.concept_mining_enabled = true;
-            // TODO: concept mining currently invokes mine_concepts() in bulk
-            // without a per-document hook.  The callback is wired here but
-            // not yet called during build; reconnect when concept mining
-            // supports per-document export.
-            if (entityExportKg) {
-                auto capturedKg = entityExportKg;
-                lexicalCfg.entity_callback =
-                    [capturedKg](std::int64_t docId, std::string entityText, float confidence) {
-                        thread_local std::int64_t tlsCurrentDoc = -1;
-                        thread_local std::vector<metadata::DocEntity> tlsBuffer;
-                        constexpr size_t kFlushThreshold = 128;
-                        if (tlsCurrentDoc != docId && !tlsBuffer.empty()) {
-                            auto br = capturedKg->beginWriteBatch();
-                            if (br) {
-                                auto& batch = *br.value();
-                                batch.addDocEntities(std::move(tlsBuffer));
-                                batch.commit();
-                            }
-                            tlsBuffer.clear();
-                        }
-                        tlsCurrentDoc = docId;
-                        metadata::DocEntity docEnt;
-                        docEnt.documentId = docId;
-                        docEnt.entityText = std::move(entityText);
-                        docEnt.confidence = confidence;
-                        docEnt.extractor = "simeon_concept";
-                        tlsBuffer.push_back(std::move(docEnt));
-                        if (tlsBuffer.size() >= kFlushThreshold) {
-                            auto br = capturedKg->beginWriteBatch();
-                            if (br) {
-                                auto& batch = *br.value();
-                                batch.addDocEntities(std::move(tlsBuffer));
-                                batch.commit();
-                            }
-                            tlsBuffer.clear();
-                        }
-                    };
-            }
 
             opts.simeonLexicalConfig = lexicalCfg;
         }
@@ -648,10 +606,61 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             opts.config.rrfK = std::clamp(*tp.rrfK, 1.0f, 10000.0f);
             spdlog::info("SearchEngine rrfK applied via config: {:.3f}", opts.config.rrfK);
         }
+        if (tp.fusionStrategy) {
+            std::string mode = *tp.fusionStrategy;
+            std::transform(mode.begin(), mode.end(), mode.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (mode == "convex_min_max" || mode == "convex") {
+                opts.config.fusionStrategy =
+                    yams::search::SearchEngineConfig::FusionStrategy::ConvexMinMax;
+            } else {
+                opts.config.fusionStrategy = yams::search::SearchEngineConfig::FusionStrategy::Rrf;
+            }
+            spdlog::info("SearchEngine fusionStrategy applied via config: {}",
+                         yams::search::SearchEngineConfig::fusionStrategyToString(
+                             opts.config.fusionStrategy));
+        }
+        if (tp.rerankTopK) {
+            opts.config.rerankTopK = *tp.rerankTopK;
+            spdlog::info("SearchEngine rerankTopK applied via config: {}", opts.config.rerankTopK);
+        }
+        if (tp.rerankSnippetMaxChars) {
+            opts.config.rerankSnippetMaxChars =
+                std::clamp<std::size_t>(*tp.rerankSnippetMaxChars, 64, 4096);
+            spdlog::info("SearchEngine rerankSnippetMaxChars applied via config: {}",
+                         opts.config.rerankSnippetMaxChars);
+        }
+        if (tp.lexicalFloorTopN) {
+            opts.config.lexicalFloorTopN = *tp.lexicalFloorTopN;
+            opts.config.lexicalFloorTopNOverride = *tp.lexicalFloorTopN;
+            spdlog::info("SearchEngine lexicalFloorTopN applied via config: {}",
+                         opts.config.lexicalFloorTopN);
+        }
+        if (tp.vectorWeight) {
+            const float clamped = std::clamp(*tp.vectorWeight, 0.0f, 10.0f);
+            opts.config.vectorWeight = clamped;
+            opts.config.vectorWeightOverride = clamped;
+            spdlog::info("SearchEngine vectorWeight applied via config: {:.3f}",
+                         opts.config.vectorWeight);
+        }
+        if (tp.lexicalRerankDepth) {
+            opts.config.lexicalRerankDepth = *tp.lexicalRerankDepth;
+            opts.config.lexicalRerankDepthOverride = *tp.lexicalRerankDepth;
+            spdlog::info("SearchEngine lexicalRerankDepth applied via config: {}",
+                         opts.config.lexicalRerankDepth);
+        }
+        if (tp.lexicalRerankWeight) {
+            const float clamped = std::clamp(*tp.lexicalRerankWeight, 0.0f, 1.0f);
+            opts.config.lexicalRerankWeight = clamped;
+            opts.config.lexicalRerankWeightOverride = clamped;
+            spdlog::info("SearchEngine lexicalRerankWeight applied via config: {:.3f}",
+                         opts.config.lexicalRerankWeight);
+        }
     }
 
     if (!vectorEnabled) {
         opts.config.vectorWeight = 0.0f;
+        opts.config.vectorWeightOverride.reset();
         opts.config.vectorMaxResults = 0;
     }
 
@@ -691,6 +700,9 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                         newEngine->setExecutor(runtimeExecutor_.get_executor());
                         {
                             std::unique_lock lock(engineMutex_);
+                            if (engine_) {
+                                newEngine->adoptTopologySnapshotCache(*engine_);
+                            }
                             engine_ = newEngine;
                         }
                         refreshSnapshot();

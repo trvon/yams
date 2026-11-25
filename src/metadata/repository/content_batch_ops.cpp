@@ -927,4 +927,83 @@ MetadataRepository::batchGetDocumentsWithContentPreview(const std::vector<std::s
         });
 }
 
+Result<std::unordered_map<int64_t, std::pair<DocumentInfo, std::string>>>
+MetadataRepository::batchGetDocumentsWithContentPreviewByIds(
+    const std::vector<int64_t>& documentIds, int maxPreviewChars) {
+    if (documentIds.empty()) {
+        return std::unordered_map<int64_t, std::pair<DocumentInfo, std::string>>{};
+    }
+
+    const int effectiveMaxChars = std::max(1, maxPreviewChars);
+    constexpr size_t kChunkSize = 500; // Well below SQLite's 999 bind-parameter limit.
+
+    return executeReadQuery<std::unordered_map<int64_t, std::pair<DocumentInfo, std::string>>>(
+        [&](Database& db)
+            -> Result<std::unordered_map<int64_t, std::pair<DocumentInfo, std::string>>> {
+            std::unordered_map<int64_t, std::pair<DocumentInfo, std::string>> result;
+            result.reserve(documentIds.size());
+
+            for (size_t offset = 0; offset < documentIds.size(); offset += kChunkSize) {
+                const size_t count = std::min(kChunkSize, documentIds.size() - offset);
+                std::string sql =
+                    "SELECT d.id, d.file_path, d.file_name, d.file_extension, d.file_size, "
+                    "d.sha256_hash, d.mime_type, d.created_time, d.modified_time, d.indexed_time, "
+                    "d.content_extracted, d.extraction_status, d.extraction_error, "
+                    "COALESCE(substr(dc.content_text, 1, ?), '') "
+                    "FROM documents d "
+                    "LEFT JOIN document_content dc ON dc.document_id = d.id "
+                    "WHERE d.id IN ";
+                sql += buildPlaceholderList(count);
+
+                auto stmtResult = db.prepare(sql);
+                if (!stmtResult) {
+                    return stmtResult.error();
+                }
+
+                Statement stmt = std::move(stmtResult).value();
+                if (auto bindResult = stmt.bind(1, effectiveMaxChars); !bindResult) {
+                    return bindResult.error();
+                }
+                for (size_t i = 0; i < count; ++i) {
+                    if (auto bindResult =
+                            stmt.bind(static_cast<int>(i + 2), documentIds[offset + i]);
+                        !bindResult) {
+                        return bindResult.error();
+                    }
+                }
+
+                while (true) {
+                    auto stepResult = stmt.step();
+                    if (!stepResult) {
+                        return stepResult.error();
+                    }
+                    if (!stepResult.value()) {
+                        break;
+                    }
+
+                    DocumentInfo info;
+                    info.id = stmt.getInt64(0);
+                    info.filePath = stmt.getString(1);
+                    info.fileName = stmt.getString(2);
+                    info.fileExtension = stmt.getString(3);
+                    info.fileSize = stmt.getInt64(4);
+                    info.sha256Hash = stmt.getString(5);
+                    info.mimeType = stmt.getString(6);
+                    info.setCreatedTime(stmt.getInt64(7));
+                    info.setModifiedTime(stmt.getInt64(8));
+                    info.setIndexedTime(stmt.getInt64(9));
+                    info.contentExtracted = stmt.getInt(10) != 0;
+                    info.extractionStatus = ExtractionStatusUtils::fromString(stmt.getString(11));
+                    info.extractionError = stmt.getString(12);
+
+                    std::string preview = stmt.getString(13);
+                    const int64_t idKey = info.id;
+                    result[idKey] = std::make_pair(std::move(info), std::move(preview));
+                }
+            }
+
+            return result;
+        });
+}
+
 } // namespace yams::metadata
