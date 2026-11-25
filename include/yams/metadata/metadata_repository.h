@@ -1,6 +1,5 @@
 #pragma once
 
-#include <spdlog/spdlog.h>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -56,7 +55,22 @@ std::unordered_map<std::string, MetadataInsertPhaseTiming> getMetadataInsertPhas
 
 namespace detail {
 inline thread_local std::string_view metadata_op_tag;
-}
+
+void logPoolAcquireFailure(std::string_view route, std::string_view op, int attempt,
+                           long long acquireMs, long long acquireUs, long long totalMs,
+                           long long totalUs, bool shutdownAcquire, std::string_view errorMessage);
+void logPoolQueryTrace(std::string_view route, std::string_view op, int attempt,
+                       long long acquireMs, long long acquireUs, long long queryMs,
+                       long long queryUs, long long releaseUs, long long totalMs, long long totalUs,
+                       bool ok, std::string_view errorMessage);
+void logPoolRetrySuccess(std::string_view route, int attempt);
+void logPoolFinalError(std::string_view route, std::string_view op, int attempt, bool isRetryable,
+                       std::string_view errorMessage);
+void logPoolRetrySleep(std::string_view route, std::string_view op, int attempt, int delayMs,
+                       bool isLockError);
+void logBestEffortWriteTrace(bool acquireFailed, long long totalMs, bool ok,
+                             std::string_view errorMessage);
+} // namespace detail
 
 bool metadata_trace_enabled();
 
@@ -1384,36 +1398,21 @@ private:
 
             if (!connResult) {
                 auto op = current_metadata_op();
-                if (metadata_trace_enabled()) {
-                    const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                             std::chrono::steady_clock::now() - attemptStart)
-                                             .count();
-                    spdlog::warn(
-                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
-                        "acquire_ms={} acquire_us={} query_ms=0 query_us=0 release_us=0 "
-                        "total_ms={} total_us={} ok=false error='{}'",
-                        route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
-                        totalMs,
-                        std::chrono::duration_cast<std::chrono::microseconds>(
-                            std::chrono::steady_clock::now() - attemptStart)
-                            .count(),
-                        connResult.error().message);
-                }
                 const auto& acquireError = connResult.error();
                 const bool shutdownAcquire =
                     acquireError.code == ErrorCode::OperationCancelled ||
                     acquireError.code == ErrorCode::SystemShutdown ||
                     (acquireError.code == ErrorCode::InvalidState &&
                      acquireError.message.find("shut down") != std::string::npos);
-                if (shutdownAcquire) {
-                    spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' op='{}' "
-                                  "acquire cancelled during shutdown: {}",
-                                  route, op.empty() ? "(unknown)" : op, acquireError.message);
-                } else {
-                    spdlog::error("MetadataRepository::executeQueryOnPool route='{}' op='{}' "
-                                  "acquire error: {}",
-                                  route, op.empty() ? "(unknown)" : op, acquireError.message);
-                }
+                const auto now = std::chrono::steady_clock::now();
+                const auto totalMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - attemptStart)
+                        .count();
+                const auto totalUs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(now - attemptStart)
+                        .count();
+                detail::logPoolAcquireFailure(route, op, attempt + 1, acquireMs, acquireUs, totalMs,
+                                              totalUs, shutdownAcquire, acquireError.message);
                 return Error{acquireError};
             }
 
@@ -1459,22 +1458,11 @@ private:
             // Observability must never discard a committed result or cause the operation to retry.
             try {
                 if (metadata_trace_enabled()) {
-                    auto op = current_metadata_op();
-                    if (result.has_value()) {
-                        spdlog::info(
-                            "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
-                            "acquire_ms={} acquire_us={} query_ms={} query_us={} release_us={} "
-                            "total_ms={} total_us={} ok=true",
-                            route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
-                            queryMs, queryUs, releaseUs, totalMs, totalUs);
-                    } else {
-                        spdlog::info(
-                            "MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
-                            "acquire_ms={} acquire_us={} query_ms={} query_us={} release_us={} "
-                            "total_ms={} total_us={} ok=false error='{}'",
-                            route, op.empty() ? "(unknown)" : op, attempt + 1, acquireMs, acquireUs,
-                            queryMs, queryUs, releaseUs, totalMs, totalUs, result.error().message);
-                    }
+                    detail::logPoolQueryTrace(
+                        route, current_metadata_op(), attempt + 1, acquireMs, acquireUs, queryMs,
+                        queryUs, releaseUs, totalMs, totalUs, result.has_value(),
+                        result.has_value() ? std::string_view{}
+                                           : std::string_view{result.error().message});
                 }
             } catch (...) {
                 std::fputs("MetadataRepository: query trace unavailable\n", stderr);
@@ -1483,10 +1471,7 @@ private:
             if (result.has_value()) {
                 try {
                     if (attempt > 0) {
-                        // Log successful retry at debug level
-                        spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' succeeded "
-                                      "after {} retries",
-                                      route, attempt);
+                        detail::logPoolRetrySuccess(route, attempt);
                     }
                 } catch (...) {
                     std::fputs("MetadataRepository: retry success trace unavailable\n", stderr);
@@ -1514,16 +1499,8 @@ private:
                     reportDbLockError();
                 }
                 // Always log operation context for constraint errors (helps debugging)
-                auto op = current_metadata_op();
-                if (isRetryable || metadata_trace_enabled()) {
-                    spdlog::warn(
-                        "MetadataRepository::executeQueryOnPool route='{}' op='{}' error: {}",
-                        route, op.empty() ? "(unknown)" : op, result.error().message);
-                }
-                spdlog::error("MetadataRepository::executeQueryOnPool route='{}' op='{}' "
-                              "attempts={} connection error: {}",
-                              route, op.empty() ? "(unknown)" : op, attempt + 1,
-                              result.error().message);
+                detail::logPoolFinalError(route, current_metadata_op(), attempt + 1, isRetryable,
+                                          result.error().message);
                 return Error{result.error()};
             }
 
@@ -1534,11 +1511,8 @@ private:
             std::uniform_int_distribution<int> dist(-jitter, jitter);
             int delayMs = baseDelayMs + dist(rng);
             if (metadata_trace_enabled()) {
-                auto op = current_metadata_op();
-                spdlog::info(
-                    "MetadataRepository::executeQueryOnPool retry route='{}' op='{}' attempt={} "
-                    "sleep_ms={} retryable=true lock_error={}",
-                    route, op.empty() ? "(unknown)" : op, attempt + 1, delayMs, isLockError);
+                detail::logPoolRetrySleep(route, current_metadata_op(), attempt + 1, delayMs,
+                                          isLockError);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
         }
@@ -1592,9 +1566,7 @@ private:
                 const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                          std::chrono::steady_clock::now() - start)
                                          .count();
-                spdlog::warn("MetadataRepository::executeBestEffortWrite acquire_ms={} total_ms={} "
-                             "ok=false error='{}'",
-                             totalMs, totalMs, connResult.error().message);
+                detail::logBestEffortWriteTrace(true, totalMs, false, connResult.error().message);
             }
             if (!hasExistingOp) {
                 detail::metadata_op_tag = prevOp;
@@ -1616,14 +1588,9 @@ private:
             const auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::steady_clock::now() - start)
                                      .count();
-            if (result.has_value()) {
-                spdlog::info("MetadataRepository::executeBestEffortWrite total_ms={} ok=true",
-                             totalMs);
-            } else {
-                spdlog::info(
-                    "MetadataRepository::executeBestEffortWrite total_ms={} ok=false error='{}'",
-                    totalMs, result.error().message);
-            }
+            detail::logBestEffortWriteTrace(
+                false, totalMs, result.has_value(),
+                result.has_value() ? std::string_view{} : std::string_view{result.error().message});
         }
 
         if (!hasExistingOp) {
@@ -1652,36 +1619,6 @@ std::string buildNaturalLanguageFts5QueryForTest(std::string_view query, bool us
                                                  bool autoPrefix, bool autoPhrase);
 bool isLikelyNaturalLanguageQueryForTest(std::string_view query);
 } // namespace test
-
-/**
- * @brief Builder for metadata queries with fluent interface
- */
-class MetadataQueryBuilder {
-public:
-    MetadataQueryBuilder() = default;
-
-    // Document filtering
-    MetadataQueryBuilder& withExtension(const std::string& extension);
-    MetadataQueryBuilder& modifiedAfter(std::chrono::system_clock::time_point time);
-    MetadataQueryBuilder& modifiedBefore(std::chrono::system_clock::time_point time);
-    MetadataQueryBuilder& indexedAfter(std::chrono::system_clock::time_point time);
-
-    // Sorting and pagination
-    MetadataQueryBuilder& orderByModified(bool ascending = false);
-    MetadataQueryBuilder& limit(int count);
-    MetadataQueryBuilder& offset(int count);
-
-    // Build the query
-    [[nodiscard]] std::string buildQuery() const;
-    [[nodiscard]] const std::vector<std::string>& getParameters() const;
-
-private:
-    std::vector<std::string> conditions_;
-    std::vector<std::string> parameters_;
-    std::string orderBy_;
-    int limit_ = -1;
-    int offset_ = -1;
-};
 
 /**
  * @brief Transaction helper for atomic metadata operations

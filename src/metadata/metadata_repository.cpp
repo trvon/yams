@@ -296,6 +296,90 @@ bool metadata_trace_enabled() {
     return enabled;
 }
 
+namespace detail {
+
+void logPoolAcquireFailure(std::string_view route, std::string_view op, int attempt,
+                           long long acquireMs, long long acquireUs, long long totalMs,
+                           long long totalUs, bool shutdownAcquire, std::string_view errorMessage) {
+    const std::string_view opLabel = op.empty() ? std::string_view("(unknown)") : op;
+    if (metadata_trace_enabled()) {
+        spdlog::warn("MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
+                     "acquire_ms={} acquire_us={} query_ms=0 query_us=0 release_us=0 "
+                     "total_ms={} total_us={} ok=false error='{}'",
+                     route, opLabel, attempt, acquireMs, acquireUs, totalMs, totalUs, errorMessage);
+    }
+    if (shutdownAcquire) {
+        spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' op='{}' "
+                      "acquire cancelled during shutdown: {}",
+                      route, opLabel, errorMessage);
+    } else {
+        spdlog::error("MetadataRepository::executeQueryOnPool route='{}' op='{}' "
+                      "acquire error: {}",
+                      route, opLabel, errorMessage);
+    }
+}
+
+void logPoolQueryTrace(std::string_view route, std::string_view op, int attempt,
+                       long long acquireMs, long long acquireUs, long long queryMs,
+                       long long queryUs, long long releaseUs, long long totalMs, long long totalUs,
+                       bool ok, std::string_view errorMessage) {
+    const std::string_view opLabel = op.empty() ? std::string_view("(unknown)") : op;
+    if (ok) {
+        spdlog::info("MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
+                     "acquire_ms={} acquire_us={} query_ms={} query_us={} release_us={} "
+                     "total_ms={} total_us={} ok=true",
+                     route, opLabel, attempt, acquireMs, acquireUs, queryMs, queryUs, releaseUs,
+                     totalMs, totalUs);
+    } else {
+        spdlog::info("MetadataRepository::executeQueryOnPool route='{}' op='{}' attempt={} "
+                     "acquire_ms={} acquire_us={} query_ms={} query_us={} release_us={} "
+                     "total_ms={} total_us={} ok=false error='{}'",
+                     route, opLabel, attempt, acquireMs, acquireUs, queryMs, queryUs, releaseUs,
+                     totalMs, totalUs, errorMessage);
+    }
+}
+
+void logPoolRetrySuccess(std::string_view route, int attempt) {
+    spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' succeeded after {} retries",
+                  route, attempt);
+}
+
+void logPoolFinalError(std::string_view route, std::string_view op, int attempt, bool isRetryable,
+                       std::string_view errorMessage) {
+    const std::string_view opLabel = op.empty() ? std::string_view("(unknown)") : op;
+    if (isRetryable || metadata_trace_enabled()) {
+        spdlog::warn("MetadataRepository::executeQueryOnPool route='{}' op='{}' error: {}", route,
+                     opLabel, errorMessage);
+    }
+    spdlog::error("MetadataRepository::executeQueryOnPool route='{}' op='{}' "
+                  "attempts={} connection error: {}",
+                  route, opLabel, attempt, errorMessage);
+}
+
+void logPoolRetrySleep(std::string_view route, std::string_view op, int attempt, int delayMs,
+                       bool isLockError) {
+    const std::string_view opLabel = op.empty() ? std::string_view("(unknown)") : op;
+    spdlog::info("MetadataRepository::executeQueryOnPool retry route='{}' op='{}' attempt={} "
+                 "sleep_ms={} retryable=true lock_error={}",
+                 route, opLabel, attempt, delayMs, isLockError);
+}
+
+void logBestEffortWriteTrace(bool acquireFailed, long long totalMs, bool ok,
+                             std::string_view errorMessage) {
+    if (acquireFailed) {
+        spdlog::warn("MetadataRepository::executeBestEffortWrite acquire_ms={} total_ms={} "
+                     "ok=false error='{}'",
+                     totalMs, totalMs, errorMessage);
+    } else if (ok) {
+        spdlog::info("MetadataRepository::executeBestEffortWrite total_ms={} ok=true", totalMs);
+    } else {
+        spdlog::info("MetadataRepository::executeBestEffortWrite total_ms={} ok=false error='{}'",
+                     totalMs, errorMessage);
+    }
+}
+
+} // namespace detail
+
 const char* MetadataRepository::documentColumnList(bool qualified) const {
     if (qualified) {
         return hasPathIndexing_ ? kDocumentColumnListNewQualified
@@ -3590,91 +3674,6 @@ ListDocumentProjection MetadataRepository::mapListProjectionRow(const Statement&
     info.indexedTime = stmt.getTime(9);
     info.extractionStatus = ExtractionStatusUtils::fromString(stmt.getString(10));
     return info;
-}
-
-// MetadataQueryBuilder implementation
-MetadataQueryBuilder& MetadataQueryBuilder::withExtension(const std::string& extension) {
-    conditions_.push_back("file_extension = ?");
-    parameters_.push_back(extension);
-    return *this;
-}
-
-MetadataQueryBuilder&
-MetadataQueryBuilder::modifiedAfter(std::chrono::system_clock::time_point time) {
-    conditions_.push_back("modified_time >= ?");
-    const auto unixTime = yams::common::timePointToEpochSeconds(time);
-    parameters_.push_back(std::to_string(unixTime));
-    return *this;
-}
-
-MetadataQueryBuilder&
-MetadataQueryBuilder::modifiedBefore(std::chrono::system_clock::time_point time) {
-    conditions_.push_back("modified_time <= ?");
-    const auto unixTime = yams::common::timePointToEpochSeconds(time);
-    parameters_.push_back(std::to_string(unixTime));
-    return *this;
-}
-
-MetadataQueryBuilder&
-MetadataQueryBuilder::indexedAfter(std::chrono::system_clock::time_point time) {
-    conditions_.push_back("indexed_time >= ?");
-    const auto unixTime = yams::common::timePointToEpochSeconds(time);
-    parameters_.push_back(std::to_string(unixTime));
-    return *this;
-}
-
-MetadataQueryBuilder& MetadataQueryBuilder::orderByModified(bool ascending) {
-    orderBy_ = "ORDER BY modified_time " + std::string(ascending ? "ASC" : "DESC");
-    return *this;
-}
-
-MetadataQueryBuilder& MetadataQueryBuilder::limit(int count) {
-    limit_ = count;
-    return *this;
-}
-
-MetadataQueryBuilder& MetadataQueryBuilder::offset(int count) {
-    offset_ = count;
-    return *this;
-}
-
-std::string MetadataQueryBuilder::buildQuery() const {
-    std::string query = "SELECT ";
-    // MetadataQueryBuilder is used primarily by tools that execute via
-    // MetadataRepository::queryDocuments. To keep compatibility with pre-v13
-    // schemas, prefer the newer column set and let the repository path adjust
-    // when preparing statements. Here, use the superset to keep ordinal mapping
-    // consistent; older schemas will be projected via aliases.
-    query += kDocumentColumnListNew;
-    query += " FROM documents";
-
-    if (!conditions_.empty()) {
-        query += " WHERE ";
-        const char* separator = "";
-        for (size_t i = 0; i < conditions_.size(); ++i) {
-            query += separator;
-            separator = " AND ";
-            query += conditions_[i];
-        }
-    }
-
-    if (!orderBy_.empty()) {
-        query += " " + orderBy_;
-    }
-
-    if (limit_ > 0) {
-        query += " LIMIT " + std::to_string(limit_);
-    }
-
-    if (offset_ > 0) {
-        query += " OFFSET " + std::to_string(offset_);
-    }
-
-    return query;
-}
-
-const std::vector<std::string>& MetadataQueryBuilder::getParameters() const {
-    return parameters_;
 }
 
 // MetadataTransaction implementation

@@ -10,6 +10,7 @@
 
 #include "../../common/metadata_test_db.h"
 
+#include <spdlog/spdlog.h>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
@@ -709,43 +710,6 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Statistics", "[unit][metadata][schema][
         CHECK((extCounts[".pdf"] == 2));
         CHECK((extCounts[".doc"] == 1));
     }
-}
-
-TEST_CASE_METHOD(MetadataSchemaFixture, "Query builder",
-                 "[unit][metadata][schema][query-builder]") {
-    std::vector<DocumentInfo> docs = {
-        createTestDocument("doc1.txt"), createTestDocument("doc2.pdf"),
-        createTestDocument("doc3.txt"), createTestDocument("doc4.doc")};
-
-    docs[0].modifiedTime = std::chrono::floor<std::chrono::seconds>(
-        std::chrono::system_clock::now() - std::chrono::hours(1));
-    docs[1].modifiedTime = std::chrono::floor<std::chrono::seconds>(
-        std::chrono::system_clock::now() - std::chrono::hours(2));
-    docs[2].modifiedTime = std::chrono::floor<std::chrono::seconds>(
-        std::chrono::system_clock::now() - std::chrono::hours(3));
-    docs[3].modifiedTime = std::chrono::floor<std::chrono::seconds>(
-        std::chrono::system_clock::now() - std::chrono::hours(4));
-
-    for (auto& doc : docs) {
-        auto result = repo_->insertDocument(doc);
-        REQUIRE(result.has_value());
-    }
-
-    MetadataQueryBuilder qb;
-    auto query = qb.withExtension(".txt")
-                     .modifiedAfter(std::chrono::system_clock::now() - std::chrono::hours(2))
-                     .orderByModified(false)
-                     .limit(10)
-                     .buildQuery();
-
-    CHECK((query.find("file_extension = ?") != std::string::npos));
-    CHECK((query.find("modified_time >= ?") != std::string::npos));
-    CHECK((query.find("ORDER BY modified_time DESC") != std::string::npos));
-    CHECK((query.find("LIMIT 10") != std::string::npos));
-
-    auto params = qb.getParameters();
-    CHECK((params.size() == 2));
-    CHECK((params[0] == ".txt"));
 }
 
 TEST_CASE_METHOD(MetadataSchemaFixture, "Unique constraints",

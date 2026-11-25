@@ -10,6 +10,8 @@
 #include <string_view>
 #include <vector>
 
+#include <spdlog/spdlog.h>
+
 #include <yams/core/assert.hpp>
 #include <yams/metadata/metadata_repository.h>
 

@@ -82,7 +82,7 @@ src/metadata/connection_pool.cpp:1000:portability/jthread # feature-test guarded
 src/metadata/database.cpp:29:portability/env-read # reviewed raw environment read
 src/metadata/database.cpp:476:portability/path-cstr # std::string filename, not filesystem::path
 src/metadata/metadata_repository.cpp:292:portability/env-read # reviewed raw environment read
-src/metadata/metadata_repository.cpp:1519:portability/env-read # reviewed raw environment read
+src/metadata/metadata_repository.cpp:1603:portability/env-read # reviewed raw environment read
 src/metadata/migration.cpp:1595:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:110:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:124:portability/env-read # reviewed raw environment read

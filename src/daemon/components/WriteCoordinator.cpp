@@ -7,6 +7,7 @@
 #include <yams/profiling.h>
 
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
