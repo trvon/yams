@@ -3531,7 +3531,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                             for (std::size_t m = 0; m < missingHashes.size(); ++m) {
                                 if (auto it = docMap.find(missingHashes[m]);
                                     it != docMap.end() && it->second.id > 0) {
-                                    docIds[missingIndices[m]] = it->second.id;
+                                    const std::size_t idx = missingIndices[m];
+                                    docIds[idx] = it->second.id;
+                                    if (idx < results.size() &&
+                                        results[idx].document.sha256Hash == missingHashes[m]) {
+                                        results[idx].document.id = it->second.id;
+                                    }
                                 }
                             }
                         }
@@ -3607,14 +3612,16 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         if (!outcome.errorMessage.empty()) {
             response.debugStats["cross_rerank_error"] = outcome.errorMessage;
         }
-        for (const auto& docTrace : outcome.docTraces) {
-            rerankWindowTrace.push_back({
-                {"doc_id", documentIdForTrace(docTrace.filePath, docTrace.documentHash)},
-                {"original_score", docTrace.originalScore},
-                {"rerank_score", docTrace.rerankScore},
-                {"rerank_norm", docTrace.rerankNorm},
-                {"final_score", docTrace.finalScore},
-            });
+        if (stageTraceEnabled) {
+            for (const auto& docTrace : outcome.docTraces) {
+                rerankWindowTrace.push_back({
+                    {"doc_id", documentIdForTrace(docTrace.filePath, docTrace.documentHash)},
+                    {"original_score", docTrace.originalScore},
+                    {"rerank_score", docTrace.rerankScore},
+                    {"rerank_norm", docTrace.rerankNorm},
+                    {"final_score", docTrace.finalScore},
+                });
+            }
         }
 
         switch (outcome.status) {
@@ -4094,7 +4101,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     response.debugStats.try_emplace(
         "graph_community_weight",
         fmt::format("{:.4f}", std::clamp(workingConfig.graphCommunityWeight, 0.0f, 1.0f)));
-    response.debugStats["rerank_window_trace_json"] = rerankWindowTrace.dump();
+    if (stageTraceEnabled) {
+        response.debugStats["rerank_window_trace_json"] = rerankWindowTrace.dump();
+    }
     if (workingConfig.semanticRescueSlots > 0 && !response.results.empty()) {
         spdlog::debug(
             "[semantic_rescue] final_count={} target={} rate={:.3f} min_vector_score={:.4f}",
@@ -4462,18 +4471,20 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         populateRuntimeTelemetrySignals(telemetry, stageSummary, fusionSummary);
 
         tuner_->observe(telemetry);
-        const auto tunerState = tuner_->adaptiveStateToJson();
         response.debugStats["tuner_adaptive_active"] = "1";
-        response.debugStats["tuner_decision_reason"] =
-            tunerState.value("last_decision", std::string{"unknown"});
-        response.debugStats["tuner_adjustments_json"] = tunerState.dump();
-        response.debugStats["tuner_runtime_config_json"] = tuner_->getParams().toJson().dump();
-        // R3: emit the stable bucket key so users can see which context
-        // bucket drove a given query's policy decision. The rules policy
-        // ignores the bucket; R5's orchestrator reads it for per-bucket
-        // handoff gating.
-        response.debugStats["tuner_context_bucket"] = bucketize(tuningCtx);
-        response.debugStats["tuner_backend"] = "rules";
+        if (stageTraceEnabled) {
+            const auto tunerState = tuner_->adaptiveStateToJson();
+            response.debugStats["tuner_decision_reason"] =
+                tunerState.value("last_decision", std::string{"unknown"});
+            response.debugStats["tuner_adjustments_json"] = tunerState.dump();
+            response.debugStats["tuner_runtime_config_json"] = tuner_->getParams().toJson().dump();
+            // R3: emit the stable bucket key so users can see which context
+            // bucket drove a given query's policy decision. The rules policy
+            // ignores the bucket; R5's orchestrator reads it for per-bucket
+            // handoff gating.
+            response.debugStats["tuner_context_bucket"] = bucketize(tuningCtx);
+            response.debugStats["tuner_backend"] = "rules";
+        }
     } else {
         response.debugStats["tuner_adaptive_active"] = "0";
     }

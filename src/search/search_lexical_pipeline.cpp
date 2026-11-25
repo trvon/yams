@@ -48,6 +48,7 @@ void appendLexicalBatchAtRank(const std::string& query, QueryIntent queryIntent,
     inputs.intent = queryIntent;
     inputs.applyIntentAdaptiveWeighting = config.enableIntentAdaptiveWeighting;
     inputs.applyFilenameBoost = true;
+    inputs.includeDebugInfo = false;
     inputs.bm25NormDivisor = config.bm25NormDivisor;
     inputs.penalty = scorePenalty;
     inputs.sourceTag = source;
@@ -180,16 +181,11 @@ std::optional<yams::metadata::SearchResults> makeDirectSimeonLexicalResults(
         }
 
         yams::metadata::SearchResult row;
-        row.document = it->second.first;
+        row.document = std::move(it->second.first);
         row.score = -static_cast<double>(candidate.score);
-        row.snippet = it->second.second;
+        row.snippet = std::move(it->second.second);
         direct.results.push_back(std::move(row));
     }
-
-    std::sort(direct.results.begin(), direct.results.end(),
-              [](const yams::metadata::SearchResult& a, const yams::metadata::SearchResult& b) {
-                  return a.score < b.score;
-              });
     direct.totalCount = static_cast<int64_t>(direct.results.size());
     return direct;
 }
@@ -394,15 +390,10 @@ void applyAggressiveFtsFallback(
     }
 
     if (!aggressiveClauses.empty()) {
-        std::vector<std::string> debugClauses;
-        debugClauses.reserve(aggressiveClauses.size());
-        for (const auto& clause : aggressiveClauses) {
-            debugClauses.push_back(clause.query);
-        }
         spdlog::debug("queryFullText aggressive fallback: base_succeeded={} base_hits={} "
-                      "clauses={} added_hits={} query='{}' clauses='{}'",
+                      "clauses={} added_hits={} query='{}'",
                       baseFtsSucceeded ? 1 : 0, baseFtsHitCount, aggressiveClauses.size(),
-                      results.size(), query, debugClauses.size());
+                      results.size(), query);
     }
 }
 
@@ -438,15 +429,9 @@ void applyGraphExpansionTerms(
     }
 
     if (!graphTerms.empty()) {
-        std::vector<std::string> debugTerms;
-        debugTerms.reserve(graphTerms.size());
-        for (const auto& term : graphTerms) {
-            debugTerms.push_back(term.text);
-        }
         spdlog::debug("queryFullText graph expansion: base_hits={} graph_terms={} "
-                      "graph_hits={} final_hits={} query='{}' terms='{}'",
-                      baseFtsHitCount, graphTerms.size(), totalGraphHits, results.size(), query,
-                      debugTerms.size());
+                      "graph_hits={} final_hits={} query='{}'",
+                      baseFtsHitCount, graphTerms.size(), totalGraphHits, results.size(), query);
     }
 }
 

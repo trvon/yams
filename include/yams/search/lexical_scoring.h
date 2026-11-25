@@ -36,6 +36,7 @@ struct LexicalScoringInputs {
     QueryIntent intent = QueryIntent::Mixed;
     bool applyIntentAdaptiveWeighting = false;
     bool applyFilenameBoost = true;
+    bool includeDebugInfo = true;
 
     float bm25NormDivisor = 300.0f;
     float penalty = 1.0f;

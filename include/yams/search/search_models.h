@@ -15,6 +15,7 @@ namespace yams::search {
 using yams::metadata::SearchResult;
 
 struct ComponentResult {
+    int64_t documentId = 0;
     std::string documentHash;
     std::string filePath{};
     float score = 0.0f;

@@ -151,11 +151,13 @@ LexicalScoringOutput scoreLexicalBatch(const LexicalScoringInputs& inputs) {
         const auto& filePath = sr.document.filePath;
         const auto& fileName = sr.document.fileName;
 
-        const auto pruneCategory = yams::magic::getPruneCategory(filePath);
-        const bool isCodeFile = pruneCategory == yams::magic::PruneCategory::BuildObject ||
-                                pruneCategory == yams::magic::PruneCategory::None;
-
-        float scoreMultiplier = isCodeFile ? 1.0f : nonCodeFileMultiplier;
+        float scoreMultiplier = 1.0f;
+        if (nonCodeFileMultiplier != 1.0f) {
+            const auto pruneCategory = yams::magic::getPruneCategory(filePath);
+            const bool isCodeFile = pruneCategory == yams::magic::PruneCategory::BuildObject ||
+                                    pruneCategory == yams::magic::PruneCategory::None;
+            scoreMultiplier = isCodeFile ? 1.0f : nonCodeFileMultiplier;
+        }
         if (inputs.applyFilenameBoost) {
             scoreMultiplier *= filenamePathBoostFromTokens(queryTokens, filePath, fileName);
         }
@@ -173,13 +175,16 @@ LexicalScoringOutput scoreLexicalBatch(const LexicalScoringInputs& inputs) {
         }
 
         ComponentResult cr;
+        cr.documentId = sr.document.id;
         cr.documentHash = sr.document.sha256Hash;
         cr.filePath = filePath;
         cr.score = finalScore;
         cr.source = inputs.sourceTag;
         cr.rank = inputs.startRank + rank;
         cr.snippet = sr.snippet.empty() ? std::nullopt : std::optional<std::string>(sr.snippet);
-        cr.debugInfo["score_multiplier"] = fmt::format("{:.3f}", scoreMultiplier);
+        if (inputs.includeDebugInfo) {
+            cr.debugInfo["score_multiplier"] = fmt::format("{:.3f}", scoreMultiplier);
+        }
         // Absolute scale: single-hit branch of normalizedBm25Score, with effectiveDivisor
         // expanding above bm25NormDivisor on strong queries so top hits keep relative margins
         // instead of saturating at 1.0.

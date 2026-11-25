@@ -769,19 +769,19 @@ bool SearchTuner::hasConverged(std::size_t minObservations) const noexcept {
 }
 
 void SearchTuner::observe(const RuntimeTelemetry& telemetry) {
-    std::optional<std::string> pendingSnapshot;
+    bool shouldPersist = false;
     std::filesystem::path snapshotPath;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         observeLocked(telemetry);
         if (!persistPath_.empty() &&
             adaptive_.observations >= lastPersistedObservation_ + kAdaptivePersistInterval) {
-            pendingSnapshot = adaptiveStateToJsonLocked().dump(2);
+            shouldPersist = true;
             snapshotPath = persistPath_;
             lastPersistedObservation_ = adaptive_.observations;
         }
     }
-    if (pendingSnapshot) {
+    if (shouldPersist) {
         auto written = saveAdaptiveState(snapshotPath);
         if (!written) {
             spdlog::warn("SearchTuner: failed to persist adaptive state to {}: {}",
