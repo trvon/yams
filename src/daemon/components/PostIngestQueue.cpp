@@ -157,17 +157,19 @@ std::size_t PostIngestQueue::maxExtractionConcurrent() {
 }
 
 std::size_t PostIngestQueue::maxKgConcurrent() {
-    return static_cast<std::size_t>(TuneAdvisor::postKgConcurrent());
+    // Guarantee forward progress for active KG pollers on low-budget (1-2 core) hosts;
+    // pausing KG is controlled by stagePaused_, not a 0 concurrency budget.
+    return std::max<std::size_t>(1u, static_cast<std::size_t>(TuneAdvisor::postKgConcurrent()));
 }
 
 std::size_t PostIngestQueue::maxEntityConcurrent() {
-    return static_cast<std::size_t>(TuneAdvisor::postEntityConcurrent());
+    return std::max<std::size_t>(1u, static_cast<std::size_t>(TuneAdvisor::postEntityConcurrent()));
 }
 
 std::size_t PostIngestQueue::maxTitleConcurrent() {
     // Title extraction shares ONNX resources with embeddings, so limit concurrency
     // to allow both to run in parallel without starving each other
-    return static_cast<std::size_t>(TuneAdvisor::postTitleConcurrent());
+    return std::max<std::size_t>(1u, static_cast<std::size_t>(TuneAdvisor::postTitleConcurrent()));
 }
 
 PostIngestQueue::PostIngestQueue(
