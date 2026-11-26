@@ -145,28 +145,27 @@ PooledConnection::PooledConnection(std::unique_ptr<Database> db,
       generation_(generation) {}
 
 PooledConnection::~PooledConnection() {
-    if (db_ && returnFunc_ && !returned_) {
+    if (db_ && returnFunc_ && !returned_.exchange(true, std::memory_order_acq_rel)) {
         returnFunc_(this);
     }
 }
 
 PooledConnection::PooledConnection(PooledConnection&& other) noexcept
     : db_(std::move(other.db_)), returnFunc_(std::move(other.returnFunc_)),
-      lastAccessed_(other.lastAccessed_), returned_(other.returned_),
-      generation_(other.generation_) {
-    other.returned_ = true; // Prevent double return
-}
+      lastAccessed_(other.lastAccessed_),
+      returned_(other.returned_.exchange(true, std::memory_order_acq_rel)),
+      generation_(other.generation_) {}
 
 PooledConnection& PooledConnection::operator=(PooledConnection&& other) noexcept {
     if (this != &other) {
-        if (db_ && returnFunc_ && !returned_) {
+        if (db_ && returnFunc_ && !returned_.exchange(true, std::memory_order_acq_rel)) {
             returnFunc_(this);
         }
         db_ = std::move(other.db_);
         returnFunc_ = std::move(other.returnFunc_);
         lastAccessed_ = other.lastAccessed_;
-        returned_ = other.returned_;
-        other.returned_ = true;
+        returned_.store(other.returned_.exchange(true, std::memory_order_acq_rel),
+                        std::memory_order_release);
     }
     return *this;
 }
@@ -247,10 +246,12 @@ void ConnectionPool::shutdown() {
         if (conn == nullptr) {
             continue;
         }
-        conn->returned_ = true;
+        // Prevent ~PooledConnection() from calling back into a shutting-down/destroyed pool,
+        // and interrupt any running SQLite statement without closing/resetting db_ out from
+        // under active borrowers. The borrower's PooledConnection destructor will close db_.
+        conn->returned_.store(true, std::memory_order_release);
         if (conn->db_) {
-            conn->db_->close();
-            conn->db_.reset();
+            conn->db_->interrupt();
         }
     }
     leased_.clear();

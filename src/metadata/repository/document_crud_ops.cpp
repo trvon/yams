@@ -1250,6 +1250,7 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             if (!beginResult) {
                 return beginResult.error();
             }
+            repository::ScopedRollbackGuard txGuard(db);
 
             DeleteDocumentsBatchResult batchResult;
 
@@ -1369,9 +1370,9 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             // Commit transaction
             auto commitResult = db.execute("COMMIT");
             if (!commitResult) {
-                db.execute("ROLLBACK");
                 return commitResult.error();
             }
+            txGuard.dismiss();
 
             return batchResult;
         });

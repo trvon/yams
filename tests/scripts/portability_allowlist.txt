@@ -78,11 +78,11 @@ src/daemon/components/DaemonMetrics.cpp:237:portability/env-read # reviewed raw 
 src/daemon/components/DaemonMetrics.cpp:2167:portability/env-read # reviewed raw environment read
 src/daemon/components/RequestDispatcher.cpp:614:portability/env-read # reviewed raw environment read
 src/daemon/components/RequestDispatcher.cpp:617:portability/env-read # reviewed raw environment read
-src/metadata/connection_pool.cpp:1000:portability/jthread # feature-test guarded std::jthread
+src/metadata/connection_pool.cpp:1001:portability/jthread # feature-test guarded std::jthread
 src/metadata/database.cpp:29:portability/env-read # reviewed raw environment read
 src/metadata/database.cpp:476:portability/path-cstr # std::string filename, not filesystem::path
 src/metadata/metadata_repository.cpp:292:portability/env-read # reviewed raw environment read
-src/metadata/metadata_repository.cpp:1603:portability/env-read # reviewed raw environment read
+src/metadata/metadata_repository.cpp:1608:portability/env-read # reviewed raw environment read
 src/metadata/migration.cpp:1595:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:110:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:124:portability/env-read # reviewed raw environment read

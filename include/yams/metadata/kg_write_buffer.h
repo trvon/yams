@@ -50,6 +50,10 @@ struct KGWriteBufferConfig {
 
     /// When true, auto-flush on threshold; when false, caller must flush().
     bool autoFlush = true;
+
+    /// When true, ~KGWriteBuffer() performs a best-effort flush() of any remaining buffered
+    /// entries. Set to false when the caller owns an outer WriteBatch and flushes via flushInto().
+    bool flushOnDestruct = true;
 };
 
 /// Edge key for deduplication: (srcNodeId, dstNodeId, relation).

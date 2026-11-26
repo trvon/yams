@@ -689,6 +689,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
             bufferConfig.maxEdges = 0;
             bufferConfig.maxEntities = 0;
             bufferConfig.autoFlush = false;
+            bufferConfig.flushOnDestruct = false;
             edgeBuffer.emplace(*kg_, bufferConfig);
         }
         metadata::KGWriteBuffer* bufferPtr = edgeBuffer ? &*edgeBuffer : nullptr;

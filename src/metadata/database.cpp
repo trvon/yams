@@ -797,7 +797,8 @@ Result<void> Database::commit() {
 }
 
 Result<void> Database::rollback() {
-    if (!inTransaction_) {
+    const bool sqliteInTx = db_ != nullptr && sqlite3_get_autocommit(db_) == 0;
+    if (!inTransaction_ && !sqliteInTx) {
         return Error{ErrorCode::InvalidState, "Not in transaction"};
     }
 

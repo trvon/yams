@@ -72,4 +72,23 @@ inline Result<void> commitOrRollback(Database& db) {
     return Result<void>();
 }
 
+class ScopedRollbackGuard {
+public:
+    explicit ScopedRollbackGuard(Database& db) noexcept : db_(db) {}
+    ~ScopedRollbackGuard() {
+        if (active_) {
+            rollbackIgnoringErrors(db_);
+        }
+    }
+
+    ScopedRollbackGuard(const ScopedRollbackGuard&) = delete;
+    ScopedRollbackGuard& operator=(const ScopedRollbackGuard&) = delete;
+
+    void dismiss() noexcept { active_ = false; }
+
+private:
+    Database& db_;
+    bool active_ = true;
+};
+
 } // namespace yams::metadata::repository
