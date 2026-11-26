@@ -12,6 +12,112 @@
 * **daemon:** `daemon start` with `--socket` or `--data-dir` no longer stops or takes over a daemon serving another store. The explicit socket wins over config and discovery; the PID file and log follow a non-default socket or data dir (new `daemon start --log-file`); start refuses, naming both data dirs, when the target socket belongs to another store.
 * **retrieval:** apply basename and location-metadata filters before pagination; retain distinct current locations for shared-content grep candidates and enforce worktree scope after FTS/semantic projection.
 
+## [0.24.0](https://github.com/trvon/yams/compare/v0.23.1...v0.24.0) (2026-11-26)
+
+
+### Added
+
+* **daemon:** gate BackgroundTaskManager periodic maintenance with ResourceGovernor ([d67c4df](https://github.com/trvon/yams/commit/d67c4df16ae1eeba62f6af4b29aaa8ad27125be0))
+* **daemon:** wire built-in Simeon title and entity extractor fallback ([ca20b05](https://github.com/trvon/yams/commit/ca20b0550db7ed333369c63f979528496568e4a4))
+* **daemon:** wire built-in Simeon title and entity extractor fallback ([23c9e9c](https://github.com/trvon/yams/commit/23c9e9c88cc325fde901a8dbacc8aa8b513e1d5d))
+* **graph:** add --strict and request ns to graph ingest (CLI, MCP) ([e4a1bc3](https://github.com/trvon/yams/commit/e4a1bc32b98809ef70bb182cedd6e8c0eddb6e26))
+* **graph:** expand file explore to related files, rank query explore by score ([473fe4a](https://github.com/trvon/yams/commit/473fe4ac26bb64414bf40eaf07e8f8783d2734ec))
+* **graph:** external graph ingest CLI, truthful counts, namespace removal ([442cbf4](https://github.com/trvon/yams/commit/442cbf454fefd08ad6aa4e1efe0d888d2a330b3c))
+* **graph:** external graph ingest CLI, truthful counts, ns removal ([bec0880](https://github.com/trvon/yams/commit/bec08801790ef96c701bf0a6b7a6ab3185128bd6))
+* **p2p:** consult ResourceGovernor in acceptLoop and reconnectLoop ([1c2ab21](https://github.com/trvon/yams/commit/1c2ab213194a31867ab71b7efe9beb2c4e01269f))
+* **repair:** drive RepairFsm from the repair loop ([efc6a1e](https://github.com/trvon/yams/commit/efc6a1e1b8a1caa23f30f2d309539e0a9d64dcbf))
+* **search:** add ConvexMinMax fusion strategy and typed rerank window config ([3e729b2](https://github.com/trvon/yams/commit/3e729b237249831a3b1ed7fab69a14c7a79670d4))
+* **search:** expose lexical_floor_top_n/vector_weight config and avoid double BM25 pass ([0e46569](https://github.com/trvon/yams/commit/0e465696899d2686476faf868b112e0aaa2abafb))
+* **search:** fill underfilled lexical pools with Simeon and tune SCIENTIFIC rerank ([4d0cbca](https://github.com/trvon/yams/commit/4d0cbca00f921bb6521047e633d0e91f2d8f21ff))
+* **topology:** add mid-rebuild ResourceGovernor checks, Tracy zones, and epoch postcondition ([d527fec](https://github.com/trvon/yams/commit/d527fec61fbc8e90776a2f79cda9df2315478018))
+
+
+### Fixed
+
+* **client:** check for a pending reset before taking the IO guard ([2ec5ba2](https://github.com/trvon/yams/commit/2ec5ba25e6a1777e9cff4dd46eb598bc796afde0))
+* **cli:** stop graph ingest at the first failed chunk and report progress ([d6b25e4](https://github.com/trvon/yams/commit/d6b25e4c73b9966f38c958ec1c3591f013551004))
+* **conan:** drop the unpublished ONNX Runtime mirror from the recipe ([deeff97](https://github.com/trvon/yams/commit/deeff979aee38ca6249a7460a063fdf167bb66f0))
+* **conan:** try a YAMS mirror before NuGet for ONNX Runtime ([1f15436](https://github.com/trvon/yams/commit/1f15436ad7f7ccd412d7bd63de53a225f0105bab))
+* **daemon:** decouple WriteCoordinator pressure check from ResourceGovernor link dep ([a44f639](https://github.com/trvon/yams/commit/a44f63981eb5152dc251f29091fe2592b27f2b09))
+* **daemon:** fail once on a store from a newer YAMS ([ce614bc](https://github.com/trvon/yams/commit/ce614bc31164a35c6954c16d73e45317357de07d))
+* **daemon:** keep scratch daemon starts off the default daemon ([814eab9](https://github.com/trvon/yams/commit/814eab978529086f59dae9526ba18f1f6d56d0d0))
+* **daemon:** keep scratch daemon starts off the default daemon ([55ece98](https://github.com/trvon/yams/commit/55ece98201f1bd1c7a7956e96aef3a5de7433859))
+* **daemon:** name the failed migration when the metadata database cannot open ([af5583e](https://github.com/trvon/yams/commit/af5583ed28c722dcc2b6d2de15c0bd9963594904))
+* **graph:** close ownership and coordinator gaps from re-review ([48b6bbc](https://github.com/trvon/yams/commit/48b6bbcb7173ad0a39c7d48416e4a69ad494960f))
+* **graph:** enforce ns ownership, settle graph writes after commit ([c40d959](https://github.com/trvon/yams/commit/c40d959956f02ed4456551bea193f0eb79deab82))
+* **graph:** fail lookup and trace on stores without symbol nodes ([317545d](https://github.com/trvon/yams/commit/317545ded82de0dc57b92f4cc34c42e51b307d47))
+* **graph:** keep graph op failures contained and removal atomic ([f568417](https://github.com/trvon/yams/commit/f568417402fd9ed72be63dc3ac61ad586317eb52))
+* **graph:** let lookup and trace resolve ingested nodes ([257461a](https://github.com/trvon/yams/commit/257461a54e6b8306534835f58a0944ce72fc9958))
+* **graph:** stop minting path versions for unchanged re-ingest ([93007c5](https://github.com/trvon/yams/commit/93007c5bf169e16a0d2255836943a5afb5e7b36d))
+* **mcp:** make graph removal a destructive tool; keep writes off query ([c4c69be](https://github.com/trvon/yams/commit/c4c69bed4c682d458ae1d8d8f90cae3fd3448895))
+* **metadata,search,repair:** fix LIKE pattern prefix misparse and SearchService coroutine lifetime ([ac385de](https://github.com/trvon/yams/commit/ac385de9ebea9675cda5b3c5508d3eee148269b4))
+* **metadata:** drop unreadable topology snapshots before migration 47 ([9bec95a](https://github.com/trvon/yams/commit/9bec95a2d194dc0611b1fc1b3261e146c4199d57))
+* **policy:** list Catch2 cases without ASan container-overflow checks ([b316ec1](https://github.com/trvon/yams/commit/b316ec1bb8aeb58e0f14607af95fb8a026765487))
+* **search,vector:** dynamic BM25 divisor, normalized_v2 simeon profile, preserve simeonText on community blend ([c0f18ce](https://github.com/trvon/yams/commit/c0f18ce0b60258d38a2197e619c58f0d42e71bf7))
+* **search:** keep the short-query budget off prose sentences ([88ce018](https://github.com/trvon/yams/commit/88ce018c49aef19c635bf34557a339d0925dc31e))
+* **search:** name the edges the no_kg gate ignores ([616fb97](https://github.com/trvon/yams/commit/616fb9744f8780c959ba151a54f9d60570f4c046))
+* **search:** preserve fusionStrategy and rerank config across SearchTuner replacement ([d8956b9](https://github.com/trvon/yams/commit/d8956b9f0b0f2c25c39f18382675bdbdf95f4faf))
+* **search:** read YAMS_SEARCH_FUSION_CANDIDATE_LIMIT ([c0b17c8](https://github.com/trvon/yams/commit/c0b17c8cc080441bc08b03741ed6d047da378200))
+* **search:** report zero-weight sources as skipped ([707ae49](https://github.com/trvon/yams/commit/707ae4964f969a94ebd5ce89dd7c9cfbdebcf92b))
+* **search:** rerun short natural-language keyword AND as ranked OR ([15130fa](https://github.com/trvon/yams/commit/15130fae73cb542b331f31830ef65dcbd299a879))
+* **search:** rerun short natural-language keyword AND as ranked OR ([e6ef27d](https://github.com/trvon/yams/commit/e6ef27de6270f3a7b9bd34b3811ceae91213d1a8))
+* **search:** zero entity_vector weight when the store has none ([861304f](https://github.com/trvon/yams/commit/861304faf49dfc5003fe01b71a0b2d49408670a7))
+* **test:** isolate Windows APPDATA/LOCALAPPDATA/USERPROFILE in IsolatedDaemonEnv ([b418347](https://github.com/trvon/yams/commit/b418347a181b895d557cf96e6456aedeaa351d72))
+* **tests:** add missing spdlog.h include in metadata_repository_catch2_test ([ff32924](https://github.com/trvon/yams/commit/ff3292454798fc3fc539a6b2b63071b9e2554af3))
+* **tests:** restore mock_plugin fixture and update SPQ materialized_rows characterization ([b7b337e](https://github.com/trvon/yams/commit/b7b337ebd8425062d5c86096e6a1aaea62a4163b))
+* **topology:** build the whole corpus when no snapshot exists ([3418647](https://github.com/trvon/yams/commit/341864724a183c29676733766a8a7220a3a4306d))
+* **topology:** close dirty regions over prior clusters in every mode ([6d23317](https://github.com/trvon/yams/commit/6d233173079e8e4eac26df46af5cddbdcc023e3e))
+* **topology:** require both directions for reciprocal edges ([ec1eb06](https://github.com/trvon/yams/commit/ec1eb06194a65f64e6ef0c8a5a48d679447924fc))
+* **topology:** store snapshot payloads in bounded chunks ([bd1770f](https://github.com/trvon/yams/commit/bd1770fd523d966aac891c2f5233f1aca2cbcb42))
+* **topology:** store snapshot payloads in bounded chunks ([c70fc61](https://github.com/trvon/yams/commit/c70fc61869d22e225dbdf23b096f827b0eff5234))
+
+
+### Performance
+
+* **compression,daemon,metadata:** reuse thread-local Zstd contexts, batch title updates, and widen SymSpell chunks ([379744c](https://github.com/trvon/yams/commit/379744c2041ed9d52d306afbb2336f6d26fcb047))
+* **daemon,search,vector:** dead-code cleanup, ResourceGovernor coverage, batched 2-phase SPQ rerank, and retrieval quality foundations ([2a21e58](https://github.com/trvon/yams/commit/2a21e581982791a9f4037c9d5b426d5a9e9486bd))
+* **daemon:** batch document lookups in EmbeddingService and SearchService ([44f20ac](https://github.com/trvon/yams/commit/44f20ac700ef914d3d53bc8d77729e280ed2469f))
+* **daemon:** batch WriteCoordinator KG acks and RepairService N+1 queries ([190cc08](https://github.com/trvon/yams/commit/190cc082dabe0f58a8f6d94d9819fd77e3a5694e))
+* **daemon:** enable batch coalescing and per-batch limiter in KG poller ([7943a97](https://github.com/trvon/yams/commit/7943a974f9b5e99e957360d1236bfefe68971536))
+* **daemon:** preserve topology snapshot cache across SearchEngine rebuilds ([49a0720](https://github.com/trvon/yams/commit/49a0720bf9a9db1871c4f1475d44bd06fd389b2a))
+* **daemon:** use O(1) deque and ResourceGovernor batch capping in WriteCoordinator ([4a27e66](https://github.com/trvon/yams/commit/4a27e667292856a81a854040e9cddd13465a416c))
+* **grep,storage,metadata:** optimize prune classification, direct-first CAS reads, and batch path-tree upserts ([4367d63](https://github.com/trvon/yams/commit/4367d63d939ebd7b25a3fb6fc37066de8ea4807d))
+* **metadata:** batch document path head writes in DocumentService::storeBatch ([f330613](https://github.com/trvon/yams/commit/f330613f34ad95e4c81132585c7476ab9d5607a3))
+* **metadata:** use indexed path-head lookup and batch KG enrichment acks ([e4a85f3](https://github.com/trvon/yams/commit/e4a85f353cf7d806a6195ff1e729aed3b2db7ee5))
+* **search,metadata:** avoid query-cache deep copies, skip candidate COUNT(*), and overlap vector retrieval with text ([4bbfd2f](https://github.com/trvon/yams/commit/4bbfd2fcd4f310e7732c93496520540883f09d3b))
+* **search,metadata:** use 5-column FTS5 candidate projection and skip aggressive FTS5 fallback when Simeon populates the pool ([5e46493](https://github.com/trvon/yams/commit/5e46493b1530434f780c8b0d8527fdac64f76106))
+* **search,vector:** batched lexical hydration, collapsed FTS5 tiers, snippet-only deduped SPQ, and in-RAM Simeon lexical rerank ([91c8413](https://github.com/trvon/yams/commit/91c84130df8f0598468dec302cf502dfb62be369))
+* **search:** avoid deep-copying postFusionSnapshot when stage tracing is off ([cc7937c](https://github.com/trvon/yams/commit/cc7937c71566856f21d7ae9146c448a3764a09f9))
+* **search:** batch Simeon lexical hydration, collapse aggressive FTS5 tiers, and raise vector SQLite cache ([3f49d2b](https://github.com/trvon/yams/commit/3f49d2b2ac0a2148fc36c2b9e7af1a2d3e909c35))
+* **search:** propagate documentId through fusion, gate trace JSON/debugInfo, and remove lexical/tuner bloat ([7051625](https://github.com/trvon/yams/commit/705162598a6b2dbe104ec666a42cc5e17325d697))
+* **search:** score lexical_rerank via in-RAM SimeonLexicalBackend with FTS5 fallback ([b1a4851](https://github.com/trvon/yams/commit/b1a48510588405e160602692feea3de8178e83e7))
+* **storage,vector:** single-alloc CAS reads, lock-free read stats, SQLITE_STATIC vector binds, and O(N) chunker ([0540746](https://github.com/trvon/yams/commit/0540746bb4839a43bb261b2d929b4c3a16b04c70))
+* **topology:** batch KG node, metadata, and neighbor queries in input extraction ([1ddde91](https://github.com/trvon/yams/commit/1ddde91abe1d1bcbec761f7724eccffdacd1089a))
+* **vector,search:** batch final VectorRecord materialization and expose lexical_rerank config ([4fc579d](https://github.com/trvon/yams/commit/4fc579dab6309944ad738747008d2e18fce4794b))
+* **vector:** add snippet-only search projection and single-pass SPQ document dedup ([7802da5](https://github.com/trvon/yams/commit/7802da5083ab48258d35fc0f93304267f719e53c))
+* **vector:** batch SPQ two-phase rerank lookups in sorted 64-rowid chunks ([cfb5454](https://github.com/trvon/yams/commit/cfb5454df3692b0b0688b6c4221ff9969d1426a6))
+* **vector:** tune compact centroid HNSW config and instrument route index build ([b7ae3c0](https://github.com/trvon/yams/commit/b7ae3c08ddd5a13851e18cada2ee5bfd409d37ec))
+* **vector:** two-phase SPQ exact rerank avoiding full-row materialization ([7725d6d](https://github.com/trvon/yams/commit/7725d6dbda0764468e2355a38eef2fdbf33b5c5b))
+
+
+### Changed
+
+* **compression:** remove unused CompressionMonitor and expose engine stats via IContentStore ([e26b886](https://github.com/trvon/yams/commit/e26b886662c4f00b54d53e8151b40289ef269d22))
+* **daemon:** remove the unused client CircuitBreaker ([33eeec7](https://github.com/trvon/yams/commit/33eeec71da3c7cc75b8221ed6f28292fac81a39f))
+* **daemon:** route worker sizing via TuneAdvisor and outline metadata_trace_enabled ([0e23323](https://github.com/trvon/yams/commit/0e2332384a38430498900ca1fbc95345bc8c2d9d))
+* **debloat:** remove dead CLI/API helpers and trim header includes ([6c49870](https://github.com/trvon/yams/commit/6c49870141f1d2240e7776803c874de44f01a9c2))
+* **debloat:** remove unused content, integrity, benchmarks, and dead modules ([f42f2c9](https://github.com/trvon/yams/commit/f42f2c9077f941e1485b6fde58d1ca7a0ebd57f3))
+* **debloat:** remove unused wal library and unify bool/env parsing ([18e8236](https://github.com/trvon/yams/commit/18e823680eebc82faac37d41e6aec0c74edeac5f))
+* **formal:** admit capped lexical evidence in semantic mode ([ed8f957](https://github.com/trvon/yams/commit/ed8f95787084d92b1fd4f342c1d1e7208c371ee0))
+* **formal:** let edges cross clusters inside a split component ([85dc372](https://github.com/trvon/yams/commit/85dc372d54760e4ba0d3fbaeddc9f0dcde070cc9))
+* **formal:** make WellFormedBatch overlap-aware ([4340e75](https://github.com/trvon/yams/commit/4340e757a2e3bb94f43a4a07a45b8c06be06368f))
+* **formal:** read route limit 0 as unlimited ([a3b5b21](https://github.com/trvon/yams/commit/a3b5b215d96018d5c315f6ad6a16d5a065ab6ffd))
+* **headers,storage,daemon:** remove dead ScopedLogLevel, trim heavy includes, cache fixed regexes ([d3ef8d9](https://github.com/trvon/yams/commit/d3ef8d9579936e70d31837981f7fb1349b170e03))
+* **headers,storage,daemon:** remove dead ScopedLogLevel, trim heavy includes, cache fixed regexes ([60a74d2](https://github.com/trvon/yams/commit/60a74d292aa9e15b46d5823548c5d8a18358a6c4))
+* **headers:** decouple spdlog from WriteBatchCoalescer.h and time_filters.h ([6ea1643](https://github.com/trvon/yams/commit/6ea1643602327e7f38939f5b7c5c36023b193830))
+* **metadata:** remove unused MetadataQueryBuilder and decouple spdlog from metadata_repository.h ([46b35c2](https://github.com/trvon/yams/commit/46b35c24eb080888b1191046ef7bcb25fd721159))
+* **search:** drop the never-invoked Simeon concept callback ([a478541](https://github.com/trvon/yams/commit/a4785411842b1a3e86106d9a4b1aef9448f1cdd9))
+
 ## [0.23.1](https://github.com/trvon/yams/compare/v0.23.0...v0.23.1) (2026-11-20)
 
 Fixes on top of 0.23.0.
