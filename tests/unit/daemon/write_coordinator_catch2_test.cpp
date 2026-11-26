@@ -1737,3 +1737,17 @@ TEST_CASE("WriteCoordinator: pressureAdjustedBatchLimit scales down under pressu
     CHECK(WriteCoordinator::pressureAdjustedBatchLimit(64, ResourcePressureLevel::Emergency,
                                                        true) == 64);
 }
+
+TEST_CASE("WriteCoordinator: deferred node-key prefetch does not self-deadlock on "
+          "single-connection pool",
+          "[unit][daemon][write-coordinator][kg][dedup]") {
+    KgCoordinatorFixture fix("wc_kg_single_conn_", /*maxConnections=*/1);
+    const auto start = std::chrono::steady_clock::now();
+    runDuplicateEdgeScenario(fix, true);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    CHECK(elapsed < std::chrono::seconds{5});
+    auto row = queryEdgesForRelation(fix.dbPath, "dup_relation");
+    CHECK((row.count == 1));
+    CHECK((row.weight == 5.0));
+}
