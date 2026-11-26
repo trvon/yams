@@ -4,8 +4,9 @@
 # Run TLC on every TLA+ model configuration in formal/tla and compare the
 # outcome with the expected one. Fails on any unexpected result.
 #
-# Usage: scripts/formal/check-tla.sh [config-name ...]
+# Usage: scripts/formal/check-tla.sh [--exclude <config-name> ...] [config-name ...]
 #   config-name  e.g. DaemonReadiness_new (default: all listed below)
+#   --exclude    skip the given config-name (repeatable)
 #
 # Environment:
 #   TLA_TOOLS_JAR   use this tla2tools.jar instead of the cached download
@@ -116,18 +117,59 @@ main() {
     echo "error: java not found (set JAVA)" >&2
     exit 2
   fi
+  local -a wants=()
+  local -a excludes=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --exclude)
+        if [ "$#" -lt 2 ]; then
+          echo "error: --exclude requires a config name" >&2
+          exit 2
+        fi
+        excludes+=("$2")
+        shift 2
+        ;;
+      --exclude=*)
+        excludes+=("${1#--exclude=}")
+        shift
+        ;;
+      --)
+        shift
+        while [ "$#" -gt 0 ]; do
+          wants+=("$1")
+          shift
+        done
+        ;;
+      -*)
+        echo "error: unknown option: $1" >&2
+        exit 2
+        ;;
+      *)
+        wants+=("$1")
+        shift
+        ;;
+    esac
+  done
+
   resolve_jar
   WORK="$(mktemp -d "${TMPDIR:-/tmp}/yams-tlc.XXXXXX")"
   FAILED=0
-  local name expected want found
+  local name expected item found skip
   while read -r name expected; do
     [ -n "$name" ] || continue
-    if [ "$#" -gt 0 ]; then
+    if [ "${#wants[@]}" -gt 0 ]; then
       found=0
-      for want in "$@"; do
-        [ "$want" = "$name" ] && found=1
+      for item in "${wants[@]}"; do
+        [ "$item" = "$name" ] && found=1
       done
       [ "$found" -eq 1 ] || continue
+    fi
+    if [ "${#excludes[@]}" -gt 0 ]; then
+      skip=0
+      for item in "${excludes[@]}"; do
+        [ "$item" = "$name" ] && skip=1
+      done
+      [ "$skip" -eq 0 ] || continue
     fi
     run_one "$name" "$expected"
   done <<EOF
