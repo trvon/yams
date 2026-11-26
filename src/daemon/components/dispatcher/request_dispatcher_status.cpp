@@ -242,7 +242,7 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
             }
             try {
                 const auto contentExtractorCount = serviceManager->getContentExtractors().size();
-                const auto entityExtractorCount = serviceManager->getEntityExtractors().size();
+                const auto entityExtractorCount = serviceManager->entityExtractorCount();
                 const bool titleExtractorReady = serviceManager->hasTitleExtractor();
 
                 std::size_t skippedPlugins = 0;
@@ -788,7 +788,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 if (serviceManager_) {
                     const auto contentExtractorCount =
                         serviceManager_->getContentExtractors().size();
-                    const auto entityExtractorCount = serviceManager_->getEntityExtractors().size();
+                    const auto entityExtractorCount = serviceManager_->entityExtractorCount();
                     const bool titleExtractorReady = serviceManager_->hasTitleExtractor();
                     std::size_t skippedPlugins = 0;
                     if (auto* abi = serviceManager_->getAbiPluginHost()) {

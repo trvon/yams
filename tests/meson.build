@@ -900,6 +900,14 @@ if catch2_dep.found()
     'timeout': 60,
   }]
 
+  catch2_test_table += [{
+    'name': 'simeon_entity_extractor',
+    'sources': files('unit/daemon/components/simeon_entity_extractor_catch2_test.cpp'),
+    'deps': test_deps,
+    'suite': ['catch2', 'unit', 'daemon', 'components'],
+    'timeout': 60,
+  }]
+
 # Virtual-time startup contracts: no database, model, socket, CLI or live governor needed.
   catch2_test_table += [{
     'name': 'startup_replay',

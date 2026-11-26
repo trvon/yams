@@ -2520,7 +2520,15 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
 
         {
             metadata::MetadataOpScope opScope("repair_download_url_update");
-            if (auto up = meta->updateDocument(doc); !up) {
+            auto up = meta->updateDocument(doc);
+            if (!up && (up.error().code == ErrorCode::DatabaseError ||
+                        up.error().code == ErrorCode::Timeout)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                up = meta->updateDocument(doc);
+            }
+            if (!up) {
+                spdlog::warn("RepairService: failed to update download doc {}: {}", sourceUrl,
+                             up.error().message);
                 result.failed++;
                 continue;
             }

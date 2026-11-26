@@ -31,6 +31,8 @@ nav:
       - Ingestion oracle: benchmarks/ingestion_oracle.md
   - Project:
       - Roadmap: roadmap.md
+      - Design Language: design.md
+      - Privacy Policy: privacy.md
       - Newsletter: newsletter.md
       - Source mirroring: source-mirroring.md
       - Startup fuzzing: developer/startup_fuzzing.md
@@ -97,5 +99,6 @@ extra:
 
 extra_css:
   - assets/retro.css
-extra_javascript: []
+extra_javascript:
+  - assets/yams-canvas.js
 copyright: "© YAMS"

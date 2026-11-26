@@ -448,6 +448,16 @@ public:
         return piq && piq->hasTitleExtractor();
     }
 
+    // Total active entity extractors: loaded ABI plugins plus the built-in Simeon extractor
+    // when active (i.e. wired into PostIngestQueue or SearchEngine).
+    std::size_t entityExtractorCount() const {
+        const std::size_t pluginCount = getEntityExtractors().size();
+        if (pluginCount > 0) {
+            return pluginCount;
+        }
+        return (hasTitleExtractor() || static_cast<bool>(cachedQueryConceptExtractor_)) ? 1u : 0u;
+    }
+
     // Knowledge Graph Store (PBI-059)
     std::shared_ptr<metadata::KnowledgeGraphStore> getKgStore() const {
         return databaseManager_ ? databaseManager_->getKgStore() : nullptr;

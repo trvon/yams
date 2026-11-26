@@ -2577,7 +2577,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                         piq->setExtractors(refreshedExtractors);
                     }
                     if (auto titleExtractor =
-                            createGlinerExtractionFunc(pluginManager_->getEntityExtractors())) {
+                            createEntityExtractionFunc(pluginManager_->getEntityExtractors())) {
                         piq->setTitleExtractor(std::move(titleExtractor));
                     }
                 }
@@ -2625,6 +2625,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     {
         auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
         if (piq) {
+            if (!piq->hasTitleExtractor()) {
+                if (auto titleExtractor = createEntityExtractionFunc(getEntityExtractors())) {
+                    piq->setTitleExtractor(std::move(titleExtractor));
+                }
+            }
             piq->start();
         }
     }
@@ -3741,12 +3746,12 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
 
     engine->setStaticEmbedding(loadStaticEmbeddingTable());
 
-    cachedQueryConceptExtractor_ = createGlinerExtractionFunc(getEntityExtractors());
+    cachedQueryConceptExtractor_ = createEntityExtractionFunc(getEntityExtractors());
     engine->setConceptExtractor(cachedQueryConceptExtractor_);
     if (cachedQueryConceptExtractor_) {
-        spdlog::info("[{}] GLiNER concept extractor wired to search engine", contextLabel);
+        spdlog::info("[{}] Entity/concept extractor wired to search engine", contextLabel);
     } else {
-        spdlog::debug("[{}] GLiNER concept extractor unavailable", contextLabel);
+        spdlog::debug("[{}] Entity/concept extractor unavailable", contextLabel);
     }
 
     std::string rerankerBackend = "auto";

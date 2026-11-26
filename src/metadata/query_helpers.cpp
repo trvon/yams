@@ -136,7 +136,8 @@ DocumentQueryOptions buildQueryOptionsForSqlLikePattern(const std::string& patte
         direct.exactPath = derived.normalizedPath;
         return direct;
     }
-    if (pattern.size() >= 2 && pattern.rfind("/%") == pattern.size() - 2) {
+    if (pattern.size() >= 2 && pattern.rfind("/%") == pattern.size() - 2 &&
+        pattern.find('%') == pattern.size() - 1) {
         std::string prefix = pattern.substr(0, pattern.size() - 2);
         opts.pathPrefix = prefix;
         opts.prefixIsDirectory = true;
