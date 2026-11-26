@@ -15,6 +15,9 @@
 #include <yams/profiling.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/storage/corpus_stats.h>
+#include <yams/vector/embedding_generator.h>
+#include <yams/vector/vector_database.h>
+#include <yams/vector/vector_types.h>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -26,6 +29,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstddef>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -736,6 +740,7 @@ struct MobileState {
     std::unique_ptr<ConnectionPool> connection_pool;
     std::shared_ptr<MetadataRepository> metadata_repo;
     std::shared_ptr<yams::api::IContentStore> content_store;
+    std::shared_ptr<yams::vector::EmbeddingGenerator> embedding_generator;
     std::string search_engine_detail;
     AppContext app_context;
     std::shared_ptr<yams::app::services::IDocumentService> document_service;
@@ -1089,27 +1094,75 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
                 yams::app::services::makeGraphQueryService(ctx->state.app_context);
             ctx->state.app_context.workerExecutor = ctx->state.worker_pool->get_executor();
 
-            // Embedded mobile currently has no app-owned embedding/model pipeline, but the
-            // SearchService still needs a SearchEngine to keep the hybrid path on the rich
-            // lexical/KG pipeline instead of degrading every hybrid request to metadata FTS.
-            // Disable vector weights until the mobile embedding pipeline can populate vectors.
+            // Initialize in-process Simeon SIMD embeddings (model-free, 384-dim, zero ONNX).
+            try {
+                yams::vector::EmbeddingConfig embCfg;
+                embCfg.backend = yams::vector::EmbeddingConfig::Backend::Simeon;
+                embCfg.backend_is_resolved = true;
+                embCfg.simeon_encoder_profile =
+                    yams::vector::EmbeddingConfig::SimeonEncoderProfile::FixedHash384;
+                embCfg.model_name = "simeon-v1-384";
+                embCfg.embedding_dim = 384;
+                embCfg.normalize_embeddings = true;
+                auto embGen = std::make_shared<yams::vector::EmbeddingGenerator>(embCfg);
+                if (embGen->initialize()) {
+                    yams::vector::VectorDatabaseConfig vdbCfg;
+                    vdbCfg.database_path =
+                        (ctx->state.config.working_directory / "vectors.db").string();
+                    vdbCfg.embedding_dim = embGen->getEmbeddingDimension();
+                    vdbCfg.create_if_missing = true;
+                    vdbCfg.search_engine = yams::vector::VectorSearchEngine::SimeonPqAdc;
+                    auto vdb = std::make_shared<yams::vector::VectorDatabase>(vdbCfg);
+                    if (vdb->initialize()) {
+                        ctx->state.embedding_generator = std::move(embGen);
+                        ctx->state.app_context.vectorDatabase = std::move(vdb);
+                    } else {
+                        spdlog::warn("Mobile VectorDatabase initialization failed: {}",
+                                     vdb->getLastError());
+                    }
+                } else {
+                    spdlog::warn("Mobile Simeon EmbeddingGenerator initialization failed: {}",
+                                 embGen->getLastError());
+                }
+            } catch (const std::exception& e) {
+                spdlog::warn("Mobile Simeon embedding initialization error: {}", e.what());
+            }
+
+            // Build embedded SearchEngine with Simeon hybrid vector+lexical when available,
+            // falling back cleanly to lexical/KG if vector initialization failed.
             try {
                 yams::search::SearchEngineBuilder builder;
                 builder.withMetadataRepo(ctx->state.metadata_repo)
                     .withKGStore(ctx->state.app_context.kgStore);
+                const bool hasSimeonVectors = ctx->state.embedding_generator != nullptr &&
+                                              ctx->state.app_context.vectorDatabase != nullptr;
                 auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
                 opts.autoTune = false;
-                opts.config.vectorWeight = 0.0f;
-                opts.config.graphVectorWeight = 0.0f;
-                opts.config.entityVectorWeight = 0.0f;
-                opts.config.semanticRescueSlots = 0;
+                if (hasSimeonVectors) {
+                    builder.withVectorDatabase(ctx->state.app_context.vectorDatabase)
+                        .withEmbeddingGenerator(ctx->state.embedding_generator);
+                    if (opts.config.vectorWeight <= 0.0f) {
+                        opts.config.vectorWeight = 0.35f;
+                    }
+                    if (opts.config.semanticRescueSlots == 0) {
+                        opts.config.semanticRescueSlots = 5;
+                    }
+                    opts.config.graphVectorWeight = 0.0f;
+                    opts.config.entityVectorWeight = 0.0f;
+                } else {
+                    opts.config.vectorWeight = 0.0f;
+                    opts.config.graphVectorWeight = 0.0f;
+                    opts.config.entityVectorWeight = 0.0f;
+                    opts.config.semanticRescueSlots = 0;
+                }
                 opts.config.conceptExtractionBackend =
                     yams::search::SearchEngineConfig::ConceptExtractionBackend::Fallback;
                 auto engRes = builder.buildEmbedded(opts);
                 if (engRes) {
                     ctx->state.app_context.searchEngine = engRes.value();
                     ctx->state.search_engine_detail =
-                        "lexical hybrid ready; vector search disabled";
+                        hasSimeonVectors ? "hybrid ready (simeon-v1-384)"
+                                         : "lexical hybrid ready; vector search disabled";
                 } else {
                     ctx->state.app_context.searchRepairInProgress = true;
                     ctx->state.app_context.searchRepairDetails = engRes.error().message;
@@ -1526,6 +1579,65 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_store_document(
         return map_error_code(result.error().code);
     }
 
+    // Generate and persist on-device Simeon embedding for text documents.
+    // Guarded so binary files or transient errors never fail document storage.
+    if (ctx->state.embedding_generator && ctx->state.embedding_generator->isInitialized() &&
+        ctx->state.app_context.vectorDatabase &&
+        ctx->state.app_context.vectorDatabase->isInitialized() && !result.value().hash.empty()) {
+        try {
+            const std::string& docHash = result.value().hash;
+            std::string text;
+            if (ctx->state.metadata_repo) {
+                if (auto docRes = ctx->state.metadata_repo->getDocumentByHash(docHash);
+                    docRes && docRes.value().has_value()) {
+                    if (auto contentRes = ctx->state.metadata_repo->getContent(docRes.value()->id);
+                        contentRes && contentRes.value().has_value()) {
+                        text = contentRes.value()->contentText;
+                    }
+                }
+            }
+            if (text.empty() && !req.path.empty()) {
+                std::ifstream in(req.path, std::ios::binary);
+                if (in.is_open()) {
+                    constexpr size_t kMaxEmbedBytes = 16384;
+                    text.resize(kMaxEmbedBytes);
+                    in.read(text.data(), static_cast<std::streamsize>(kMaxEmbedBytes));
+                    text.resize(static_cast<size_t>(in.gcount()));
+                    const size_t probeLen = std::min<size_t>(text.size(), 1024);
+                    if (std::memchr(text.data(), '\0', probeLen) != nullptr) {
+                        text.clear(); // Skip binary files
+                    }
+                }
+            }
+            if (text.size() > 16384) {
+                text.resize(16384);
+            }
+            const bool hasNonSpace = std::any_of(text.begin(), text.end(),
+                                                 [](unsigned char c) { return !std::isspace(c); });
+            if (hasNonSpace) {
+                auto embedding = ctx->state.embedding_generator->generateEmbedding(text);
+                if (embedding.size() == ctx->state.embedding_generator->getEmbeddingDimension()) {
+                    yams::vector::VectorRecord rec;
+                    rec.chunk_id = yams::vector::utils::generateChunkId(docHash, 0);
+                    rec.document_hash = docHash;
+                    rec.embedding = std::move(embedding);
+                    rec.content = text.substr(0, std::min<size_t>(text.size(), 1024));
+                    rec.start_offset = 0;
+                    rec.end_offset = text.size();
+                    rec.model_id = ctx->state.embedding_generator->getConfig().model_name;
+                    rec.model_version = ctx->state.embedding_generator->getConfig().model_version;
+                    rec.embedding_dim = rec.embedding.size();
+                    rec.level = yams::vector::EmbeddingLevel::DOCUMENT;
+                    rec.created_at = std::chrono::system_clock::now();
+                    rec.embedded_at = rec.created_at;
+                    (void)ctx->state.app_context.vectorDatabase->insertVector(rec);
+                }
+            }
+        } catch (const std::exception& e) {
+            spdlog::debug("Mobile Simeon embedding skipped: {}", e.what());
+        }
+    }
+
     if (out_hash) {
         g_temp_string = result.value().hash;
         out_hash->data = g_temp_string.c_str();
@@ -1600,6 +1712,10 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_remove_document(yams_mobile_conte
     if (!deleteMeta) {
         set_last_error(deleteMeta.error().message);
         return map_error_code(deleteMeta.error().code);
+    }
+    if (ctx->state.app_context.vectorDatabase &&
+        ctx->state.app_context.vectorDatabase->isInitialized()) {
+        (void)ctx->state.app_context.vectorDatabase->deleteVectorsByDocument(info.sha256Hash);
     }
 
     set_last_error("");
@@ -1982,6 +2098,11 @@ yams_mobile_delete_by_name(yams_mobile_context_t* ctx, const yams_mobile_delete_
 
     nlohmann::json deleted = nlohmann::json::array();
     for (const auto& entry : result.value().deleted) {
+        if (!result.value().dryRun && entry.deleted && !entry.hash.empty() &&
+            ctx->state.app_context.vectorDatabase &&
+            ctx->state.app_context.vectorDatabase->isInitialized()) {
+            (void)ctx->state.app_context.vectorDatabase->deleteVectorsByDocument(entry.hash);
+        }
         nlohmann::json item;
         item["name"] = entry.name;
         item["hash"] = entry.hash;
@@ -2451,15 +2572,47 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_get_vector_status(
 
     auto stats = store->getStats();
     const bool warmupRequested = request && request->warmup != 0;
-    nlohmann::json j =
-        build_corpus_status_json(docCount, docCount, stats.totalBytes, stats.deduplicatedBytes, 0,
-                                 0.0, corpusStats, true, true, warmupRequested, "embedded");
+    std::uint64_t vectorCount = 0;
+    std::uint64_t vectorIndexBytes = 0;
+    if (ctx->state.app_context.vectorDatabase &&
+        ctx->state.app_context.vectorDatabase->isInitialized()) {
+        vectorCount =
+            static_cast<std::uint64_t>(ctx->state.app_context.vectorDatabase->getVectorCount());
+        std::error_code fsEc;
+        const auto vdbPath = ctx->state.config.working_directory / "vectors.db";
+        if (std::filesystem::exists(vdbPath, fsEc)) {
+            vectorIndexBytes =
+                static_cast<std::uint64_t>(std::filesystem::file_size(vdbPath, fsEc));
+        }
+    }
+    if (vectorCount > 0) {
+        corpusStats["embedding_count"] = vectorCount;
+        corpusStats["embedding_coverage"] =
+            docCount > 0
+                ? std::min(1.0, static_cast<double>(vectorCount) / static_cast<double>(docCount))
+                : 0.0;
+        if (!corpusStats.contains("classification") || !corpusStats["classification"].is_object()) {
+            corpusStats["classification"] = nlohmann::json::object();
+        }
+        corpusStats["classification"]["has_embeddings"] = true;
+    }
+
+    nlohmann::json j = build_corpus_status_json(
+        docCount, docCount, stats.totalBytes, stats.deduplicatedBytes, vectorIndexBytes, 0.0,
+        corpusStats, true, true, warmupRequested, "embedded");
     const bool searchReady = ctx->state.app_context.searchEngine != nullptr;
-    const bool hasEmbeddings = j.value("hasEmbeddings", false);
+    const bool generatorReady = ctx->state.embedding_generator != nullptr &&
+                                ctx->state.embedding_generator->isInitialized();
+    const bool hasEmbeddings = vectorCount > 0 || j.value("hasEmbeddings", false);
+    j["vectorCount"] = vectorCount;
+    if (generatorReady) {
+        j["embeddingModel"] = ctx->state.embedding_generator->getConfig().model_name;
+        j["embeddingDim"] = ctx->state.embedding_generator->getEmbeddingDimension();
+    }
     j["searchEngineReady"] = searchReady;
     j["hybridAvailable"] = searchReady;
-    j["semanticAvailable"] =
-        searchReady && hasEmbeddings && ctx->state.app_context.vectorDatabase != nullptr;
+    j["semanticAvailable"] = searchReady && hasEmbeddings && generatorReady &&
+                             ctx->state.app_context.vectorDatabase != nullptr;
     j["searchEngineDetail"] = ctx->state.search_engine_detail;
     j["readiness"] = {
         {"corpus", true},
@@ -3216,6 +3369,21 @@ yams_mobile_list_models(yams_mobile_context_t* ctx, yams_mobile_model_list_resul
     auto res = std::make_unique<yams_mobile_model_list_result>();
     res->models = nullptr;
     res->count = 0;
+    if (ctx->state.embedding_generator && ctx->state.embedding_generator->isInitialized()) {
+        auto* info = static_cast<yams_mobile_model_info*>(malloc(sizeof(yams_mobile_model_info)));
+        if (info) {
+            const auto& cfg = ctx->state.embedding_generator->getConfig();
+            const std::string name = cfg.model_name.empty() ? "simeon-v1-384" : cfg.model_name;
+            const std::string path = "builtin://" + name;
+            info->name = strdup(name.c_str());
+            info->path = strdup(path.c_str());
+            info->dim =
+                static_cast<uint32_t>(ctx->state.embedding_generator->getEmbeddingDimension());
+            info->is_loaded = 1;
+            res->models = info;
+            res->count = 1;
+        }
+    }
     *out_result = res.release();
     return YAMS_MOBILE_STATUS_OK;
 }
@@ -3248,9 +3416,16 @@ yams_mobile_get_embedding_info(yams_mobile_context_t* ctx, yams_mobile_embedding
     YAMS_ZONE_SCOPED_N("mobile::get_embedding_info");
     if (!ctx || !out_info)
         return YAMS_MOBILE_STATUS_INVALID_ARGUMENT;
-    out_info->available = 0;
-    out_info->dim = 0;
-    out_info->reserved = 0;
+    if (ctx->state.embedding_generator && ctx->state.embedding_generator->isInitialized()) {
+        out_info->available = 1;
+        out_info->dim =
+            static_cast<uint32_t>(ctx->state.embedding_generator->getEmbeddingDimension());
+        out_info->reserved = 0;
+    } else {
+        out_info->available = 0;
+        out_info->dim = 0;
+        out_info->reserved = 0;
+    }
     return YAMS_MOBILE_STATUS_OK;
 }
 

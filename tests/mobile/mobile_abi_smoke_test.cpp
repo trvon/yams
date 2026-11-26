@@ -13,6 +13,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <random>
 #include <string>
 #include <thread>
@@ -548,22 +549,177 @@ TEST_CASE("Embedded mobile corpus status reports readiness without warmup contro
     CHECK(parsed.contains("corpusStats"));
     CHECK(parsed.at("corpusStats").at("doc_count").template get<std::int64_t>() >= 1);
 
-    // Embedded contexts build a lexical/KG search engine with vector scoring off, so hybrid
-    // requests do not degrade to metadata FTS. No embeddings exist, so semantic stays off.
+    // Embedded contexts now initialize in-process Simeon (simeon-v1-384) embeddings and
+    // VectorDatabase, so storing a text document populates vectors and enables semantic search.
     CHECK(parsed.at("searchEngineReady").template get<bool>());
     CHECK(parsed.at("hybridAvailable").template get<bool>());
-    CHECK_FALSE(parsed.at("semanticAvailable").template get<bool>());
+    CHECK(parsed.at("semanticAvailable").template get<bool>());
+    CHECK(parsed.value("vectorCount", 0ULL) >= 1U);
+    CHECK(parsed.value("embeddingModel", std::string{}) == "simeon-v1-384");
+    CHECK(parsed.value("embeddingDim", 0ULL) == 384U);
     CHECK_FALSE(parsed.at("searchEngineDetail").template get<std::string>().empty());
     const auto& readiness = parsed.at("readiness");
     CHECK(readiness.at("search_engine").template get<bool>());
     CHECK(readiness.at("hybrid_search").template get<bool>());
-    CHECK_FALSE(readiness.at("semantic_search").template get<bool>());
+    CHECK(readiness.at("semantic_search").template get<bool>());
+    CHECK(readiness.at("embeddings").template get<bool>());
 
     // The downloader's store lives under the context's working directory, not $HOME.
     CHECK(std::filesystem::is_directory(std::filesystem::path(workingDir) / "downloads" /
                                         "storage" / "objects"));
 
     yams_mobile_vector_status_result_destroy(statusResult);
+    yams_mobile_context_destroy(ctx);
+}
+
+TEST_CASE("Embedded mobile Simeon embeddings and hybrid search benchmark",
+          "[mobile][abi][simeon]") {
+    const auto workingDir = make_unique_temp_dir();
+    const auto cacheDir = workingDir + "/cache";
+    TempDirGuard guard(workingDir);
+
+    const auto tCreateStart = std::chrono::steady_clock::now();
+    yams_mobile_context_config config = yams_mobile_context_config_default();
+    config.working_directory = workingDir.c_str();
+    config.cache_directory = cacheDir.c_str();
+
+    yams_mobile_context_t* ctx = nullptr;
+    REQUIRE(yams_mobile_context_create(&config, &ctx) == YAMS_MOBILE_STATUS_OK);
+    REQUIRE(ctx != nullptr);
+    const auto createMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tCreateStart)
+            .count();
+
+    yams_mobile_embedding_info embInfo{};
+    REQUIRE(yams_mobile_get_embedding_info(ctx, &embInfo) == YAMS_MOBILE_STATUS_OK);
+    CHECK(embInfo.available == 1U);
+    CHECK(embInfo.dim == 384U);
+
+    yams_mobile_model_list_result* modelList = nullptr;
+    REQUIRE(yams_mobile_list_models(ctx, &modelList) == YAMS_MOBILE_STATUS_OK);
+    REQUIRE(modelList != nullptr);
+    REQUIRE(modelList->count == 1U);
+    CHECK(std::string(modelList->models[0].name) == "simeon-v1-384");
+    CHECK(modelList->models[0].dim == 384U);
+    CHECK(modelList->models[0].is_loaded == 1U);
+    yams_mobile_model_list_result_destroy(modelList);
+
+    const auto docsDir = std::filesystem::path(workingDir) / "bench_docs";
+    std::filesystem::create_directories(docsDir);
+
+    struct SampleDoc {
+        const char* name;
+        const char* body;
+    };
+    const SampleDoc samples[] = {
+        {"offline_sync.md",
+         "# Offline P2P Sync Protocol\nLocal peer-to-peer synchronization over LAN using Tailscale "
+         "or mDNS keeps mobile vaults consistent without cloud servers. Content-addressed SHA-256 "
+         "blobs are transferred incrementally with Zstd compression.\n"},
+        {"sqlite_tuning.md",
+         "# Mobile SQLite Memory Tuning\nBounded WAL journal_size_limit, incremental auto_vacuum, "
+         "and a 2MB page cache keep embedded database RAM low on Android foldables and phones.\n"},
+        {"foldable_ux.md",
+         "# Dual-Pane Foldable Navigation\nLarge inner displays on Galaxy Z Fold devices benefit "
+         "from a persistent navigation rail, split master-detail reader, and one-tap local file "
+         "access.\n"},
+        {"crypto_keys.md",
+         "# Content Addressing and Integrity\nEvery stored document is hashed with SHA-256 so "
+         "duplicate files deduplicate automatically and revisions form a verifiable parent "
+         "chain.\n"},
+        {"simeon_vectors.md",
+         "# Model-Free SIMD Embeddings\nSimeon projects text into normalized 384-dimensional "
+         "vectors using pure C++ SIMD hashing without ONNX Runtime or multi-hundred-megabyte "
+         "neural weights.\n"},
+    };
+
+    constexpr int kDocs = 25;
+    std::uint64_t totalRawBytes = 0;
+    const auto tStoreStart = std::chrono::steady_clock::now();
+    for (int i = 0; i < kDocs; ++i) {
+        const auto& base = samples[i % 5];
+        const auto filePath = docsDir / ("doc_" + std::to_string(i) + "_" + base.name);
+        std::string payload = std::string(base.body) + "\nDocument index: " + std::to_string(i) +
+                              "\nExtra context: mobile knowledge graph, hybrid retrieval, local "
+                              "vault storage, semantic similarity.\n";
+        totalRawBytes += payload.size();
+        std::ofstream out(filePath, std::ios::binary);
+        out << payload;
+        out.close();
+
+        yams_mobile_document_store_request store{};
+        store.header = yams_mobile_request_header_default();
+        const auto pathStr = filePath.string();
+        store.path = pathStr.c_str();
+        store.sync_now = 1;
+        yams_mobile_string_view hash{};
+        REQUIRE(yams_mobile_store_document(ctx, &store, &hash) == YAMS_MOBILE_STATUS_OK);
+        REQUIRE(hash.length > 0U);
+    }
+    const auto storeTotalMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tStoreStart)
+            .count();
+
+    yams_mobile_vector_status_request statusReq{};
+    statusReq.header = yams_mobile_request_header_default();
+    yams_mobile_vector_status_result_t* statusResult = nullptr;
+    REQUIRE(yams_mobile_get_vector_status(ctx, &statusReq, &statusResult) == YAMS_MOBILE_STATUS_OK);
+    const auto statusJson = yams_mobile_vector_status_result_json(statusResult);
+    const auto parsedStatus =
+        nlohmann::json::parse(std::string(statusJson.data, statusJson.length));
+    CHECK(parsedStatus.value("vectorCount", 0ULL) == static_cast<std::uint64_t>(kDocs));
+    CHECK(parsedStatus.value("semanticAvailable", false));
+    yams_mobile_vector_status_result_destroy(statusResult);
+
+    // Run 5 hybrid searches and measure latency
+    const char* queries[] = {
+        "peer to peer sync over local network",   "reduce sqlite memory footprint on android",
+        "dual pane layout for foldable screen",   "384 dimensional vector embeddings without onnx",
+        "content addressed deduplication sha256",
+    };
+    const auto tSearchStart = std::chrono::steady_clock::now();
+    std::size_t totalHits = 0;
+    for (const char* q : queries) {
+        yams_mobile_search_request sreq{};
+        sreq.header = yams_mobile_request_header_default();
+        sreq.query = q;
+        sreq.limit = 5;
+        yams_mobile_search_result_t* sres = nullptr;
+        REQUIRE(yams_mobile_search_execute(ctx, &sreq, &sres) == YAMS_MOBILE_STATUS_OK);
+        REQUIRE(sres != nullptr);
+        const auto payload = yams_mobile_search_result_json(sres);
+        const auto parsed = nlohmann::json::parse(std::string(payload.data, payload.length));
+        const auto hits = parsed.value("total", 0ULL);
+        CHECK(hits >= 1U);
+        totalHits += hits;
+        yams_mobile_search_result_destroy(sres);
+    }
+    const auto searchTotalMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tSearchStart)
+            .count();
+
+    auto fileSizeOrZero = [](const std::filesystem::path& p) -> std::uint64_t {
+        std::error_code ec;
+        return std::filesystem::exists(p, ec) ? std::filesystem::file_size(p, ec) : 0ULL;
+    };
+    std::uint64_t storageBytes = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(
+             std::filesystem::path(workingDir) / "storage")) {
+        if (entry.is_regular_file()) {
+            storageBytes += entry.file_size();
+        }
+    }
+    const auto metaBytes = fileSizeOrZero(std::filesystem::path(workingDir) / "yams_mobile.db");
+    const auto vecBytes = fileSizeOrZero(std::filesystem::path(workingDir) / "vectors.db");
+
+    std::cout << "[SIMEON_BENCH] context_create_ms=" << createMs << " docs=" << kDocs
+              << " raw_bytes=" << totalRawBytes << " store_plus_embed_total_ms=" << storeTotalMs
+              << " store_plus_embed_avg_ms=" << (storeTotalMs / kDocs)
+              << " hybrid_search_5q_total_ms=" << searchTotalMs
+              << " hybrid_search_avg_ms=" << (searchTotalMs / 5.0) << " total_hits=" << totalHits
+              << " meta_db_bytes=" << metaBytes << " vectors_db_bytes=" << vecBytes
+              << " storage_bytes=" << storageBytes << std::endl;
+
     yams_mobile_context_destroy(ctx);
 }
 
