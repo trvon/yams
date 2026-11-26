@@ -1,7 +1,8 @@
 # yamllint disable rule:line-length
-# Builds the Lean formalization in formal/topology and gates it with
-# scripts/formal/check-lean.sh: no sorry/admit/native_decide, no unreviewed
-# axiom/opaque declarations, and main theorems depend only on the standard axioms.
+# Runs formal verification checks:
+# - lean: builds the Lean formalization in formal/topology via scripts/formal/check-lean.sh
+# - tla: runs TLC on every TLA+ model config in formal/tla via scripts/formal/check-tla.sh
+#   sharded into a 3-way parallel matrix (12 fast configs + the two 9.9M-state models).
 name: Formal
 
 'on':
@@ -16,6 +17,7 @@ name: Formal
       - 'formal/**'
       - 'scripts/formal/**'
       - '.github/workflows/formal.yml'
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -72,3 +74,36 @@ jobs:
 
       - name: Build and check proofs
         run: scripts/formal/check-lean.sh
+
+  tla:
+    name: tla (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: fast
+            args: --exclude ClientIoReset_new_wp --exclude ClientIoReset_new_rp
+          - shard: client-io-reset-wp
+            args: ClientIoReset_new_wp
+          - shard: client-io-reset-rp
+            args: ClientIoReset_new_rp
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/yams/tla
+          key: tla-${{ runner.os }}-${{ hashFiles('scripts/formal/check-tla.sh') }}
+          restore-keys: |
+            tla-${{ runner.os }}-
+
+      - name: Check TLA+ models (${{ matrix.shard }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -version
+          scripts/formal/check-tla.sh ${{ matrix.args }}
