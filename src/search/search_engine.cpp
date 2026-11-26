@@ -5090,11 +5090,17 @@ SearchEngine& SearchEngine::operator=(SearchEngine&&) noexcept = default;
 
 Result<std::vector<SearchResult>> SearchEngine::search(const std::string& query,
                                                        const SearchParams& params) {
+    if (!pImpl_) {
+        return Error{ErrorCode::InvalidState, "SearchEngine not initialized"};
+    }
     return pImpl_->search(query, params);
 }
 
 Result<SearchResponse> SearchEngine::searchWithResponse(const std::string& query,
                                                         const SearchParams& params) {
+    if (!pImpl_) {
+        return Error{ErrorCode::InvalidState, "SearchEngine not initialized"};
+    }
     return pImpl_->searchWithResponse(query, params);
 }
 

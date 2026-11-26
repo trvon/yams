@@ -587,6 +587,7 @@ public:
     }
 
     boost::asio::awaitable<Result<SearchResponse>> search(const SearchRequest& req) override {
+        auto self = shared_from_this();
         using namespace std::chrono;
         const auto t0 = steady_clock::now();
         MetadataTelemetry metadataTelemetry;
@@ -1774,7 +1775,11 @@ private:
         // GLiNER concept extraction is now handled inside SearchEngine in parallel
         // with embedding generation and text-based components. Concepts are used
         // in fusion for boosting, not for query expansion.
-        auto searchRes = ctx_.searchEngine->searchWithResponse(req.query, params);
+        auto engine = ctx_.searchEngine;
+        if (!engine) {
+            return Error{ErrorCode::InvalidState, "Hybrid/semantic search not ready"};
+        }
+        auto searchRes = engine->searchWithResponse(req.query, params);
         if (!searchRes) {
             if (searchRes.error().code == ErrorCode::OperationCancelled) {
                 return searchRes.error();
