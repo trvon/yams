@@ -989,10 +989,13 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
             yams::common::ensureDirectories(ctx->state.config.storage_directory);
         }
 
-        // Thread pool / executor
+        // Thread pool / executor — cap mobile default to 2 workers to avoid
+        // spawning 8+ idle stacks on high-core phones/foldables.
         auto threads = ctx->state.config.max_worker_threads;
-        if (threads == 0)
-            threads = std::max<uint32_t>(1, std::thread::hardware_concurrency());
+        if (threads == 0) {
+            const auto hw = std::max<uint32_t>(1, std::thread::hardware_concurrency());
+            threads = std::min<uint32_t>(2, hw);
+        }
         ctx->state.worker_pool = std::make_unique<boost::asio::thread_pool>(threads);
 
         if (ctx->state.config.backend_mode == YAMS_MOBILE_BACKEND_DAEMON) {
@@ -1023,9 +1026,18 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
                 return map_error_code(open.error().code);
             }
 
+            // Mobile / low-storage SQLite tuning: keep WAL and page cache bounded.
+            (void)db->execute("PRAGMA auto_vacuum = INCREMENTAL");
+            (void)db->execute("PRAGMA journal_size_limit = 1048576");
+            (void)db->execute("PRAGMA wal_autocheckpoint = 250");
+            (void)db->execute("PRAGMA cache_size = -2000");
+
             ctx->state.database = std::move(db);
-            ctx->state.connection_pool =
-                std::make_unique<ConnectionPool>(dbPath.string(), ConnectionPoolConfig{});
+            ConnectionPoolConfig poolCfg;
+            poolCfg.minConnections = 1;
+            poolCfg.maxConnections = 2;
+            poolCfg.idleTimeout = std::chrono::seconds{60};
+            ctx->state.connection_pool = std::make_unique<ConnectionPool>(dbPath.string(), poolCfg);
             ctx->state.metadata_repo =
                 std::make_shared<MetadataRepository>(*ctx->state.connection_pool);
             auto kgStoreRes =
@@ -1050,9 +1062,14 @@ YAMS_MOBILE_API yams_mobile_status yams_mobile_context_create(
                 return map_error_code(migrateRes.error().code);
             }
 
-            // Content store
+            // Content store — enable Zstd level 5 + deduplication for mobile storage efficiency.
             yams::api::ContentStoreBuilder builder;
-            auto storeRes = builder.withStoragePath(ctx->state.config.storage_directory).build();
+            auto storeRes = builder.withStoragePath(ctx->state.config.storage_directory)
+                                .withCompression(true)
+                                .withCompressionType("zstd")
+                                .withCompressionLevel(5)
+                                .withDeduplication(true)
+                                .build();
             if (!storeRes) {
                 set_last_error(storeRes.error().message);
                 return map_error_code(storeRes.error().code);
