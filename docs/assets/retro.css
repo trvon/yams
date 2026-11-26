@@ -2,6 +2,31 @@
 
 :root {
   --retro-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --yams-terracotta: #d97a3e;
+  --yams-terracotta-deep: #c86d3b;
+  --yams-leaf: #5ea84b;
+  --yams-charcoal: #161412;
+}
+
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  border-radius: 7px;
+  height: 1.75rem;
+  width: 1.75rem;
+}
+
+/* Full-Site Living Substrate Canvas */
+#yams-substrate-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.md-main {
+  background: transparent !important;
 }
 
 /* Light Mode: "Archival Card Catalog & Blueprint" */

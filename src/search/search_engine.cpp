@@ -1534,10 +1534,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                       YAMS_ZONE_SCOPED_N("embedding::generate_async");
                                       const auto workerStart = std::chrono::steady_clock::now();
                                       auto vec = generator->generateEmbedding(queryText);
-                                      const auto elapsedUs =
+                                      const auto elapsedUs = static_cast<int64_t>(
                                           std::chrono::duration_cast<std::chrono::microseconds>(
                                               std::chrono::steady_clock::now() - workerStart)
-                                              .count();
+                                              .count());
                                       return std::make_pair(std::move(vec), elapsedUs);
                                   },
                                   executor_)
