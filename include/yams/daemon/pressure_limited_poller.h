@@ -372,15 +372,8 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                     if (!hasPendingWork || cfg.inFlightCounter->load() >= taskBudget) {
                         // Nothing ready (or at task budget): wait without acquiring/decaying the
                         // batch limiter or falling through to drainAvailable() unguarded.
-                        timer.expires_after(idleDelay);
-                        boost::system::error_code ec;
-                        co_await timer.async_wait(
-                            boost::asio::redirect_error(boost::asio::use_awaitable, ec));
-                        if (ec == boost::asio::error::operation_aborted) {
-                            idleDelay = std::chrono::milliseconds(1);
-                        } else if (idleDelay < maxIdleDelay) {
-                            idleDelay = std::min(idleDelay * 2, maxIdleDelay);
-                        }
+                        co_await detail::awaitPressureLimitedPollerWake(
+                            cfg, detail::pollerMaxIdleDelay(), "batch idle or task budget");
                         continue;
                     }
                     static std::atomic<uint64_t> sBatchSeq{0};

@@ -2277,7 +2277,7 @@ void PostIngestQueue::dispatchToTitleChannel(
             auto batch = std::make_unique<WriteBatch>();
             batch->source = "PostIngestQueue::titleDispatch/dropAcknowledgement";
             batch->ops.emplace_back(AcknowledgeKnowledgeGraphOp{
-                jobCopy.docId, jobCopy.knowledgeGraphToken, jobCopy.knowledgeGraphCompletion});
+                jobCopy.documentId, jobCopy.knowledgeGraphToken, jobCopy.knowledgeGraphCompletion});
             enqueueWithBackpressure(*writeCoordinator_, std::move(batch),
                                     "title+NL drop acknowledgement", stop_);
         }
