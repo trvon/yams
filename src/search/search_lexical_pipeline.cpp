@@ -475,9 +475,7 @@ void applySubPhraseRescoring(
             continue;
         }
 
-        // FTS5 orders negative BM25 scores ascending (most negative = best match first).
-        const double phMin = phraseResults.value().results.front().score;
-        const double phMax = phraseResults.value().results.back().score;
+        const auto [phMin, phMax] = detail::computeBm25Range(phraseResults.value().results);
 
         for (const auto& pr : phraseResults.value().results) {
             auto it = rescoreIndex.find(pr.document.sha256Hash);

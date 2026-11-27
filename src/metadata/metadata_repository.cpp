@@ -4250,6 +4250,10 @@ Result<int64_t> MetadataRepository::deleteDocumentsBySessionId(const std::string
             return int64_t{0};
         }
 
+        auto beginRes = db.beginTransaction();
+        if (!beginRes)
+            return beginRes.error();
+
         // Remove matching FTS5 index entries before deleting documents (which cascades metadata).
         auto ftsDeleteResult = db.prepare(R"(
             DELETE FROM documents_fts
@@ -4274,17 +4278,29 @@ Result<int64_t> MetadataRepository::deleteDocumentsBySessionId(const std::string
                 WHERE key = 'session_id' AND value = ?
             )
         )");
-        if (!deleteResult)
+        if (!deleteResult) {
+            (void)db.rollback();
             return deleteResult.error();
+        }
 
         Statement deleteStmt = std::move(deleteResult).value();
         auto bindDelete = deleteStmt.bind(1, sessionId);
-        if (!bindDelete)
+        if (!bindDelete) {
+            (void)db.rollback();
             return bindDelete.error();
+        }
 
         auto execResult = deleteStmt.execute();
-        if (!execResult)
+        if (!execResult) {
+            (void)db.rollback();
             return execResult.error();
+        }
+
+        auto commitRes = db.commit();
+        if (!commitRes) {
+            (void)db.rollback();
+            return commitRes.error();
+        }
 
         return count;
     });

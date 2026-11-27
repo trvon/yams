@@ -171,18 +171,10 @@ bool hasAdvancedFts5Operators(const std::string& query) {
         const bool scopeQualifier = colonPos != std::string::npos && colonPos + 1 < token.size() &&
                                     token[colonPos + 1] == ':';
         if (colonPos != std::string::npos && colonPos > 0 && !scopeQualifier) {
-            bool validField = true;
-            for (size_t i = 0; i < colonPos; ++i) {
-                char c = token[i];
-                if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) {
-                    validField = false;
-                    break;
-                }
-            }
-            if (validField) {
-                if (token.find('/') == std::string::npos && token.find('\\') == std::string::npos) {
-                    return true;
-                }
+            const std::string_view field(token.data(), colonPos);
+            if ((field == "content" || field == "title") && token.find('/') == std::string::npos &&
+                token.find('\\') == std::string::npos) {
+                return true;
             }
         }
         sawNonOperatorToken = true;
