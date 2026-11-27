@@ -212,6 +212,9 @@ Result<void> ensureVectorSchemaAligned(const std::filesystem::path& dataDir, std
 }
 
 Result<void> recreateVectorTables(const std::filesystem::path& dataDir, std::size_t dim) {
+    if (dim == 0) {
+        return Error{ErrorCode::InvalidArgument, "Vector dimension must be greater than zero"};
+    }
     try {
         SqliteVecBackend backend;
         if (auto open = openBackend(backend, vectorsDbPath(dataDir)); !open)

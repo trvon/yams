@@ -281,7 +281,8 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
     // Guard: probe the actual stored dimension in vectors.db (not config.embedding_dim, which
     // stays at the caller's target dim when vectors_sentinel.json is missing/stale) so mixed-dim
     // embeddings are never written into an existing vector DB.
-    if (std::filesystem::exists(vdbConfig.database_path)) {
+    std::error_code existsEc;
+    if (std::filesystem::exists(vdbConfig.database_path, existsEc) && !existsEc) {
         try {
             vector::SqliteVecBackend probeBackend;
             if (auto openRes = probeBackend.initialize(vdbConfig.database_path); openRes) {
@@ -729,7 +730,7 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
 
         // Report progress
         if (progressCallback) {
-            progressCallback(std::min(i + config.batchSize, documents.size()), documents.size(),
+            progressCallback(std::min(i + batchSize, documents.size()), documents.size(),
                              "generated=" + std::to_string(stats.embeddingsGenerated) +
                                  " skipped=" + std::to_string(stats.embeddingsSkipped) +
                                  " failed=" + std::to_string(stats.failedOperations));
