@@ -364,9 +364,8 @@ static std::optional<std::string> normalizeAdvancedFts5Query(const std::string& 
             word[colon + 1] != ':') {
             const std::string column = word.substr(0, colon);
             const std::string term = word.substr(colon + 1);
-            // Only real FTS columns: "ratio:2" is text, not a filter on a missing column.
-            static const std::unordered_set<std::string> kFtsColumns = {
-                "content", "title", "content_type", "alias", "file_path"};
+            // Only real documents_fts columns: "ratio:2", "file_path:main", etc. are text.
+            static const std::unordered_set<std::string> kFtsColumns = {"content", "title"};
             if (kFtsColumns.contains(column) && isFts5Bareword(term)) {
                 tokens.emplace_back(Kind::Operand, column + ":" + renderFts5Token(term, prefix));
                 continue;

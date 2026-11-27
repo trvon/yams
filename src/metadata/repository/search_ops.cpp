@@ -67,6 +67,11 @@ MetadataRepository::searchFullText(const std::string& query, int limit, int offs
                                    const std::optional<std::vector<int64_t>>& docIds,
                                    bool nlOrFallbackByDefault, bool computeTotalCount) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::search");
+    if (docIds.has_value() && docIds->empty()) {
+        SearchResults empty;
+        empty.query = query;
+        return empty;
+    }
     return executeReadQuery<SearchResults>([&](Database& db) -> Result<SearchResults> {
         YAMS_ZONE_SCOPED_N("MetadataRepo::search::FTS5Query");
         SearchResults results;

@@ -298,3 +298,54 @@ TEST_CASE("MetadataRepository: searchCandidates matches search top-K and caches 
     std::error_code ec;
     std::filesystem::remove(dbPath, ec);
 }
+
+TEST_CASE("MetadataRepository: batch/session deletes purge FTS5 and invalidate search cache",
+          "[unit][metadata][search][cache][fts5]") {
+    auto dbPath = tempDbPath("repo_delete_fts_cache_catch2_");
+    ConnectionPool pool(dbPath.string());
+    REQUIRE(pool.initialize().has_value());
+    MetadataRepository repo(pool);
+
+    std::vector<int64_t> ids;
+    for (int i = 0; i < 3; ++i) {
+        auto doc = mk("/fts/doc_" + std::to_string(i) + ".txt", "FH" + std::to_string(i));
+        auto id = repo.insertDocument(doc);
+        REQUIRE(id.has_value());
+        ids.push_back(id.value());
+        REQUIRE(repo.indexDocumentContent(id.value(), doc.sha256Hash,
+                                          "quasar pulsar magnetar " + std::to_string(i),
+                                          "text/plain")
+                    .has_value());
+    }
+    REQUIRE(
+        repo.setMetadata(ids[2], "session_id", MetadataValue(std::string("sess-del"))).has_value());
+
+    // Prime the FTS query cache.
+    auto initial = repo.search("quasar pulsar", 10, 0);
+    REQUIRE(initial.has_value());
+    REQUIRE(initial.value().results.size() == 3);
+
+    // Empty docIds filter must fail closed (return 0 results, not unfiltered corpus).
+    auto emptyFiltered = repo.search("quasar pulsar", 10, 0, std::vector<int64_t>{});
+    REQUIRE(emptyFiltered.has_value());
+    CHECK(emptyFiltered.value().results.empty());
+
+    // Batch delete must remove FTS5 rows and invalidate cached search results.
+    REQUIRE(repo.deleteDocumentsBatch({ids[0], ids[1]}).has_value());
+    auto afterBatch = repo.search("quasar pulsar", 10, 0);
+    REQUIRE(afterBatch.has_value());
+    REQUIRE(afterBatch.value().results.size() == 1);
+    CHECK(afterBatch.value().results[0].document.id == ids[2]);
+
+    // Session delete must remove FTS5 rows and invalidate cached search results.
+    auto deletedSession = repo.deleteDocumentsBySessionId("sess-del");
+    REQUIRE(deletedSession.has_value());
+    CHECK(deletedSession.value() == 1);
+    auto afterSession = repo.search("quasar pulsar", 10, 0);
+    REQUIRE(afterSession.has_value());
+    CHECK(afterSession.value().results.empty());
+
+    pool.shutdown();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}

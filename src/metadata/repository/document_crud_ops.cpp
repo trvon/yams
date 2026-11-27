@@ -1072,6 +1072,7 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
             stale.push_back(info.filePath);
         }
         invalidatePathCache(stale);
+        invalidateQueryCache();
     }
     return result;
 }
@@ -1228,7 +1229,8 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
         invalidatePathCache(deleteResult.removedFilePath);
     }
 
-    // Signal enumeration cache invalidation (document deletion cascades to metadata)
+    // Signal enumeration & FTS query cache invalidation (document deletion cascades to metadata)
+    invalidateQueryCache();
     metadataChangeCounter_.fetch_add(1, std::memory_order_release);
     return Result<void>();
 }
@@ -1280,6 +1282,12 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             }
             auto& deleteStmt = *deleteStmtResult.value();
 
+            // documents_fts is an own-content FTS5 virtual table and does not cascade on
+            // DELETE FROM documents; remove matching FTS rows explicitly in the same transaction.
+            auto deleteFtsStmtResult =
+                db.prepareCached("DELETE FROM documents_fts WHERE rowid = ?");
+            auto* deleteFtsStmt = deleteFtsStmtResult ? deleteFtsStmtResult.value().get() : nullptr;
+
             // Process each document
             for (int64_t id : ids) {
                 // Check flags before deletion
@@ -1311,6 +1319,14 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
                     wasIndexed = checkStmt.getInt(5) != 0;
                     wasEmbedded = checkStmt.getInt(6) != 0;
                     priorFilePath = checkStmt.getString(7);
+                }
+
+                // Delete FTS5 row (best-effort if documents_fts exists) before deleting document.
+                if (deleteFtsStmt != nullptr) {
+                    (void)deleteFtsStmt->reset();
+                    if (deleteFtsStmt->bind(1, id)) {
+                        (void)deleteFtsStmt->execute();
+                    }
                 }
 
                 // Delete document
@@ -1395,6 +1411,7 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
                               batchResult.metadataTagDelta);
 
         invalidatePathCache(batchResult.removedFilePaths);
+        invalidateQueryCache();
 
         // Signal enumeration cache invalidation
         metadataChangeCounter_.fetch_add(1, std::memory_order_release);

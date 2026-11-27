@@ -39,8 +39,12 @@ sortedCandidateIds(const std::vector<yams::metadata::SearchResult>& results) {
 
 void sortByScore(std::vector<yams::metadata::SearchResult>& results) {
     std::stable_sort(results.begin(), results.end(), [](const auto& lhs, const auto& rhs) {
-        if (lhs.score != rhs.score) {
-            return lhs.score > rhs.score;
+        const double lhsScore =
+            std::isfinite(lhs.score) ? lhs.score : -std::numeric_limits<double>::infinity();
+        const double rhsScore =
+            std::isfinite(rhs.score) ? rhs.score : -std::numeric_limits<double>::infinity();
+        if (lhsScore != rhsScore) {
+            return lhsScore > rhsScore;
         }
         return candidateId(lhs) < candidateId(rhs);
     });
@@ -51,7 +55,8 @@ double sourceContribution(const SourceCandidateEvidence& source, const SearchEng
         std::max(0.0, static_cast<double>(componentSourceWeight(config, source.source)));
     const double k = std::max(0.0, static_cast<double>(config.rrfK));
     const double rank = static_cast<double>(source.bestRank) + 1.0;
-    const double raw = std::clamp(static_cast<double>(source.bestRawScore), 0.0, 1.0);
+    const double rawScore = static_cast<double>(source.bestRawScore);
+    const double raw = std::isfinite(rawScore) ? std::clamp(rawScore, 0.0, 1.0) : 0.0;
     return weight * (1.0 / (k + rank)) * (1.0 + 0.5 * raw);
 }
 
@@ -243,7 +248,7 @@ EvidenceSearchPipeline::execute(std::span<const ComponentResult> components,
                         if (span > 1e-12) {
                             norm = std::clamp((raw - rangeIt->second.minScore) / span, 0.0, 1.0);
                         } else {
-                            norm = raw > 0.0 ? std::clamp(raw, 0.0, 1.0) : 1.0;
+                            norm = raw > 0.0 ? std::clamp(raw, 0.0, 1.0) : 0.0;
                         }
                     }
                 }

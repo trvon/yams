@@ -2974,36 +2974,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     }
 
-    // Record simeon bandit reward for the arm selected this query.
-    // Training-free: uses proxy signals (result density per ms).
-    if (!selectedSimeonBanditArm.empty() && !selectedSimeonBanditProfile.empty()) {
-        double elapsedMs =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startTime)
-                .count();
-        const double reward =
-            computeSimeonBanditReward(response.results.size(), elapsedMs, selectedSimeonBanditArm);
-
-        std::lock_guard<std::mutex> lock(simeonBanditsMutex_);
-        auto profileIt = simeonBandits_.find(selectedSimeonBanditProfile);
-        if (profileIt == simeonBandits_.end()) {
-            profileIt = simeonBandits_.find("MIXED");
-        }
-        if (profileIt != simeonBandits_.end()) {
-            auto& bandit = profileIt->second;
-            std::optional<std::size_t> armIdx;
-            const auto& arms = bandit.arms();
-            for (std::size_t i = 0; i < arms.size(); ++i) {
-                if (arms[i].id == selectedSimeonBanditArm) {
-                    armIdx = i;
-                    break;
-                }
-            }
-            if (armIdx.has_value()) {
-                bandit.recordReward(*armIdx, reward, TunerMAB::RewardSource::Proxy);
-            }
-        }
-    }
-
     // Per-query vectorOnlyThreshold relaxation: when a query produces no
     // anchored/text results at all, lower the threshold so vector-only docs
     // are not needlessly filtered.  This helps benchmark corpora (SciFact)
@@ -3055,6 +3025,36 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             return Error{fused.error().code, fused.error().message};
         }
         response.results = std::move(fused.value());
+    }
+
+    // Record simeon bandit reward for the arm selected this query after fusion populates results.
+    // Training-free: uses proxy signals (result density per ms).
+    if (!selectedSimeonBanditArm.empty() && !selectedSimeonBanditProfile.empty()) {
+        double elapsedMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startTime)
+                .count();
+        const double reward =
+            computeSimeonBanditReward(response.results.size(), elapsedMs, selectedSimeonBanditArm);
+
+        std::lock_guard<std::mutex> lock(simeonBanditsMutex_);
+        auto profileIt = simeonBandits_.find(selectedSimeonBanditProfile);
+        if (profileIt == simeonBandits_.end()) {
+            profileIt = simeonBandits_.find("MIXED");
+        }
+        if (profileIt != simeonBandits_.end()) {
+            auto& bandit = profileIt->second;
+            std::optional<std::size_t> armIdx;
+            const auto& arms = bandit.arms();
+            for (std::size_t i = 0; i < arms.size(); ++i) {
+                if (arms[i].id == selectedSimeonBanditArm) {
+                    armIdx = i;
+                    break;
+                }
+            }
+            if (armIdx.has_value()) {
+                bandit.recordReward(*armIdx, reward, TunerMAB::RewardSource::Proxy);
+            }
+        }
     }
     const std::size_t postFusionResultCount = response.results.size();
     std::vector<std::string> postFusionAllDocIds = collectRankedResultDocIds(response.results);

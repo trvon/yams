@@ -4227,7 +4227,7 @@ Result<void> MetadataRepository::removeSessionIdFromDocuments(const std::string&
 }
 
 Result<int64_t> MetadataRepository::deleteDocumentsBySessionId(const std::string& sessionId) {
-    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+    auto res = executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
         auto countResult = db.prepare(R"(
             SELECT COUNT(DISTINCT document_id)
             FROM metadata
@@ -4246,6 +4246,25 @@ Result<int64_t> MetadataRepository::deleteDocumentsBySessionId(const std::string
             return stepCount.error();
 
         int64_t count = countStmt.getInt64(0);
+        if (count == 0) {
+            return int64_t{0};
+        }
+
+        // Remove matching FTS5 index entries before deleting documents (which cascades metadata).
+        auto ftsDeleteResult = db.prepare(R"(
+            DELETE FROM documents_fts
+            WHERE rowid IN (
+                SELECT DISTINCT document_id
+                FROM metadata
+                WHERE key = 'session_id' AND value = ?
+            )
+        )");
+        if (ftsDeleteResult) {
+            Statement ftsDeleteStmt = std::move(ftsDeleteResult).value();
+            if (auto bindFts = ftsDeleteStmt.bind(1, sessionId)) {
+                (void)ftsDeleteStmt.execute();
+            }
+        }
 
         auto deleteResult = db.prepare(R"(
             DELETE FROM documents
@@ -4269,6 +4288,10 @@ Result<int64_t> MetadataRepository::deleteDocumentsBySessionId(const std::string
 
         return count;
     });
+    if (res && res.value() > 0) {
+        invalidateQueryCache();
+    }
+    return res;
 }
 
 Result<std::vector<DocumentInfo>>
