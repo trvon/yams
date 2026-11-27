@@ -208,7 +208,7 @@ Result<void> MetadataRepository::incrementPathTreeDocCount(int64_t nodeId, int64
         // Only increment doc_count if a new row was actually inserted
         // (changes() returns 0 if INSERT was ignored due to conflict)
         if (db.changes() == 0) {
-            auto commitRes = commitOrRollback(db);
+            auto commitRes = db.execute("COMMIT");
             if (!commitRes)
                 return commitRes.error();
             txGuard.dismiss();
@@ -227,7 +227,7 @@ Result<void> MetadataRepository::incrementPathTreeDocCount(int64_t nodeId, int64
         if (auto execUpdate = updateStmt.execute(); !execUpdate)
             return execUpdate.error();
 
-        auto commitRes = commitOrRollback(db);
+        auto commitRes = db.execute("COMMIT");
         if (!commitRes)
             return commitRes.error();
         txGuard.dismiss();

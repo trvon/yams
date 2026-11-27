@@ -1269,7 +1269,6 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             WHERE d.id = ?
         )");
             if (!checkStmtResult) {
-                db.execute("ROLLBACK");
                 return checkStmtResult.error();
             }
             auto& checkStmt = *checkStmtResult.value();
@@ -1277,7 +1276,6 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             // Prepare statement for deletion
             auto deleteStmtResult = db.prepareCached("DELETE FROM documents WHERE id = ?");
             if (!deleteStmtResult) {
-                db.execute("ROLLBACK");
                 return deleteStmtResult.error();
             }
             auto& deleteStmt = *deleteStmtResult.value();
@@ -1295,16 +1293,13 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
                 YAMS_TRY_UNWRAP(metadataTagDelta, calculateDocumentDeleteTagDelta(db, id));
 
                 if (auto r = checkStmt.reset(); !r) {
-                    db.execute("ROLLBACK");
                     return r.error();
                 }
                 if (auto r = checkStmt.bind(1, id); !r) {
-                    db.execute("ROLLBACK");
                     return r.error();
                 }
                 auto stepRes = checkStmt.step();
                 if (!stepRes) {
-                    db.execute("ROLLBACK");
                     return stepRes.error();
                 }
                 if (stepRes.value()) {
@@ -1320,15 +1315,12 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
 
                 // Delete document
                 if (auto r = deleteStmt.reset(); !r) {
-                    db.execute("ROLLBACK");
                     return r.error();
                 }
                 if (auto r = deleteStmt.bind(1, id); !r) {
-                    db.execute("ROLLBACK");
                     return r.error();
                 }
                 if (auto execRes = deleteStmt.execute(); !execRes) {
-                    db.execute("ROLLBACK");
                     return execRes.error();
                 }
 

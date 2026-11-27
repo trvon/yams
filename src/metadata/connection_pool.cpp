@@ -246,13 +246,13 @@ void ConnectionPool::shutdown() {
         if (conn == nullptr) {
             continue;
         }
-        // Prevent ~PooledConnection() from calling back into a shutting-down/destroyed pool,
-        // and interrupt any running SQLite statement without closing/resetting db_ out from
-        // under active borrowers. The borrower's PooledConnection destructor will close db_.
-        conn->returned_.store(true, std::memory_order_release);
+        // Interrupt any running SQLite statement BEFORE setting returned_ = true while we still
+        // hold mutex_: any concurrent ~PooledConnection() observing returned_ == false will block
+        // on mutex_ in returnConnection(), keeping conn and db_ alive across interrupt().
         if (conn->db_) {
             conn->db_->interrupt();
         }
+        conn->returned_.store(true, std::memory_order_release);
     }
     leased_.clear();
 
