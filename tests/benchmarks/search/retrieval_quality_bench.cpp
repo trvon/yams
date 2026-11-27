@@ -7232,15 +7232,17 @@ struct BenchFixture {
                 };
 
                 uint64_t lastKgInFlight = 0, lastSymbolInFlight = 0, lastEntityInFlight = 0;
+                uint64_t lastTitleInFlight = 0, lastDownstreamQueued = 0;
                 uint64_t lastExtractionInFlight = 0;
 
                 auto ingestionLooksCompleteFromLastObserved = [&]() -> bool {
                     const bool targetReached = (lastIndexedDocCount >= ingestTargetDocs) ||
                                                (lastDocCount >= ingestTargetDocs);
                     const bool allQueuesDrained =
-                        (lastDepth == 0 && lastExtractionInFlight == 0 && lastKgInFlight == 0 &&
+                        (lastDepth == 0 && lastDownstreamQueued == 0 &&
+                         lastExtractionInFlight == 0 && lastKgInFlight == 0 &&
                          lastSymbolInFlight == 0 && lastEntityInFlight == 0 &&
-                         lastEmbedQueued == 0 && lastEmbedInFlight == 0);
+                         lastTitleInFlight == 0 && lastEmbedQueued == 0 && lastEmbedInFlight == 0);
                     const bool extractionOrPostDone = (lastContentExtracted >= ingestTargetDocs) ||
                                                       (lastPostProcessed >= ingestTargetDocs);
                     return targetReached && allQueuesDrained && extractionOrPostDone;
@@ -7349,17 +7351,28 @@ struct BenchFixture {
                         auto [vectorCount, vectorPresent] = getMetric(counts, "vector_count");
                         uint64_t queuedTotal = std::max<uint64_t>(depth, postQueued);
 
-                        // Check all processing stage in-flight counters
+                        // Check all processing stage in-flight and queued counters
                         auto [extractionInFlight, extractionPresent] =
                             getMetric(counts, "extraction_inflight");
                         auto [kgInFlight, kgPresent] = getMetric(counts, "kg_inflight");
                         auto [symbolInFlight, symbolPresent] = getMetric(counts, "symbol_inflight");
                         auto [entityInFlight, entityPresent] = getMetric(counts, "entity_inflight");
+                        auto [titleInFlight, titleInFlightPresent] =
+                            getMetric(counts, "title_inflight");
+                        auto [kgQueueDepth, kgQueuePresent] = getMetric(counts, "kg_queue_depth");
+                        auto [entityQueueDepth, entityQueuePresent] =
+                            getMetric(counts, "entity_queue_depth");
+                        auto [titleQueueDepth, titleQueuePresent] =
+                            getMetric(counts, "title_queue_depth");
 
                         // Total in-flight across all stages (matches
                         // PostIngestQueue::totalInFlight())
-                        uint64_t totalInFlight =
-                            extractionInFlight + kgInFlight + symbolInFlight + entityInFlight;
+                        uint64_t totalInFlight = extractionInFlight + kgInFlight + symbolInFlight +
+                                                 entityInFlight + titleInFlight;
+                        uint64_t downstreamQueued =
+                            kgQueueDepth + entityQueueDepth + titleQueueDepth;
+                        queuedTotal =
+                            std::max<uint64_t>(queuedTotal, postQueued + downstreamQueued);
 
                         bool statusChanged =
                             (queuedTotal != lastDepth || docCount != lastDocCount ||
@@ -7368,6 +7381,8 @@ struct BenchFixture {
                              postProcessed != lastPostProcessed || kgInFlight != lastKgInFlight ||
                              symbolInFlight != lastSymbolInFlight ||
                              entityInFlight != lastEntityInFlight ||
+                             titleInFlight != lastTitleInFlight ||
+                             downstreamQueued != lastDownstreamQueued ||
                              extractionInFlight != lastExtractionInFlight ||
                              embedQueued != lastEmbedQueued || embedInFlight != lastEmbedInFlight ||
                              vectorCount != lastVectorCount);
@@ -7398,6 +7413,8 @@ struct BenchFixture {
                             lastKgInFlight = kgInFlight;
                             lastSymbolInFlight = symbolInFlight;
                             lastEntityInFlight = entityInFlight;
+                            lastTitleInFlight = titleInFlight;
+                            lastDownstreamQueued = downstreamQueued;
                             lastExtractionInFlight = extractionInFlight;
                             stableChecks = 0;
                             lastProgressTime = now; // Reset progress timer on any change

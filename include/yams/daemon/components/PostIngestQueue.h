@@ -405,6 +405,14 @@ public:
         drainCallback_ = std::move(callback);
     }
 
+    /// Set callback to be invoked after each extraction/content-index batch commits (or records
+    /// extraction failures), independent of slower async KG/entity/title enrichment stages.
+    using LexicalDeltaCommittedCallback = std::function<void(std::size_t)>;
+    void setLexicalDeltaCommittedCallback(LexicalDeltaCommittedCallback callback) {
+        std::lock_guard<std::mutex> lock(drainCallbackMutex_);
+        lexicalDeltaCommittedCallback_ = std::move(callback);
+    }
+
     [[nodiscard]] search::EntityExtractionFunc getTitleExtractor() const;
     [[nodiscard]] bool hasTitleExtractor() const;
 
@@ -424,6 +432,10 @@ public:
                                        entry.contentBytes, timings);
         }
         return failures.empty();
+    }
+    void testing_commitBatchResults(std::vector<PreparedMetadataEntry>& entries,
+                                    std::vector<ExtractionFailure>& failures) {
+        commitBatchResults(entries, failures);
     }
     // Route every KG job to the pending FIFO, as a full channel does in production.
     void testing_detachKgChannel() {
@@ -629,6 +641,7 @@ private:
 
     mutable std::mutex drainCallbackMutex_;
     DrainCallback drainCallback_;
+    LexicalDeltaCommittedCallback lexicalDeltaCommittedCallback_;
 
     mutable std::mutex titleExtractorMutex_;
     search::EntityExtractionFunc titleExtractor_;

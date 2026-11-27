@@ -2940,6 +2940,18 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
     if (!failures.empty()) {
         recordTiming("commit_failures", failureWriteStart);
     }
+
+    const std::size_t completedDocs = successes.size() + failures.size();
+    if (completedDocs > 0) {
+        LexicalDeltaCommittedCallback cb;
+        {
+            std::lock_guard<std::mutex> lock(drainCallbackMutex_);
+            cb = lexicalDeltaCommittedCallback_;
+        }
+        if (cb) {
+            cb(completedDocs);
+        }
+    }
 }
 
 PostIngestQueue::PreparedDispatchPlan
