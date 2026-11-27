@@ -1286,7 +1286,8 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             // DELETE FROM documents; remove matching FTS rows explicitly in the same transaction.
             auto deleteFtsStmtResult =
                 db.prepareCached("DELETE FROM documents_fts WHERE rowid = ?");
-            auto* deleteFtsStmt = deleteFtsStmtResult ? deleteFtsStmtResult.value().get() : nullptr;
+            Statement* deleteFtsStmt =
+                deleteFtsStmtResult ? &(*deleteFtsStmtResult.value()) : nullptr;
 
             // Process each document
             for (int64_t id : ids) {
