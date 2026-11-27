@@ -174,6 +174,17 @@ std::future<Result<void>> RefCounterWriter::submit(RefTransactionBatch batch) {
         return readyFuture(Result<void>{});
     }
 
+    // Validate Increment sizes up front so an invalid caller fails individually instead of
+    // aborting a coalesced multi-caller SQLite transaction on a CHECK constraint violation.
+    for (const auto& op : batch.operations) {
+        if (op.type == RefDelta::Type::Increment) {
+            if (op.compressedSize == 0 ||
+                (op.uncompressedSize > 0 && op.uncompressedSize < op.compressedSize)) {
+                return readyFuture(Result<void>(ErrorCode::InvalidArgument));
+            }
+        }
+    }
+
     const auto opCount = static_cast<std::uint64_t>(batch.operations.size());
     detail::recordRefCounterWriterValue("submitted_batches", 1);
     detail::recordRefCounterWriterValue("submitted_ops", opCount);
@@ -196,7 +207,7 @@ std::future<Result<void>> RefCounterWriter::submit(RefTransactionBatch batch) {
 Result<void> RefCounterWriter::flush() {
     std::unique_lock lock(mutex_);
     const auto target = nextSequence_ - 1;
-    drainedCv_.wait(lock, [&] { return completedSequence_ >= target && queue_.empty(); });
+    drainedCv_.wait(lock, [&] { return completedSequence_ >= target; });
     return Result<void>{};
 }
 

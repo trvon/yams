@@ -162,7 +162,7 @@ public:
     Result<void> decrement(std::string_view blockHash) override;
 
     // Batch operations with C++20 ranges
-    template <BlockHashRange R> Result<void> incrementBatch(R&& hashes, size_t blockSize = 0) {
+    template <BlockHashRange R> Result<void> incrementBatch(R&& hashes, size_t blockSize = 1) {
         auto txn = beginTransaction();
         if (!txn) {
             return Result<void>(ErrorCode::TransactionFailed);
@@ -203,7 +203,7 @@ public:
 
     // Async batch operations with coroutines
     template <BlockHashRange R>
-    std::future<Result<void>> incrementBatchAsync(R&& hashes, size_t blockSize = 0) {
+    std::future<Result<void>> incrementBatchAsync(R&& hashes, size_t blockSize = 1) {
         return std::async(std::launch::async,
                           [this, hashes = std::forward<R>(hashes), blockSize]() {
                               return incrementBatch(hashes, blockSize);
@@ -241,7 +241,7 @@ public:
         void pruneReference(std::string_view blockHash) override;
 
         // Batch operations for efficiency
-        template <BlockHashRange R> void incrementBatch(R&& hashes, size_t blockSize = 0) {
+        template <BlockHashRange R> void incrementBatch(R&& hashes, size_t blockSize = 1) {
             for (const auto& hash : hashes) {
                 increment(hash, blockSize);
             }
@@ -311,6 +311,7 @@ private:
     // Internal methods
     Result<void> initializeDatabase();
     Result<void> executeSchemaMigrations();
+    Result<void> updateStatisticsLocked(const std::string& statName, int64_t delta);
 };
 
 // Garbage collector for unreferenced blocks
