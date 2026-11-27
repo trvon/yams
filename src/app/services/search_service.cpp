@@ -770,12 +770,16 @@ public:
             }
             // Scope the thread_local SearchExecutionContextGuard strictly around the synchronous
             // hybridSearch() call so it is never held across a co_await suspension point.
-            search::SearchExecutionContextGuard searchExecutionContextGuard(
-                std::move(searchExecutionContext));
+            search::SearchExecutionContextGuard searchExecutionContextGuard(searchExecutionContext);
             (void)searchExecutionContextGuard;
             result = hybridSearch(effectiveReq, parsed.scope, &metadataTelemetry,
                                   effectiveReq.pathPattern);
         } else {
+            // Scope the thread_local SearchExecutionContextGuard around synchronous
+            // metadataSearch() so applyExtensionFacets() sees the active execution context without
+            // crossing co_await.
+            search::SearchExecutionContextGuard searchExecutionContextGuard(searchExecutionContext);
+            (void)searchExecutionContextGuard;
             result = metadataSearch(effectiveReq, &metadataTelemetry);
         }
 

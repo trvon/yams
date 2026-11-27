@@ -1619,7 +1619,8 @@ public:
         response.searchStats["fts_candidate_mode"] =
             usedFtsForInitialCandidates ? "initial" : "off";
         response.searchStats["fts_literal_filter"] =
-            (req.literalText && retrievalMode != search::QueryRetrievalMode::Literal &&
+            (req.literalText && !req.invert && !req.filesWithoutMatch &&
+             retrievalMode != search::QueryRetrievalMode::Literal &&
              retrievalMode != search::QueryRetrievalMode::Path)
                 ? "eligible"
                 : "off";
