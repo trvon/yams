@@ -877,6 +877,7 @@ MetadataKgTopologyArtifactStore::loadResidentLatest() const {
         std::lock_guard lock(residentMutex_);
         if (residentGeneration_ == generation) {
             resident_.reset();
+            ++residentGeneration_;
             return nullptr;
         }
         return resident_;
@@ -897,6 +898,7 @@ MetadataKgTopologyArtifactStore::loadResidentLatest() const {
         std::lock_guard lock(residentMutex_);
         if (residentGeneration_ == generation) {
             resident_.reset();
+            ++residentGeneration_;
             return nullptr;
         }
         return resident_;
@@ -906,6 +908,7 @@ MetadataKgTopologyArtifactStore::loadResidentLatest() const {
     std::lock_guard lock(residentMutex_);
     if (residentGeneration_ == generation) {
         resident_ = loadedResident;
+        ++residentGeneration_;
         return loadedResident;
     }
     // A write landed while loading; it is newer than what storage returned.

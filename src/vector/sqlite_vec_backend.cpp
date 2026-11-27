@@ -1340,7 +1340,12 @@ public:
                         --oldIt->second;
                     }
                 }
-                query_dim_counts_[records[idx].embedding.size()] += 1;
+                const size_t effectiveDim = !records[idx].embedding.empty()
+                                                ? records[idx].embedding.size()
+                                                : records[idx].embedding_dim;
+                if (effectiveDim > 0) {
+                    query_dim_counts_[effectiveDim] += 1;
+                }
             }
         }
 
@@ -1595,15 +1600,27 @@ public:
                                                 diagnostics);
             }
 
-            if (!vec0_ready_dims_.contains(query_dim) || vec0_dirty_dims_.contains(query_dim)) {
-                lock.unlock();
-                std::unique_lock write_lock(mutex_);
-                auto ready = ensureVec0ReadyUnlocked(query_dim);
-                write_lock.unlock();
-                lock.lock();
-                if (!ready) {
-                    return ready.error();
+            for (int attempt = 0; attempt < 2; ++attempt) {
+                if (!vec0_ready_dims_.contains(query_dim) || vec0_dirty_dims_.contains(query_dim)) {
+                    lock.unlock();
+                    std::unique_lock write_lock(mutex_);
+                    auto ready = ensureVec0ReadyUnlocked(query_dim);
+                    write_lock.unlock();
+                    lock.lock();
+                    if (!ready) {
+                        return ready.error();
+                    }
                 }
+                if (vec0_ready_dims_.contains(query_dim)) {
+                    break;
+                }
+                const auto countIt = query_dim_counts_.find(query_dim);
+                if (countIt == query_dim_counts_.end() || countIt->second == 0) {
+                    return std::vector<VectorRecord>{};
+                }
+            }
+            if (!vec0_ready_dims_.contains(query_dim)) {
+                return std::vector<VectorRecord>{};
             }
 
             std::vector<int64_t> candidateRowids;
@@ -1621,10 +1638,6 @@ public:
                     return rowids.error();
                 }
                 candidateRowids = std::move(rowids.value());
-            }
-
-            if (!vec0_ready_dims_.contains(query_dim)) {
-                return std::vector<VectorRecord>{};
             }
 
             auto result = vec0SearchUnlocked(query_embedding, k, similarity_threshold,
@@ -1783,14 +1796,23 @@ public:
         }
 
         if (usesVec0SearchEngine()) {
-            if (!vec0_ready_dims_.contains(query_dim) || vec0_dirty_dims_.contains(query_dim)) {
-                lock.unlock();
-                std::unique_lock write_lock(mutex_);
-                auto ready = ensureVec0ReadyUnlocked(query_dim);
-                write_lock.unlock();
-                lock.lock();
-                if (!ready) {
-                    return ready.error();
+            for (int attempt = 0; attempt < 2; ++attempt) {
+                if (!vec0_ready_dims_.contains(query_dim) || vec0_dirty_dims_.contains(query_dim)) {
+                    lock.unlock();
+                    std::unique_lock write_lock(mutex_);
+                    auto ready = ensureVec0ReadyUnlocked(query_dim);
+                    write_lock.unlock();
+                    lock.lock();
+                    if (!ready) {
+                        return ready.error();
+                    }
+                }
+                if (vec0_ready_dims_.contains(query_dim)) {
+                    break;
+                }
+                const auto countIt = query_dim_counts_.find(query_dim);
+                if (countIt == query_dim_counts_.end() || countIt->second == 0) {
+                    break;
                 }
             }
 
@@ -2891,12 +2913,16 @@ public:
             return Error{ErrorCode::DatabaseError, "Failed to commit table drop: " + err};
         }
 
-        vec0_ready_dims_.clear();
-        vec0_dirty_dims_.clear();
-        simeon_pq_indices_.clear();
-        simeon_pq_ready_dims_.clear();
-        simeon_pq_dirty_dims_.clear();
-        refreshQueryDimCountsUnlocked();
+        if (groups.vectors) {
+            vec0_ready_dims_.clear();
+            vec0_dirty_dims_.clear();
+            query_dim_counts_.clear();
+        }
+        if (groups.vectors || groups.simeonPq) {
+            simeon_pq_indices_.clear();
+            simeon_pq_ready_dims_.clear();
+            simeon_pq_dirty_dims_.clear();
+        }
 
         spdlog::info("Dropped {} vector-related tables", tables_to_drop.size());
         return Result<void>{};
@@ -3272,10 +3298,10 @@ private:
         // Parse embedding blob
         const void* blob = sqlite3_column_blob(stmt, 3);
         int blob_size = sqlite3_column_bytes(stmt, 3);
-        if (blob && blob_size > 0) {
-            size_t num_floats = blob_size / sizeof(float);
+        if (blob && blob_size > 0 && (static_cast<size_t>(blob_size) % sizeof(float)) == 0) {
+            size_t num_floats = static_cast<size_t>(blob_size) / sizeof(float);
             record.embedding.resize(num_floats);
-            std::memcpy(record.embedding.data(), blob, blob_size);
+            std::memcpy(record.embedding.data(), blob, static_cast<size_t>(blob_size));
         }
 
         record.content = safeColumnText(stmt, 4);
@@ -4542,6 +4568,10 @@ private:
             return std::vector<VectorRecord>{};
         }
 
+        if (!isFiniteEmbedding(query_embedding) || isZeroNormEmbedding(query_embedding)) {
+            return std::vector<VectorRecord>{};
+        }
+
         if (it->second->exact_fallback) {
             static const std::unordered_set<std::string> kNoCandidateHashes;
             const bool selectDocuments = resultSelection == SimeonResultSelection::DocumentTopK;
@@ -4555,9 +4585,6 @@ private:
             return retainBestRecordPerDocument(std::move(result.value()), k);
         }
 
-        if (!isFiniteEmbedding(query_embedding) || isZeroNormEmbedding(query_embedding)) {
-            return std::vector<VectorRecord>{};
-        }
         std::vector<float> normalized_query = query_embedding;
         if (!normalizeEmbeddingInPlace(normalized_query)) {
             return std::vector<VectorRecord>{};

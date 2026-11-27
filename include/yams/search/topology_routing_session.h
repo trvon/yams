@@ -125,7 +125,9 @@ public:
         std::size_t bqPrefixDimension = 0,
         yams::vector::BinaryRotation bqRotation = yams::vector::BinaryRotation::None);
 
-    void invalidate();
+    [[nodiscard]] Result<TopologyRoutingSnapshotLookup>
+    refresh(bool requireDenseAnnIndex = true, std::size_t bqPrefixDimension = 0,
+            yams::vector::BinaryRotation bqRotation = yams::vector::BinaryRotation::None);
 
 private:
     TopologyRoutingSharedSnapshotLoader loader_;
@@ -212,6 +214,9 @@ makeTopologyRoutingOptions(const SearchEngineConfig& config,
 [[nodiscard]] Result<TopologyRoutingSnapshotLookup>
 getRoutingSnapshot(TopologyRoutingSnapshotCache& cache, std::uint64_t expectedEpoch,
                    const TopologyRoutingOptions& options);
+
+[[nodiscard]] Result<TopologyRoutingSnapshotLookup>
+refreshRoutingSnapshot(TopologyRoutingSnapshotCache& cache, const TopologyRoutingOptions& options);
 
 struct TopologyRoutingSessionRequest {
     std::string query;

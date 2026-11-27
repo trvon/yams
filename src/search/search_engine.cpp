@@ -1068,9 +1068,8 @@ public:
         if (!topologyRoutingMayLoad(mode, false) && !topologyRoutingMayLoad(mode, true)) {
             return false;
         }
-        topologySnapshotCache_->invalidate();
-        auto lookup = getRoutingSnapshot(*topologySnapshotCache_, 0,
-                                         makeTopologyRoutingOptions(config, mode, false));
+        auto lookup = refreshRoutingSnapshot(*topologySnapshotCache_,
+                                             makeTopologyRoutingOptions(config, mode, false));
         if (!lookup) {
             return lookup.error();
         }

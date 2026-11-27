@@ -1110,6 +1110,7 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
     SECTION("SimeonPqAdc rejects NaN and zero-norm query embeddings cleanly") {
         SqliteVecBackend::Config config;
         config.search_engine = VectorSearchEngine::SimeonPqAdc;
+        config.simeon_pq_centroids = 4;
         SqliteVecBackend backend(config);
         REQUIRE((backend.initialize(":memory:").has_value()));
         REQUIRE((backend.createTables(64).has_value()));

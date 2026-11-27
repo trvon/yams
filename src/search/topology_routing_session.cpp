@@ -1966,6 +1966,12 @@ Result<TopologyRoutingSnapshotLookup> getRoutingSnapshot(TopologyRoutingSnapshot
                      toBinaryRotation(options.bqRotation));
 }
 
+Result<TopologyRoutingSnapshotLookup>
+refreshRoutingSnapshot(TopologyRoutingSnapshotCache& cache, const TopologyRoutingOptions& options) {
+    return cache.refresh(options.denseAnnCandidateLimit > 0, options.bqPrefixDimension,
+                         toBinaryRotation(options.bqRotation));
+}
+
 TopologyRoutingSnapshotCache::TopologyRoutingSnapshotCache(TopologyRoutingSnapshotLoader loader) {
     if (loader) {
         loader_ = [copyLoader = std::move(loader)]()
@@ -1987,9 +1993,83 @@ TopologyRoutingSnapshotCache::TopologyRoutingSnapshotCache(
     TopologyRoutingSharedSnapshotLoader loader)
     : loader_(std::move(loader)) {}
 
-void TopologyRoutingSnapshotCache::invalidate() {
+Result<TopologyRoutingSnapshotLookup>
+TopologyRoutingSnapshotCache::refresh(bool requireDenseAnnIndex, std::size_t bqPrefixDimension,
+                                      yams::vector::BinaryRotation bqRotation) {
+    const std::uint64_t bqRotationSeed = bqRotation == yams::vector::BinaryRotation::None
+                                             ? 0
+                                             : yams::vector::kDefaultBinaryRotationSeed;
+    YAMS_ZONE_SCOPED_N("search::topology::snapshotCacheRefresh");
     std::lock_guard lock(mutex_);
-    cached_.reset();
+    if (!loader_) {
+        return Error{ErrorCode::InvalidState, "topology snapshot cache requires a loader"};
+    }
+
+    auto loaded = loader_();
+    if (!loaded) {
+        return loaded.error();
+    }
+    if (!loaded.value()) {
+        cached_.reset();
+        return TopologyRoutingSnapshotLookup{};
+    }
+
+    std::shared_ptr<const yams::topology::TopologyArtifactBatch> artifacts =
+        std::move(loaded.value());
+    if (cached_ && cached_->artifacts == artifacts) {
+        const bool needsDenseAnn = requireDenseAnnIndex && !cached_->denseAnnBuildAttempted;
+        if (needsDenseAnn || cached_->bqPrefixDimension != bqPrefixDimension ||
+            cached_->bqRotation != bqRotation || cached_->bqRotationSeed != bqRotationSeed) {
+            auto upgraded = std::make_shared<TopologyRoutingSnapshot>(*cached_);
+            upgraded->denseAnnBuildAttempted = cached_->denseAnnBuildAttempted || needsDenseAnn;
+            upgraded->bqPrefixDimension = bqPrefixDimension;
+            upgraded->bqRotation = bqRotation;
+            upgraded->bqRotationSeed = bqRotationSeed;
+            upgraded->sparseRouteIndex = yams::topology::SparseGuidedClusterRouter::buildRouteIndex(
+                *upgraded->artifacts, upgraded->denseAnnBuildAttempted, true, bqPrefixDimension,
+                bqRotation);
+            cached_ = std::move(upgraded);
+        }
+        return TopologyRoutingSnapshotLookup{.snapshot = cached_, .cacheHit = true};
+    }
+
+    if (auto invalid = validateTopologyArtifactBatchForRouting(*artifacts); invalid.has_value()) {
+        return Error{ErrorCode::InvalidData, std::string{"invalid_artifact:"} + *invalid};
+    }
+
+    auto snapshot = std::make_shared<TopologyRoutingSnapshot>();
+    snapshot->artifacts = std::move(artifacts);
+    snapshot->constructionFingerprint =
+        topologyRoutingConstructionFingerprint(*snapshot->artifacts);
+    snapshot->representationFingerprint =
+        topologyRoutingRepresentationFingerprint(*snapshot->artifacts);
+    snapshot->roadFingerprint = topologyRoadFingerprint(*snapshot->artifacts);
+    snapshot->roadAdjacency = buildTopologyRoadAdjacency(*snapshot->artifacts);
+    snapshot->orderedMemberHashes = buildTopologyOrderedMemberHashes(*snapshot->artifacts);
+    snapshot->sparseRouteIndex = yams::topology::SparseGuidedClusterRouter::buildRouteIndex(
+        *snapshot->artifacts, requireDenseAnnIndex, true, bqPrefixDimension, bqRotation);
+    snapshot->denseAnnBuildAttempted = requireDenseAnnIndex;
+    snapshot->bqPrefixDimension = bqPrefixDimension;
+    snapshot->bqRotation = bqRotation;
+    snapshot->bqRotationSeed = bqRotationSeed;
+    snapshot->clustersById.reserve(snapshot->artifacts->clusters.size());
+    for (std::size_t index = 0; index < snapshot->artifacts->clusters.size(); ++index) {
+        snapshot->clustersById.emplace(snapshot->artifacts->clusters[index].clusterId, index);
+    }
+    snapshot->membershipsByDocumentHash.reserve(snapshot->artifacts->memberships.size());
+    for (std::size_t index = 0; index < snapshot->artifacts->memberships.size(); ++index) {
+        snapshot->membershipsByDocumentHash.emplace(
+            snapshot->artifacts->memberships[index].documentHash, index);
+    }
+    auto protectedRelationCover =
+        yams::topology::buildProtectedRelationCoverIndex(*snapshot->artifacts);
+    if (!protectedRelationCover) {
+        return Error{ErrorCode::InvalidData,
+                     std::string{"invalid_artifact:"} + protectedRelationCover.error().message};
+    }
+    snapshot->protectedRelationCover = std::move(protectedRelationCover.value());
+    cached_ = std::move(snapshot);
+    return TopologyRoutingSnapshotLookup{.snapshot = cached_, .cacheHit = false};
 }
 
 Result<TopologyRoutingSnapshotLookup>
