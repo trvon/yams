@@ -761,7 +761,8 @@ public:
 
             if (refCounter_) {
                 auto tx = refCounter_->beginTransaction();
-                tx->increment(dataHash, data.size());
+                const size_t trackedSize = std::max<size_t>(1, data.size());
+                tx->increment(dataHash, trackedSize, trackedSize);
                 auto commitRes = tx->commit();
                 if (!commitRes) {
                     tx->rollback();
