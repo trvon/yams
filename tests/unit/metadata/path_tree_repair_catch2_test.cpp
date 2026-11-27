@@ -326,13 +326,13 @@ TEST_CASE("repairMissingPathTree matches the normalized leaf the upsert writes",
 TEST_CASE("repairMissingPathTree is idempotent across relative and absolute paths with shared root",
           "[unit][metadata][path-tree][repair]") {
     PathTreeRepairFixture fix;
-    fix.insertWithTree("src/foo.cpp");
+    auto relDoc = fix.insertWithoutTree("src/foo.cpp");
     auto absDoc = fix.insertWithoutTree("/src/foo.cpp");
-    REQUIRE(fix.missing() == 1);
+    REQUIRE(fix.missing() == 2);
 
     auto first = repairMissingPathTree(*fix.repo);
     REQUIRE_FALSE(first.error.has_value());
-    CHECK(first.documentsMissing == 1);
+    CHECK(first.documentsMissing == 2);
     CHECK(fix.hasNode("src/foo.cpp"));
     CHECK(fix.hasNode("/src/foo.cpp"));
     CHECK(fix.missing() == 0);
@@ -340,6 +340,7 @@ TEST_CASE("repairMissingPathTree is idempotent across relative and absolute path
     auto second = repairMissingPathTree(*fix.repo);
     REQUIRE_FALSE(second.error.has_value());
     CHECK(second.documentsMissing == 0);
+    (void)relDoc;
     (void)absDoc;
 }
 

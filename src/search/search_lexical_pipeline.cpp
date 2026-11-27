@@ -475,15 +475,16 @@ void applySubPhraseRescoring(
             continue;
         }
 
-        const auto [phMin, phMax] = detail::computeBm25Range(phraseResults.value().results);
+        const auto phRange = detail::computeBm25Range(phraseResults.value().results);
 
         for (const auto& pr : phraseResults.value().results) {
             auto it = rescoreIndex.find(pr.document.sha256Hash);
             if (it == rescoreIndex.end()) {
                 continue;
             }
-            float phraseNorm = detail::normalizedBm25Score(static_cast<float>(pr.score),
-                                                           config.bm25NormDivisor, phMin, phMax);
+            float phraseNorm =
+                detail::normalizedBm25Score(static_cast<float>(pr.score), config.bm25NormDivisor,
+                                            phRange.minScore, phRange.maxScore);
             float boost = std::clamp(phraseNorm * rescorePenalty, 0.0f, 1.0f);
             results[it->second].score = std::max(results[it->second].score, boost);
         }
