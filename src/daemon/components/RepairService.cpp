@@ -785,6 +785,13 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
             }
         }
 
+        if (requeuedFts5 > 0 && missingEmbeddings.empty()) {
+            fsm.reset();
+            timer.expires_after(500ms);
+            co_await timer.async_wait(boost::asio::use_awaitable);
+            continue;
+        }
+
         fsm.advance(core::RepairFsm::State::Complete); // rejected after a failed dispatch
         fsm.reset();
 
@@ -2010,6 +2017,7 @@ RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, const Progre
 
     auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!meta) {
+        result.failed = 1;
         result.message = "Metadata repository not available";
         co_return result;
     }
@@ -2504,15 +2512,14 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
 
     auto meta = ctx_.getMetadataRepo ? ctx_.getMetadataRepo() : nullptr;
     if (!meta) {
+        result.failed = 1;
         result.message = "Metadata not available";
         return result;
     }
 
-    auto* wc = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
-    MetadataWriteFacade metaFacade(wc, meta.get());
-
     auto docsResult = metadata::queryDocumentsByPattern(*meta, "%://%");
     if (!docsResult) {
+        result.failed = 1;
         result.message = "Failed to query";
         return result;
     }

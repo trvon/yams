@@ -71,7 +71,8 @@ RepairHealthSnapshot RepairHealthProbe::probe(const RepairHealthOptions& options
         }
     }
 
-    if (checkGraph && kgStore_ && options.semanticNeighborGapProbeLimit > 0) {
+    if (checkGraph && snapshot.graphIntegrityOk && kgStore_ &&
+        options.semanticNeighborGapProbeLimit > 0) {
         auto missing = kgStore_->findNodesLackingOutboundEdges(
             std::string_view{"document"}, std::string_view{"semantic_neighbor"},
             options.semanticNeighborGapProbeLimit);
