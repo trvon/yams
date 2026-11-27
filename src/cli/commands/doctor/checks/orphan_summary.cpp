@@ -48,8 +48,8 @@ OrphanSummaryCheck::Result OrphanSummaryCheck::execute(const DoctorContext& ctx)
         }
     }
 
-    // Health assessment
-    if (r.fts5OrphansDetected > 0 || r.corruptArtifacts > 0)
+    // Health assessment: resolved FTS5 orphans (detected == removed) are not unhealthy.
+    if (r.fts5OrphansDetected > r.fts5OrphansRemoved || r.corruptArtifacts > 0)
         r.ok = false;
 
     return r;

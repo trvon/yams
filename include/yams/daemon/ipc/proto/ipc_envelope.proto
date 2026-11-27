@@ -1140,6 +1140,7 @@ message RepairRequest {
   string embedding_model = 16;
   repeated string include_mime = 17;
   int32 max_retries = 18;
+  bool remove_corrupt = 22;
 }
 
 message RepairOperationResult {

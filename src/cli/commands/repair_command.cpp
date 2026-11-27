@@ -187,49 +187,58 @@ public:
         }
 
         // State for rendering progress
-        std::string lastOperation;
-        uint64_t lastProcessed = 0;
-        uint64_t lastTotal = 0;
-        std::mutex progressMutex;
-        std::string lastObservedOperation;
-        std::string lastPhase;
-        std::string lastMessage;
-        ui::LiveLine liveLine;
         const auto startTime = std::chrono::steady_clock::now();
         auto nowMillis = [] {
             return std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::steady_clock::now().time_since_epoch())
                 .count();
         };
-        std::atomic<long long> lastProgressAtMs{nowMillis()};
+
+        // Heap-allocated progress state shared with the detached RPC coroutine so timeout
+        // never leaves dangling stack references.
+        struct ProgressState {
+            std::mutex mutex;
+            std::string lastOperation;
+            std::string lastObservedOperation;
+            std::string lastPhase;
+            std::string lastMessage;
+            uint64_t lastProcessed = 0;
+            uint64_t lastTotal = 0;
+            ui::LiveLine liveLine;
+            std::atomic<long long> lastProgressAtMs{0};
+            std::atomic<bool> timedOut{false};
+        };
+        auto progressState = std::make_shared<ProgressState>();
+        progressState->lastProgressAtMs.store(nowMillis(), std::memory_order_relaxed);
 
         // Streaming event callback — renders progress to stdout
-        auto onEvent = [&](const RepairEvent& ev) {
-            lastProgressAtMs.store(nowMillis(), std::memory_order_relaxed);
-            {
-                std::lock_guard<std::mutex> lock(progressMutex);
-                if (!ev.operation.empty())
-                    lastObservedOperation = ev.operation;
-                lastPhase = ev.phase;
-                lastMessage = ev.message;
-                lastProcessed = ev.processed;
-                if (ev.total > 0)
-                    lastTotal = ev.total;
+        auto onEvent = [progressState, nowMillis](const RepairEvent& ev) {
+            progressState->lastProgressAtMs.store(nowMillis(), std::memory_order_relaxed);
+            std::lock_guard<std::mutex> lock(progressState->mutex);
+            if (progressState->timedOut.load(std::memory_order_acquire)) {
+                return;
             }
+            if (!ev.operation.empty())
+                progressState->lastObservedOperation = ev.operation;
+            progressState->lastPhase = ev.phase;
+            progressState->lastMessage = ev.message;
+            progressState->lastProcessed = ev.processed;
+            if (ev.total > 0)
+                progressState->lastTotal = ev.total;
 
             // Print section transitions
-            if (ev.operation != lastOperation) {
-                if (!lastOperation.empty()) {
-                    liveLine.finish();
+            if (ev.operation != progressState->lastOperation) {
+                if (!progressState->lastOperation.empty()) {
+                    progressState->liveLine.finish();
                     std::cout << "\n";
                 }
-                lastOperation = ev.operation;
+                progressState->lastOperation = ev.operation;
                 std::cout << "  " << ui::status_pending(ev.operation) << "\n";
             }
 
             // Phase-based rendering
             if (ev.phase == "completed") {
-                liveLine.finish();
+                progressState->liveLine.finish();
                 if (ev.succeeded > 0 || ev.failed > 0) {
                     std::cout << "    " << ui::status_ok("Done") << "  processed=" << ev.processed
                               << " ok=" << ev.succeeded << " failed=" << ev.failed;
@@ -240,7 +249,7 @@ public:
                     std::cout << "    " << ev.message << "\n";
                 }
             } else if (ev.phase == "error") {
-                liveLine.finish();
+                progressState->liveLine.finish();
                 std::cout << "    " << ui::status_warning(ev.message) << "\n";
             } else if (ev.phase == "repairing") {
                 std::ostringstream line;
@@ -253,7 +262,7 @@ public:
                 } else if (!ev.phase.empty()) {
                     line << ev.phase;
                 }
-                liveLine.update(line.str());
+                progressState->liveLine.update(line.str());
             }
         };
 
@@ -262,12 +271,13 @@ public:
         auto fut = prom->get_future();
         boost::asio::co_spawn(
             getExecutor(),
-            [leaseHandle, req, prom, onEvent, &lastProgressAtMs,
+            [leaseHandle, req, prom, onEvent, progressState,
              nowMillis]() mutable -> boost::asio::awaitable<void> {
                 try {
                     auto& client = **leaseHandle;
-                    auto onActivity = [&lastProgressAtMs, nowMillis]() {
-                        lastProgressAtMs.store(nowMillis(), std::memory_order_relaxed);
+                    auto onActivity = [progressState, nowMillis]() {
+                        progressState->lastProgressAtMs.store(nowMillis(),
+                                                              std::memory_order_relaxed);
                     };
                     auto r = co_await client.callRepair(req, onEvent, onActivity);
                     prom->set_value(std::move(r));
@@ -298,7 +308,7 @@ public:
         constexpr auto kPollInterval = std::chrono::milliseconds(500);
         while (fut.wait_for(kPollInterval) != std::future_status::ready) {
             const auto idleFor = std::chrono::milliseconds(
-                nowMillis() - lastProgressAtMs.load(std::memory_order_relaxed));
+                nowMillis() - progressState->lastProgressAtMs.load(std::memory_order_relaxed));
             if (idleFor >= localWaitTimeout) {
                 std::string op;
                 std::string phase;
@@ -306,12 +316,14 @@ public:
                 uint64_t processed = 0;
                 uint64_t total = 0;
                 {
-                    std::lock_guard<std::mutex> lock(progressMutex);
-                    op = lastObservedOperation;
-                    phase = lastPhase;
-                    message = lastMessage;
-                    processed = lastProcessed;
-                    total = lastTotal;
+                    std::lock_guard<std::mutex> lock(progressState->mutex);
+                    progressState->timedOut.store(true, std::memory_order_release);
+                    progressState->liveLine.finish();
+                    op = progressState->lastObservedOperation;
+                    phase = progressState->lastPhase;
+                    message = progressState->lastMessage;
+                    processed = progressState->lastProcessed;
+                    total = progressState->lastTotal;
                 }
 
                 const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
@@ -343,7 +355,10 @@ public:
             res = fut.get();
         }
 
-        liveLine.finish();
+        {
+            std::lock_guard<std::mutex> lock(progressState->mutex);
+            progressState->liveLine.finish();
+        }
 
         if (!res.value()) {
             return Error{res.value().error().code, res.value().error().message};
@@ -408,11 +423,11 @@ public:
 
         if (resp.success) {
             std::cout << ui::status_ok("All repair operations completed successfully") << "\n";
-        } else {
-            std::cout << ui::status_warning("Repair completed with errors") << "\n";
+            return Result<void>();
         }
 
-        return Result<void>();
+        std::cout << ui::status_warning("Repair completed with errors") << "\n";
+        return Error{ErrorCode::InternalError, "Repair completed with errors"};
     }
 
 private:

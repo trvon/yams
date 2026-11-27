@@ -273,6 +273,24 @@ TEST_CASE_METHOD(VectorSchemaRepairFixture,
 }
 
 TEST_CASE_METHOD(VectorSchemaRepairFixture,
+                 "ensureVectorSchemaAligned and recreateVectorTables reject zero dimension",
+                 "[unit][vector][schema-repair][catch2]") {
+    seed(8);
+
+    auto aligned = ensureVectorSchemaAligned(dataDir, 0, /*recreateIfMismatch=*/true);
+    REQUIRE_FALSE(aligned.has_value());
+    CHECK(aligned.error().code == yams::ErrorCode::InvalidArgument);
+
+    auto recreated = recreateVectorTables(dataDir, 0);
+    REQUIRE_FALSE(recreated.has_value());
+    CHECK(recreated.error().code == yams::ErrorCode::InvalidArgument);
+
+    const auto s = snapshot();
+    CHECK(s.rows == 1);
+    CHECK(s.storedDim == std::optional<std::size_t>{8});
+}
+
+TEST_CASE_METHOD(VectorSchemaRepairFixture,
                  "ensureVectorSchemaAligned treats stale entity_vectors as a mismatch",
                  "[unit][vector][schema-repair][catch2]") {
     seedEntityOnly(8);
