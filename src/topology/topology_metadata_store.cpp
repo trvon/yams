@@ -654,6 +654,7 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         latestNode.createdTime = nowSecs;
         latestNode.updatedTime = nowSecs;
         latestNode.properties = json{{"snapshot_id", batch.snapshotId},
+                                     {"topology_epoch", batch.topologyEpoch},
                                      {"generated_at_unix_seconds", batch.generatedAtUnixSeconds}}
                                     .dump();
         auto latestResult = kgStore_->upsertNode(latestNode);
@@ -852,6 +853,8 @@ MetadataKgTopologyArtifactStore::loadResidentLatest() const {
         return latestNodeResult.error();
     }
     std::string latestSnapshotId;
+    std::optional<std::uint64_t> latestTopologyEpoch;
+    std::optional<std::uint64_t> latestGeneratedAt;
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     if (latestNodeResult.value().has_value() && latestNodeResult.value()->properties.has_value()) {
         // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
@@ -860,12 +863,29 @@ MetadataKgTopologyArtifactStore::loadResidentLatest() const {
             if (auto it = parsed.find("snapshot_id"); it != parsed.end() && it->is_string()) {
                 latestSnapshotId = it->get<std::string>();
             }
+            if (auto it = parsed.find("topology_epoch");
+                it != parsed.end() && it->is_number_unsigned()) {
+                latestTopologyEpoch = it->get<std::uint64_t>();
+            }
+            if (auto it = parsed.find("generated_at_unix_seconds");
+                it != parsed.end() && it->is_number_unsigned()) {
+                latestGeneratedAt = it->get<std::uint64_t>();
+            }
         }
     }
     if (latestSnapshotId.empty()) {
-        return current;
+        std::lock_guard lock(residentMutex_);
+        if (residentGeneration_ == generation) {
+            resident_.reset();
+            return nullptr;
+        }
+        return resident_;
     }
-    if (current && current->batch.snapshotId == latestSnapshotId) {
+    if (current && current->batch.snapshotId == latestSnapshotId &&
+        (!latestTopologyEpoch.has_value() ||
+         current->batch.topologyEpoch == *latestTopologyEpoch) &&
+        (!latestGeneratedAt.has_value() ||
+         current->batch.generatedAtUnixSeconds == *latestGeneratedAt)) {
         return current;
     }
 
@@ -874,7 +894,12 @@ MetadataKgTopologyArtifactStore::loadResidentLatest() const {
         return loaded.error();
     }
     if (!loaded.value().has_value()) {
-        return current;
+        std::lock_guard lock(residentMutex_);
+        if (residentGeneration_ == generation) {
+            resident_.reset();
+            return nullptr;
+        }
+        return resident_;
     }
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access): checked above
     auto loadedResident = makeResident(std::move(*loaded.value()));

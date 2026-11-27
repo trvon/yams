@@ -222,12 +222,22 @@ inline bool isZeroNormEmbedding(const std::vector<float>& embedding) {
 inline bool normalizeEmbeddingInPlace(std::vector<float>& embedding) {
     double norm_sq = 0.0;
     for (float val : embedding) {
+        if (!std::isfinite(val)) {
+            return false;
+        }
         norm_sq += static_cast<double>(val) * static_cast<double>(val);
     }
-    if (norm_sq <= 1e-20) {
+    if (!std::isfinite(norm_sq) || norm_sq <= 1e-20) {
         return false;
     }
-    float inv_norm = 1.0f / std::sqrt(static_cast<float>(norm_sq));
+    const double inv_norm_d = 1.0 / std::sqrt(norm_sq);
+    if (!std::isfinite(inv_norm_d) || inv_norm_d <= 0.0) {
+        return false;
+    }
+    const float inv_norm = static_cast<float>(inv_norm_d);
+    if (!std::isfinite(inv_norm) || inv_norm <= 0.0f) {
+        return false;
+    }
     for (float& val : embedding) {
         val *= inv_norm;
     }
@@ -338,8 +348,10 @@ struct StmtResetGuard {
     sqlite3_stmt* stmt;
     explicit StmtResetGuard(sqlite3_stmt* s) : stmt(s) {}
     ~StmtResetGuard() {
-        if (stmt)
+        if (stmt) {
             sqlite3_reset(stmt);
+            sqlite3_clear_bindings(stmt);
+        }
     }
     StmtResetGuard(const StmtResetGuard&) = delete;
     StmtResetGuard& operator=(const StmtResetGuard&) = delete;
@@ -1264,6 +1276,7 @@ public:
 
                 if (stmt_delete_by_chunk_id_) {
                     sqlite3_reset(stmt_delete_by_chunk_id_);
+                    StmtResetGuard deleteGuard(stmt_delete_by_chunk_id_);
                     sqlite3_bind_text(stmt_delete_by_chunk_id_, 1, record.chunk_id.c_str(), -1,
                                       SQLITE_TRANSIENT);
                     if (const int rc = stepWithRetry(stmt_delete_by_chunk_id_); rc != SQLITE_DONE) {
@@ -1321,6 +1334,12 @@ public:
 
         for (size_t idx : unique_indices) {
             if (rowids[idx] >= 0) {
+                if (old_dims[idx].has_value()) {
+                    auto oldIt = query_dim_counts_.find(*old_dims[idx]);
+                    if (oldIt != query_dim_counts_.end() && oldIt->second > 0) {
+                        --oldIt->second;
+                    }
+                }
                 query_dim_counts_[records[idx].embedding.size()] += 1;
             }
         }
@@ -1374,6 +1393,7 @@ public:
         // Delete old record inside the savepoint.
         if (stmt_delete_by_chunk_id_) {
             sqlite3_reset(stmt_delete_by_chunk_id_);
+            StmtResetGuard deleteGuard(stmt_delete_by_chunk_id_);
             sqlite3_bind_text(stmt_delete_by_chunk_id_, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
             if (const int rc = stepWithRetry(stmt_delete_by_chunk_id_); rc != SQLITE_DONE) {
                 const std::string error = sqlite3_errmsg(db_);
@@ -1453,6 +1473,7 @@ public:
         // Delete from SQLite
         if (stmt_delete_by_chunk_id_) {
             sqlite3_reset(stmt_delete_by_chunk_id_);
+            StmtResetGuard deleteGuard(stmt_delete_by_chunk_id_);
             sqlite3_bind_text(stmt_delete_by_chunk_id_, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
             if (const int rc = stepWithRetry(stmt_delete_by_chunk_id_); rc != SQLITE_DONE) {
                 return Error{ErrorCode::DatabaseError,
@@ -1515,6 +1536,7 @@ public:
         // Delete from SQLite
         if (stmt_delete_by_doc_) {
             sqlite3_reset(stmt_delete_by_doc_);
+            StmtResetGuard deleteGuard(stmt_delete_by_doc_);
             sqlite3_bind_text(stmt_delete_by_doc_, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
             if (const int rc = stepWithRetry(stmt_delete_by_doc_); rc != SQLITE_DONE) {
                 return Error{ErrorCode::DatabaseError, "Failed to delete document vectors: " +
@@ -1599,6 +1621,10 @@ public:
                     return rowids.error();
                 }
                 candidateRowids = std::move(rowids.value());
+            }
+
+            if (!vec0_ready_dims_.contains(query_dim)) {
+                return std::vector<VectorRecord>{};
             }
 
             auto result = vec0SearchUnlocked(query_embedding, k, similarity_threshold,
@@ -1770,6 +1796,10 @@ public:
 
             std::vector<std::vector<VectorRecord>> results;
             results.reserve(query_embeddings.size());
+            if (!vec0_ready_dims_.contains(query_dim)) {
+                results.resize(query_embeddings.size());
+                return results;
+            }
             for (const auto& query_embedding : query_embeddings) {
                 auto result = vec0SearchUnlocked(query_embedding, k, similarity_threshold);
                 if (!result) {
@@ -2669,6 +2699,12 @@ public:
 
         in_transaction_ = false;
         transaction_owner_ = {};
+        refreshQueryDimCountsUnlocked();
+        vec0_ready_dims_.clear();
+        vec0_dirty_dims_.clear();
+        simeon_pq_indices_.clear();
+        simeon_pq_ready_dims_.clear();
+        simeon_pq_dirty_dims_.clear();
         return Result<void>{};
     }
 
@@ -2854,6 +2890,13 @@ public:
             exec("ROLLBACK", ignored);
             return Error{ErrorCode::DatabaseError, "Failed to commit table drop: " + err};
         }
+
+        vec0_ready_dims_.clear();
+        vec0_dirty_dims_.clear();
+        simeon_pq_indices_.clear();
+        simeon_pq_ready_dims_.clear();
+        simeon_pq_dirty_dims_.clear();
+        refreshQueryDimCountsUnlocked();
 
         spdlog::info("Dropped {} vector-related tables", tables_to_drop.size());
         return Result<void>{};
@@ -3260,6 +3303,7 @@ private:
         }
 
         sqlite3_reset(stmt_insert_);
+        StmtResetGuard insertGuard(stmt_insert_);
 
         // Bind parameters with SQLITE_STATIC + explicit lengths (all buffers outlive
         // stepWithRetry(stmt_insert_) below).
@@ -3469,10 +3513,10 @@ private:
         // Embedding blob
         const void* blob = sqlite3_column_blob(stmt, 3);
         int blob_size = sqlite3_column_bytes(stmt, 3);
-        if (blob && blob_size > 0) {
+        if (blob && blob_size > 0 && (static_cast<size_t>(blob_size) % sizeof(float)) == 0) {
             size_t num_floats = static_cast<size_t>(blob_size) / sizeof(float);
             record.embedding.resize(num_floats);
-            std::memcpy(record.embedding.data(), blob, blob_size);
+            std::memcpy(record.embedding.data(), blob, static_cast<size_t>(blob_size));
             record.embedding_dim = num_floats;
         } else {
             record.embedding_dim = static_cast<size_t>(sqlite3_column_int64(stmt, 4));
@@ -3864,6 +3908,12 @@ private:
 
         if (focus_dim) {
             if (!available_dims.contains(*focus_dim)) {
+                const std::string drop_sql =
+                    "DROP TABLE IF EXISTS \"" + vec0TableName(*focus_dim) + "\"";
+                char* err_msg = nullptr;
+                if (sqlite3_exec(db_, drop_sql.c_str(), nullptr, nullptr, &err_msg) != SQLITE_OK) {
+                    sqlite3_free(err_msg);
+                }
                 vec0_dirty_dims_.erase(*focus_dim);
                 vec0_ready_dims_.erase(*focus_dim);
                 return Result<void>{};
@@ -4505,6 +4555,9 @@ private:
             return retainBestRecordPerDocument(std::move(result.value()), k);
         }
 
+        if (!isFiniteEmbedding(query_embedding) || isZeroNormEmbedding(query_embedding)) {
+            return std::vector<VectorRecord>{};
+        }
         std::vector<float> normalized_query = query_embedding;
         if (!normalizeEmbeddingInPlace(normalized_query)) {
             return std::vector<VectorRecord>{};
@@ -4705,7 +4758,9 @@ private:
                                 sqlite3_column_blob(stmt_select_rerank_batch_by_rowid_, 3);
                             const int blobSize =
                                 sqlite3_column_bytes(stmt_select_rerank_batch_by_rowid_, 3);
-                            const bool hasEmbedding = (blob != nullptr && blobSize > 0);
+                            const bool hasEmbedding =
+                                (blob != nullptr && blobSize > 0 &&
+                                 (static_cast<std::size_t>(blobSize) % sizeof(float)) == 0);
                             float similarity = 0.0f;
                             if (hasEmbedding) {
                                 const std::size_t numFloats =
@@ -4743,7 +4798,7 @@ private:
                                     similarity = foundPair->second;
                                 }
                             }
-                            if (similarity < similarity_threshold) {
+                            if (!std::isfinite(similarity) || similarity < similarity_threshold) {
                                 continue;
                             }
                             const char* chunkIdTxt = reinterpret_cast<const char*>(
@@ -4792,7 +4847,9 @@ private:
                         const int blobSize = sqlite3_column_bytes(stmt_select_rerank_by_rowid_, 2);
                         std::string chunkId = chunkIdTxt ? chunkIdTxt : "";
                         std::string docHash = docHashTxt ? docHashTxt : "";
-                        const bool hasEmbedding = (blob != nullptr && blobSize > 0);
+                        const bool hasEmbedding =
+                            (blob != nullptr && blobSize > 0 &&
+                             (static_cast<std::size_t>(blobSize) % sizeof(float)) == 0);
                         if (hasEmbedding) {
                             const std::size_t numFloats =
                                 static_cast<std::size_t>(blobSize) / sizeof(float);
@@ -4821,7 +4878,7 @@ private:
                                         .count());
                             }
                         }
-                        if (similarity < similarity_threshold) {
+                        if (!std::isfinite(similarity) || similarity < similarity_threshold) {
                             continue;
                         }
                         candidates.push_back(RerankCandidate{rowid, similarity, std::move(chunkId),
@@ -4946,7 +5003,7 @@ private:
                             .count());
                 }
             }
-            if (similarity < similarity_threshold) {
+            if (!std::isfinite(similarity) || similarity < similarity_threshold) {
                 continue;
             }
             found->second.relevance_score = similarity;

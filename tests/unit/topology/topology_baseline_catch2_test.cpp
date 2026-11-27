@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <map>
 #include <memory>
 #include <numbers>
@@ -1189,6 +1190,39 @@ TEST_CASE("Sparse-guided routing limits a prebuilt representative cover at query
     REQUIRE(coveredRoute.has_value());
     CHECK(coveredRoute.value().front().clusterId == "cover-winner");
     CHECK(coveredWork.representativeDistanceEvaluations == 3);
+}
+
+TEST_CASE("Sparse-guided routing guards centroid dimension mismatch and non-finite queries",
+          "[unit][topology][routing][guards]") {
+    TopologyArtifactBatch batch;
+    batch.clusters = {
+        ClusterArtifact{
+            .clusterId = "c-dim4",
+            .memberCount = 2,
+            .memberDocumentHashes = {"a", "b"},
+            .centroidEmbedding = {1.0F, 0.0F, 0.0F, 0.0F},
+        },
+    };
+    const auto index = SparseGuidedClusterRouter::buildRouteIndex(batch);
+    SparseGuidedClusterRouter router;
+
+    TopologyRouteRequest mismatchReq;
+    mismatchReq.queryEmbedding = {1.0F, 0.0F};
+    mismatchReq.sparseDenseAlpha = 0.0F;
+    mismatchReq.limit = 1;
+    auto mismatchRes = router.route(mismatchReq, batch, index);
+    REQUIRE(mismatchRes.has_value());
+    REQUIRE(mismatchRes.value().size() == 1);
+    CHECK_FALSE(mismatchRes.value().front().semanticCost.has_value());
+
+    TopologyRouteRequest nanReq;
+    nanReq.queryEmbedding = {std::numeric_limits<float>::quiet_NaN(), 0.0F, 0.0F, 0.0F};
+    nanReq.sparseDenseAlpha = 0.0F;
+    nanReq.limit = 1;
+    auto nanRes = router.route(nanReq, batch, index);
+    REQUIRE(nanRes.has_value());
+    REQUIRE(nanRes.value().size() == 1);
+    CHECK(std::isfinite(nanRes.value().front().routeScore));
 }
 
 TEST_CASE("Metadata KG topology store persists memberships and latest snapshot",

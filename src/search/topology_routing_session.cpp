@@ -1987,6 +1987,11 @@ TopologyRoutingSnapshotCache::TopologyRoutingSnapshotCache(
     TopologyRoutingSharedSnapshotLoader loader)
     : loader_(std::move(loader)) {}
 
+void TopologyRoutingSnapshotCache::invalidate() {
+    std::lock_guard lock(mutex_);
+    cached_.reset();
+}
+
 Result<TopologyRoutingSnapshotLookup>
 TopologyRoutingSnapshotCache::get(std::uint64_t expectedEpoch, bool requireDenseAnnIndex,
                                   std::size_t bqPrefixDimension,
@@ -2023,6 +2028,7 @@ TopologyRoutingSnapshotCache::get(std::uint64_t expectedEpoch, bool requireDense
         return loaded.error();
     }
     if (!loaded.value()) {
+        cached_.reset();
         return TopologyRoutingSnapshotLookup{};
     }
 

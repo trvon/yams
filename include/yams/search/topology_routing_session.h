@@ -125,6 +125,8 @@ public:
         std::size_t bqPrefixDimension = 0,
         yams::vector::BinaryRotation bqRotation = yams::vector::BinaryRotation::None);
 
+    void invalidate();
+
 private:
     TopologyRoutingSharedSnapshotLoader loader_;
     std::mutex mutex_;

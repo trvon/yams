@@ -543,6 +543,42 @@ TEST_CASE("MetadataKgTopologyArtifactStore retains a bounded number of snapshots
     CHECK_FALSE(oldest.value().has_value());
 }
 
+TEST_CASE("MetadataKgTopologyArtifactStore refreshes same-id newer epoch and clears missing latest",
+          "[unit][topology][store][resident-cache]") {
+    TestFixture fixture;
+    fixture.addDocument("hash_a", "/repo/a.md");
+    fixture.addDocument("hash_b", "/repo/b.md");
+
+    MetadataKgTopologyArtifactStore reader(fixture.repository, fixture.kgStore);
+    MetadataKgTopologyArtifactStore writer(fixture.repository, fixture.kgStore);
+
+    auto v1 = makeTwoDocBatch("snap-shared", 1);
+    v1.generatedAtUnixSeconds = 1700000100;
+    REQUIRE(writer.storeBatch(v1).has_value());
+
+    auto loaded1 = reader.loadLatestShared();
+    REQUIRE(loaded1.has_value());
+    REQUIRE(loaded1.value());
+    CHECK(loaded1.value()->topologyEpoch == 1U);
+
+    // Overwrite same snapshotId with a newer epoch via a separate store instance.
+    auto v2 = makeTwoDocBatch("snap-shared", 2);
+    v2.generatedAtUnixSeconds = 1700000200;
+    REQUIRE(writer.storeBatch(v2).has_value());
+
+    auto loaded2 = reader.loadLatestShared();
+    REQUIRE(loaded2.has_value());
+    REQUIRE(loaded2.value());
+    CHECK(loaded2.value()->topologyEpoch == 2U);
+
+    // Deleting the latest pointer must clear the resident cache rather than returning stale data.
+    const auto latestNodeId = nodeIdForKey(fixture, "topology:snapshot:latest");
+    REQUIRE(fixture.kgStore->deleteNodeById(latestNodeId).has_value());
+    auto loadedAfterDelete = reader.loadLatestShared();
+    REQUIRE(loadedAfterDelete.has_value());
+    CHECK(loadedAfterDelete.value() == nullptr);
+}
+
 namespace {
 
 // A batch over `docCount` documents whose compressed payload spans many small chunks: the
