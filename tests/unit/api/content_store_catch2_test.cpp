@@ -895,6 +895,48 @@ TEST_CASE("ContentStore: Memory operations", "[api][content-store][memory]") {
         CHECK(retrieved.value()[3] == std::byte{0xFF});
     }
 
+    SECTION("Duplicate small storeBytes preserves refcount across remove") {
+        const std::string content = "duplicate direct payload";
+        const auto data = std::span<const std::byte>(
+            reinterpret_cast<const std::byte*>(content.data()), content.size());
+
+        auto first = fixture.store_->storeBytes(data);
+        REQUIRE(first.has_value());
+        auto second = fixture.store_->storeBytes(data);
+        REQUIRE(second.has_value());
+        const auto hash = first.value().contentHash;
+        REQUIRE(second.value().contentHash == hash);
+
+        auto rem1 = fixture.store_->remove(hash);
+        REQUIRE(rem1.has_value());
+        CHECK(rem1.value());
+        // Still referenced once: must remain retrievable.
+        auto stillThere = fixture.store_->retrieveBytes(hash);
+        REQUIRE(stillThere.has_value());
+        CHECK(stillThere.value().size() == content.size());
+
+        auto rem2 = fixture.store_->remove(hash);
+        REQUIRE(rem2.has_value());
+        CHECK(rem2.value());
+        // Final ref removed: retrieveBytes must fail and not resurrect deleted content.
+        auto gone = fixture.store_->retrieveBytes(hash);
+        CHECK_FALSE(gone.has_value());
+    }
+
+    SECTION("Removed single-chunk file is not resurrected by retrieveBytes before GC") {
+        const auto path = fixture.createTestFile("single_chunk_rm.txt", "single chunk content");
+        auto stored = fixture.store_->store(path);
+        REQUIRE(stored.has_value());
+        const auto hash = stored.value().contentHash;
+
+        auto removed = fixture.store_->remove(hash);
+        REQUIRE(removed.has_value());
+        CHECK(removed.value());
+
+        auto resurrected = fixture.store_->retrieveBytes(hash);
+        CHECK_FALSE(resurrected.has_value());
+    }
+
     SECTION("Retrieve raw returns stored direct bytes without compression header") {
         const std::string content = "raw direct bytes";
         std::vector<std::byte> data;

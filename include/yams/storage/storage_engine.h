@@ -90,6 +90,9 @@ public:
 
     // Core operations
     virtual Result<void> store(std::string_view hash, std::span<const std::byte> data) = 0;
+    virtual Result<void> replace(std::string_view hash, std::span<const std::byte> data) {
+        return store(hash, data);
+    }
     virtual Result<std::vector<std::byte>> retrieve(std::string_view hash) const = 0;
     virtual Result<RawObject> retrieveRaw(std::string_view hash) const = 0;
     virtual Result<bool> exists(std::string_view hash) const noexcept = 0;
@@ -129,6 +132,7 @@ public:
 
     // Core operations
     Result<void> store(std::string_view hash, std::span<const std::byte> data) override;
+    Result<void> replace(std::string_view hash, std::span<const std::byte> data) override;
     Result<std::vector<std::byte>> retrieve(std::string_view hash) const override;
     Result<RawObject> retrieveRaw(std::string_view hash) const override;
     Result<bool> exists(std::string_view hash) const noexcept override;

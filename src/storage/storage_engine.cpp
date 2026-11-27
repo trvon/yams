@@ -506,6 +506,56 @@ Result<void> StorageEngine::store(std::string_view hash, std::span<const std::by
     return result;
 }
 
+Result<void> StorageEngine::replace(std::string_view hash, std::span<const std::byte> data) {
+    if (!isValidStorageKey(hash)) {
+        spdlog::error(
+            "Invalid storage key for replace: expected hex hash or hex hash manifest, got '{}'",
+            hash);
+        return Result<void>(ErrorCode::InvalidArgument);
+    }
+
+    auto objectPath = getObjectPath(hash);
+
+    // Block compaction from pruning shard directories while a write is in flight.
+    std::shared_lock<std::shared_mutex> storageLock(pImpl->globalMutex);
+
+    // Acquire per-hash write lock
+    auto& hashMutex = pImpl->writeMutexPool.getMutex(hash);
+    std::lock_guard<std::mutex> lock(hashMutex);
+
+    std::error_code szEc;
+    const bool existed = std::filesystem::exists(objectPath, szEc) && !szEc;
+    uint64_t oldSize = 0;
+    if (existed) {
+        oldSize = std::filesystem::file_size(objectPath, szEc);
+        if (szEc) {
+            oldSize = 0;
+        }
+    }
+
+    auto result = atomicWrite(objectPath, data);
+    if (result) {
+        if (!existed) {
+            pImpl->stats.totalObjects.fetch_add(1, std::memory_order_relaxed);
+            pImpl->stats.totalBytes.fetch_add(data.size(), std::memory_order_relaxed);
+        } else if (data.size() >= oldSize) {
+            pImpl->stats.totalBytes.fetch_add(data.size() - oldSize, std::memory_order_relaxed);
+        } else {
+            const uint64_t delta = oldSize - data.size();
+            uint64_t cur = pImpl->stats.totalBytes.load(std::memory_order_relaxed);
+            while (!pImpl->stats.totalBytes.compare_exchange_weak(
+                cur, cur > delta ? cur - delta : 0, std::memory_order_relaxed)) {
+            }
+        }
+        pImpl->stats.writeOperations.fetch_add(1, std::memory_order_relaxed);
+        spdlog::debug("Replaced object {} ({} -> {} bytes)", hash, oldSize, data.size());
+    } else {
+        pImpl->stats.failedOperations.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    return result;
+}
+
 std::vector<Result<void>> StorageEngine::storeBatch(
     const std::vector<std::pair<std::string, std::vector<std::byte>>>& items) {
     if (items.empty())

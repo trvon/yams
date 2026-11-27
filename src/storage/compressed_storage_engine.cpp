@@ -311,7 +311,7 @@ public:
 
         // Replace with compressed version
         const auto& compressed = compressedResult.value();
-        return underlying_->store(hash, std::span<const std::byte>(compressed));
+        return underlying_->replace(hash, std::span<const std::byte>(compressed));
     }
 
     Result<void> decompressExisting(std::string_view hash) {
@@ -336,7 +336,7 @@ public:
 
         // Replace with decompressed version
         const auto& decompressed = decompressedResult.value();
-        return underlying_->store(hash, std::span<const std::byte>(decompressed));
+        return underlying_->replace(hash, std::span<const std::byte>(decompressed));
     }
 
     void setPolicyRules(compression::CompressionPolicy::Rules rules) {
