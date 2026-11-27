@@ -385,9 +385,12 @@ void PostIngestQueue::start() {
         return;
     }
 
-    stop_.store(false, std::memory_order_release);
-    for (auto& spawned : stageSpawned_) {
-        spawned.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        stop_.store(false, std::memory_order_release);
+        for (auto& spawned : stageSpawned_) {
+            spawned.store(false, std::memory_order_release);
+        }
     }
     refreshStageAvailability();
     logStageAvailabilitySnapshot();
@@ -401,24 +404,42 @@ void PostIngestQueue::start() {
     }
     const bool startTitle = hasTitleExtractor();
 
-    spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
-    stageSpawned_[0].store(true, std::memory_order_release);
-    coordinator_->spawnDetached(coordinator_->makeStrand(), channelPoller());
-    if (startKg) {
+    bool spawnExtraction = false;
+    bool spawnKg = false;
+    bool spawnEntity = false;
+    bool spawnTitle = false;
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        if (!stop_.load(std::memory_order_acquire)) {
+            spawnExtraction = !stageSpawned_[0].exchange(true, std::memory_order_acq_rel);
+            if (startKg) {
+                spawnKg = !stageSpawned_[1].exchange(true, std::memory_order_acq_rel);
+            }
+            if (startEntity) {
+                spawnEntity = !stageSpawned_[3].exchange(true, std::memory_order_acq_rel);
+            }
+            if (startTitle) {
+                spawnTitle = !stageSpawned_[4].exchange(true, std::memory_order_acq_rel);
+            }
+        }
+    }
+
+    if (spawnExtraction) {
+        spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
+        coordinator_->spawnDetached(coordinator_->makeStrand(), channelPoller());
+    }
+    if (spawnKg) {
         spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
-        stageSpawned_[1].store(true, std::memory_order_release);
         coordinator_->spawnDetached(coordinator_->makeStrand(), kgPoller());
     }
-    if (startEntity) {
+    if (spawnEntity) {
         spdlog::info("[PostIngestQueue] Spawning entityPoller coroutine...");
-        stageSpawned_[3].store(true, std::memory_order_release);
         auto* entityCoordinator = entityCoordinator_ ? entityCoordinator_ : coordinator_;
         auto entityExec = entityCoordinator->makeStrand();
         entityCoordinator->spawnDetached(entityExec, entityPoller());
     }
-    if (startTitle) {
+    if (spawnTitle) {
         spdlog::info("[PostIngestQueue] Spawning titlePoller coroutine...");
-        stageSpawned_[4].store(true, std::memory_order_release);
         coordinator_->spawnDetached(coordinator_->makeStrand(), titlePoller());
     }
 
@@ -450,9 +471,9 @@ void PostIngestQueue::start() {
 
 void PostIngestQueue::stop() {
     {
-        // Share the KG admission lock so stop() has a strict boundary: an enqueue either
-        // linearizes before this store or observes stop_ and is rejected/accounted below.
-        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        // Share lifecycleMutex_ + pendingKgMutex_ so stop() has a strict boundary against both
+        // KG admission and late-bind poller spawning.
+        std::scoped_lock lock(lifecycleMutex_, pendingKgMutex_);
         stop_.store(true, std::memory_order_release);
     }
     cancelPendingKgJobs(true, "queue shutdown");
@@ -506,7 +527,13 @@ void PostIngestQueue::stop() {
     // clearWakeTimers() destroys the shared_ptr<steady_timer> instances.
     // This is safe only when all pollers have exited, because a suspended
     // coroutine referencing a destroyed timer will SIGSEGV.
-    startGuard_.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        for (auto& spawned : stageSpawned_) {
+            spawned.store(false, std::memory_order_release);
+        }
+        startGuard_.store(false, std::memory_order_release);
+    }
     clearWakeTimers();
 }
 
@@ -623,9 +650,15 @@ void PostIngestQueue::setEntityProviders(
     }
     refreshStageAvailability();
     if (!hadProviders && hasProviders) {
-        if (startGuard_.load(std::memory_order_acquire) && !stop_.load(std::memory_order_acquire) &&
-            coordinator_ != nullptr &&
-            !stageSpawned_[3].exchange(true, std::memory_order_acq_rel)) {
+        bool shouldSpawn = false;
+        {
+            std::lock_guard<std::mutex> lock(lifecycleMutex_);
+            if (startGuard_.load(std::memory_order_acquire) &&
+                !stop_.load(std::memory_order_acquire) && coordinator_ != nullptr) {
+                shouldSpawn = !stageSpawned_[3].exchange(true, std::memory_order_acq_rel);
+            }
+        }
+        if (shouldSpawn) {
             spdlog::info(
                 "[PostIngestQueue] Spawning entityPoller coroutine (late provider bind)...");
             auto* entityCoordinator = entityCoordinator_ ? entityCoordinator_ : coordinator_;
@@ -652,9 +685,15 @@ void PostIngestQueue::setTitleExtractor(search::EntityExtractionFunc extractor) 
     }
     refreshStageAvailability();
     if (!hadExtractor && hasExtractor) {
-        if (startGuard_.load(std::memory_order_acquire) && !stop_.load(std::memory_order_acquire) &&
-            coordinator_ != nullptr &&
-            !stageSpawned_[4].exchange(true, std::memory_order_acq_rel)) {
+        bool shouldSpawn = false;
+        {
+            std::lock_guard<std::mutex> lock(lifecycleMutex_);
+            if (startGuard_.load(std::memory_order_acquire) &&
+                !stop_.load(std::memory_order_acquire) && coordinator_ != nullptr) {
+                shouldSpawn = !stageSpawned_[4].exchange(true, std::memory_order_acq_rel);
+            }
+        }
+        if (shouldSpawn) {
             spdlog::info(
                 "[PostIngestQueue] Spawning titlePoller coroutine (late extractor bind)...");
             coordinator_->spawnDetached(coordinator_->makeStrand(), titlePoller());
