@@ -268,3 +268,35 @@ TEST_CASE("Stalled repair reset reconciles and preserves attempt budget",
         CHECK_FALSE(embedded.value());
     }
 }
+
+TEST_CASE("RepairService FTS5 dry-run does not mutate ghost-success extraction status",
+          "[unit][daemon][repair][fts5][dryrun][catch2]") {
+    RepairDbFixture fix;
+    const std::string hash = fix.insertPendingDocument("fts5-dryrun-ghost");
+    auto before = fix.document(hash);
+    REQUIRE(before.has_value());
+    REQUIRE(fix.repository_
+                ->updateDocumentExtractionStatus(before->id, true, ExtractionStatus::Success, "")
+                .has_value());
+
+    RepairServiceContext ctx;
+    ctx.getMetadataRepo = [&fix] { return fix.repository_; };
+    RepairService::Config cfg;
+    cfg.enable = false;
+    RepairService service(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
+
+    RepairRequest req;
+    req.repairFts5 = true;
+    req.dryRun = true;
+    auto resp = service.executeRepair(req);
+    CHECK(resp.success);
+
+    // Dry-run must leave the ghost-success document's extraction status untouched.
+    auto after = fix.document(hash);
+    REQUIRE(after.has_value());
+    CHECK(after->extractionStatus == ExtractionStatus::Success);
+    CHECK(after->contentExtracted);
+
+    // stop() must remain safe even when background repair was never started.
+    service.stop();
+}

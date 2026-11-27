@@ -675,6 +675,9 @@ private:
     std::mutex activeRepairMutex_;
     std::condition_variable activeRepairCv_;
     std::uint32_t activeRepairExecutions_{0};
+    std::mutex activeScanMutex_;
+    std::condition_variable activeScanCv_;
+    std::uint32_t activeScans_{0};
 };
 
 } // namespace yams::daemon
