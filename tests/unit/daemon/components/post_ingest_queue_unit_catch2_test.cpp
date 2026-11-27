@@ -80,6 +80,29 @@ TEST_CASE("LruCache TTL expiration", "[daemon][post-ingest][cache][catch2]") {
     CHECK_FALSE(expired.has_value());
 }
 
+TEST_CASE("LruCache TTL expiry does not leave zombie order entries that evict live keys",
+          "[daemon][post-ingest][cache][catch2]") {
+    LruCache<std::string, int> cache(2, std::chrono::seconds(1));
+
+    cache.put("a", 1);
+    std::this_thread::sleep_for(1100ms);
+    // Expiring "a" on get() must also remove its node from order_.
+    CHECK_FALSE(cache.get("a").has_value());
+
+    // Re-insert "a" and add "b" (fills capacity=2), then add "c" (should evict oldest live "a",
+    // not leave "a" doubly-listed or evict a newly refreshed entry).
+    cache.put("a", 2);
+    cache.put("b", 3);
+    CHECK(cache.get("a").value() == 2); // Refresh "a" -> "b" is now LRU
+    cache.put("c", 4);
+
+    CHECK(cache.size() == 2);
+    CHECK(cache.get("a").has_value());
+    CHECK(cache.get("a").value() == 2);
+    CHECK_FALSE(cache.get("b").has_value());
+    CHECK(cache.get("c").has_value());
+}
+
 TEST_CASE("LruCache clear empties cache", "[daemon][post-ingest][cache][catch2]") {
     LruCache<std::string, int> cache(10, std::chrono::seconds(60));
 

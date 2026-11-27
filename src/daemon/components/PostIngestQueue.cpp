@@ -386,6 +386,9 @@ void PostIngestQueue::start() {
     }
 
     stop_.store(false, std::memory_order_release);
+    for (auto& spawned : stageSpawned_) {
+        spawned.store(false, std::memory_order_release);
+    }
     refreshStageAvailability();
     logStageAvailabilitySnapshot();
     initializeGradientLimiters();
@@ -399,19 +402,23 @@ void PostIngestQueue::start() {
     const bool startTitle = hasTitleExtractor();
 
     spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
+    stageSpawned_[0].store(true, std::memory_order_release);
     coordinator_->spawnDetached(coordinator_->makeStrand(), channelPoller());
     if (startKg) {
         spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
+        stageSpawned_[1].store(true, std::memory_order_release);
         coordinator_->spawnDetached(coordinator_->makeStrand(), kgPoller());
     }
     if (startEntity) {
         spdlog::info("[PostIngestQueue] Spawning entityPoller coroutine...");
+        stageSpawned_[3].store(true, std::memory_order_release);
         auto* entityCoordinator = entityCoordinator_ ? entityCoordinator_ : coordinator_;
         auto entityExec = entityCoordinator->makeStrand();
         entityCoordinator->spawnDetached(entityExec, entityPoller());
     }
     if (startTitle) {
         spdlog::info("[PostIngestQueue] Spawning titlePoller coroutine...");
+        stageSpawned_[4].store(true, std::memory_order_release);
         coordinator_->spawnDetached(coordinator_->makeStrand(), titlePoller());
     }
 
@@ -616,7 +623,17 @@ void PostIngestQueue::setEntityProviders(
     }
     refreshStageAvailability();
     if (!hadProviders && hasProviders) {
-        signalWakeTimer(Stage::Entity);
+        if (startGuard_.load(std::memory_order_acquire) && !stop_.load(std::memory_order_acquire) &&
+            coordinator_ != nullptr &&
+            !stageSpawned_[3].exchange(true, std::memory_order_acq_rel)) {
+            spdlog::info(
+                "[PostIngestQueue] Spawning entityPoller coroutine (late provider bind)...");
+            auto* entityCoordinator = entityCoordinator_ ? entityCoordinator_ : coordinator_;
+            auto entityExec = entityCoordinator->makeStrand();
+            entityCoordinator->spawnDetached(entityExec, entityPoller());
+        } else {
+            signalWakeTimer(Stage::Entity);
+        }
     }
 
     if (!hadProviders && hasProviders && processed_.load(std::memory_order_relaxed) > 0) {
@@ -635,7 +652,15 @@ void PostIngestQueue::setTitleExtractor(search::EntityExtractionFunc extractor) 
     }
     refreshStageAvailability();
     if (!hadExtractor && hasExtractor) {
-        signalWakeTimer(Stage::Title);
+        if (startGuard_.load(std::memory_order_acquire) && !stop_.load(std::memory_order_acquire) &&
+            coordinator_ != nullptr &&
+            !stageSpawned_[4].exchange(true, std::memory_order_acq_rel)) {
+            spdlog::info(
+                "[PostIngestQueue] Spawning titlePoller coroutine (late extractor bind)...");
+            coordinator_->spawnDetached(coordinator_->makeStrand(), titlePoller());
+        } else {
+            signalWakeTimer(Stage::Title);
+        }
     }
 }
 
@@ -2208,6 +2233,15 @@ void PostIngestQueue::dispatchToTitleChannel(
             "[PostIngestQueue] Title channel full after retry, dropping async title for {}",
             hash.substr(0, 12));
         InternalEventBus::instance().incTitleDropped();
+        if (jobCopy.knowledgeGraphCompletion && !jobCopy.knowledgeGraphToken.empty() &&
+            writeCoordinator_) {
+            auto batch = std::make_unique<WriteBatch>();
+            batch->source = "PostIngestQueue::titleDispatch/dropAcknowledgement";
+            batch->ops.emplace_back(AcknowledgeKnowledgeGraphOp{
+                jobCopy.docId, jobCopy.knowledgeGraphToken, jobCopy.knowledgeGraphCompletion});
+            enqueueWithBackpressure(*writeCoordinator_, std::move(batch),
+                                    "title+NL drop acknowledgement", stop_);
+        }
     } else {
         spdlog::debug("[PostIngestQueue] Dispatched title+NL extraction job for {}",
                       hash.substr(0, 12));
@@ -2761,7 +2795,7 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
         entries.reserve(successes.size());
 
         for (auto& prepared : successes) {
-            if (prepared.shouldDispatchKg &&
+            if (prepared.shouldDispatchKg && graphComponent_ != nullptr &&
                 knowledgeGraphEnabled_.load(std::memory_order_acquire) &&
                 prepared.knowledgeGraphToken.empty()) {
                 prepared.knowledgeGraphToken = yams::core::generateId("kg");
@@ -2940,12 +2974,15 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         job.updateSemanticGraph = selectionCfg.updateSemanticGraphDuringIngest;
 
         constexpr auto kEnqueueTimeout = std::chrono::milliseconds(100);
+        constexpr uint32_t kMaxEmbedEnqueueWaits = 50u; // 5s cap to avoid starving WorkCoordinator
         uint32_t waits = 0;
+        bool pushed = false;
         const auto enqueueStart = std::chrono::steady_clock::now();
-        while (!stop_.load(std::memory_order_acquire)) {
+        while (!stop_.load(std::memory_order_acquire) && waits < kMaxEmbedEnqueueWaits) {
             // push_wait moves `job` only when it returns true.
             // NOLINTNEXTLINE(bugprone-use-after-move)
             if (embedQ->push_wait(std::move(job), kEnqueueTimeout)) {
+                pushed = true;
                 InternalEventBus::instance().incEmbedQueued(batchSize);
                 embedJobsEmitted_.fetch_add(1, std::memory_order_relaxed);
                 embedDocsEmitted_.fetch_add(batchSize, std::memory_order_relaxed);
@@ -2969,7 +3006,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
             }
         }
         dispatchTimings.embedEnqueue.add(std::chrono::steady_clock::now() - enqueueStart);
-        if (stop_.load(std::memory_order_acquire)) {
+        if (!pushed) {
             InternalEventBus::instance().incEmbedDropped(batchSize);
         }
         embedPreparedBatch.clear();

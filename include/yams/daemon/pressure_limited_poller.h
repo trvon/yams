@@ -359,35 +359,49 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                     return false;
                 };
 
+                // In batch mode, ensure we can admit at least one full batch even when
+                // maxConcurrent is temporarily clamped low (e.g., pressure=Critical/Emergency).
+                // inFlightCounter tracks admitted tasks (not batches), so use a task budget.
+                const std::size_t taskBudget = std::max(maxConcurrent, batchSize);
+                const bool hasPendingWork =
+                    !channel->empty() ||
+                    (cfg.highPriorityChannel && !cfg.highPriorityChannel->empty());
+
                 std::size_t hpTaken = 0;
-                if (!cfg.batchLimiterPerTask && lim) {
+                if (!cfg.batchLimiterPerTask && lim && hasPendingWork &&
+                    cfg.inFlightCounter->load() < taskBudget) {
                     static std::atomic<uint64_t> sBatchSeq{0};
                     const auto seq = sBatchSeq.fetch_add(1, std::memory_order_relaxed) + 1u;
                     batchLimiterId = cfg.stageName + "#batch#" + std::to_string(seq);
                     if (!cfg.tryAcquireFn(lim, batchLimiterId, cfg.stageName)) {
                         // Unable to admit a new batch under current limiter settings.
                         timer.expires_after(kAdmissionRetryDelay);
-                        co_await timer.async_wait(boost::asio::use_awaitable);
+                        boost::system::error_code ec;
+                        co_await timer.async_wait(
+                            boost::asio::redirect_error(boost::asio::use_awaitable, ec));
                         continue;
                     }
                     batchLimiterAcquired = true;
                 }
 
-                // In batch mode, ensure we can admit at least one full batch even when
-                // maxConcurrent is temporarily clamped low (e.g., pressure=Critical/Emergency).
-                // inFlightCounter tracks admitted tasks (not batches), so use a task budget.
-                const std::size_t taskBudget = std::max(maxConcurrent, batchSize);
                 bool highPriorityTaken = false;
                 bool admissionBlocked = false;
                 const auto drainAvailable = [&]() {
                     while (cfg.inFlightCounter->load() < taskBudget && batch.size() < batchSize) {
+                        // Reserve an in-flight slot before popping so checkDrainAndSignal()
+                        // cannot observe empty channel + zero in-flight between try_pop and
+                        // fetch_add.
+                        cfg.inFlightCounter->fetch_add(1);
                         bool fromHighPriority = false;
+                        bool popped = false;
                         if (cfg.highPriorityChannel && hpTaken >= hpMax) {
                             // Quota consumed; only pull from the normal channel for fairness.
-                            if (!channel->try_pop(task)) {
-                                break;
-                            }
-                        } else if (!tryPopFromAny(task, fromHighPriority)) {
+                            popped = channel->try_pop(task);
+                        } else {
+                            popped = tryPopFromAny(task, fromHighPriority);
+                        }
+                        if (!popped) {
+                            cfg.inFlightCounter->fetch_sub(1);
                             break;
                         }
 
@@ -406,6 +420,7 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                             } else {
                                 requeued = detail::requeueWithBackoff(channel, std::move(task));
                             }
+                            cfg.inFlightCounter->fetch_sub(1);
                             if (!requeued) {
                                 spdlog::warn(
                                     "[PostIngestQueue] {} poller failed to requeue throttled "
@@ -416,7 +431,6 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                             break;
                         }
                         didWork = true;
-                        cfg.inFlightCounter->fetch_add(1);
                         batch.push_back(std::move(task));
                         if (cfg.batchLimiterPerTask && lim) {
                             limiterIds.push_back(std::move(limiterId));
@@ -488,7 +502,8 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                         }
                     });
                 } else if (batchLimiterAcquired) {
-                    cfg.completeJobFn(batchLimiterId, false);
+                    // Empty race after pre-check: release limiter slot without decaying limit_.
+                    cfg.completeJobFn(batchLimiterId, true);
                 }
             } else {
                 // Single-item processing (kg, symbol, entity, title pollers)

@@ -334,7 +334,8 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
                 continue;
             }
             timer.expires_after(std::chrono::milliseconds(10));
-            co_await timer.async_wait(boost::asio::use_awaitable);
+            boost::system::error_code ec;
+            co_await timer.async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, ec));
         }
     }
 
