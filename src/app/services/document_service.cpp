@@ -1574,7 +1574,9 @@ public:
                 syncStoreKnowledgeGraph(info, snapshotId);
                 auto pathStored = ctx_.metadataRepo->recordDocumentPath(info, docId, tagPairs);
                 if (!pathStored) {
-                    (void)ctx_.store->remove(out.hash);
+                    if (auto deleted = ctx_.metadataRepo->deleteDocument(docId); deleted) {
+                        (void)ctx_.store->remove(out.hash);
+                    }
                     return pathStored.error();
                 }
                 enqueueStoreFuzzyTerms(info);

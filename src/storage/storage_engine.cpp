@@ -321,7 +321,8 @@ Result<void> StorageEngine::ensureDirectoryExists(const std::filesystem::path& p
 }
 
 Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
-                                        std::span<const std::byte> data) {
+                                        std::span<const std::byte> data,
+                                        bool treatExistingAsSuccess) {
     // Ensure parent directory exists
     if (auto result = ensureDirectoryExists(path); !result) {
         return result;
@@ -439,8 +440,9 @@ Result<void> StorageEngine::atomicWrite(const std::filesystem::path& path,
         // Clean up temp file
         std::filesystem::remove(tempPath);
 
-        // Check if file already exists (not an error for content-addressed storage)
-        if (std::filesystem::exists(path)) {
+        // Check if file already exists (not an error for insert-only content-addressed store,
+        // but must remain an error for replace() overwrites).
+        if (treatExistingAsSuccess && std::filesystem::exists(path)) {
             return {};
         }
 
@@ -533,7 +535,7 @@ Result<void> StorageEngine::replace(std::string_view hash, std::span<const std::
         }
     }
 
-    auto result = atomicWrite(objectPath, data);
+    auto result = atomicWrite(objectPath, data, /*treatExistingAsSuccess=*/false);
     if (result) {
         if (!existed) {
             pImpl->stats.totalObjects.fetch_add(1, std::memory_order_relaxed);

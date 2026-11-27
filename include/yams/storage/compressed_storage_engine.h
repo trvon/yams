@@ -49,6 +49,8 @@ public:
     // StorageEngine implementation
     [[nodiscard]] Result<void> store(std::string_view hash,
                                      std::span<const std::byte> data) override;
+    [[nodiscard]] Result<void> replace(std::string_view hash,
+                                       std::span<const std::byte> data) override;
 
     [[nodiscard]] Result<std::vector<std::byte>> retrieve(std::string_view hash) const override;
     [[nodiscard]] Result<IStorageEngine::RawObject>

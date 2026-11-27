@@ -140,6 +140,10 @@ public:
 
     Result<bool> exists(std::string_view hash) const noexcept { return underlying_->exists(hash); }
 
+    Result<void> replace(std::string_view hash, std::span<const std::byte> data) {
+        return underlying_->replace(hash, data);
+    }
+
     Result<void> remove(std::string_view hash) { return underlying_->remove(hash); }
 
     Result<uint64_t> size(std::string_view hash) {
@@ -736,6 +740,11 @@ CompressedStorageEngine::~CompressedStorageEngine() = default;
 Result<void> CompressedStorageEngine::store(std::string_view hash,
                                             std::span<const std::byte> data) {
     return pImpl->store(hash, data);
+}
+
+Result<void> CompressedStorageEngine::replace(std::string_view hash,
+                                              std::span<const std::byte> data) {
+    return pImpl->replace(hash, data);
 }
 
 Result<std::vector<std::byte>> CompressedStorageEngine::retrieve(std::string_view hash) const {

@@ -181,7 +181,8 @@ private:
 
     // Internal operations
     Result<void> ensureDirectoryExists(const std::filesystem::path& path) const;
-    Result<void> atomicWrite(const std::filesystem::path& path, std::span<const std::byte> data);
+    Result<void> atomicWrite(const std::filesystem::path& path, std::span<const std::byte> data,
+                             bool treatExistingAsSuccess = true);
 };
 
 // Atomic file writer for safe concurrent writes
