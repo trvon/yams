@@ -159,8 +159,9 @@ Result<RowOutcome> reconcileRow(sqlite3* db, sqlite3_stmt* select, sqlite3_stmt*
         return RowOutcome::NoRow;
     }
     if (stepRc != SQLITE_ROW) {
+        auto error = dbError(db, "Failed to query block_references");
         sqlite3_reset(select);
-        return dbError(db, "Failed to query block_references");
+        return error;
     }
     const int64_t currentBlockSize = sqlite3_column_int64(select, 0);
     const bool hasUncompressed = sqlite3_column_type(select, 1) != SQLITE_NULL;

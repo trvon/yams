@@ -2220,7 +2220,7 @@ TEST_CASE("rebuildReferenceDatabase scans storage and populates refs.db",
     std::filesystem::create_directories(shardDir);
 
     std::string testHash = std::string(62, 'a') + "bb";
-    std::ofstream block(shardDir / (std::string(62, 'a') + "bb"));
+    std::ofstream block(shardDir / testHash.substr(2));
     block.write("test_block_content", 18);
     block.close();
 

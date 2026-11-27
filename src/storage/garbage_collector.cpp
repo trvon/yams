@@ -88,10 +88,6 @@ void processCollectibleBlock(ReferenceCounter& refCounter, StorageEngine& storag
 
     const auto blockSizeResult = storageEngine.getBlockSize(blockHash);
     if (options.dryRun) {
-        if (blockSizeResult) {
-            stats.bytesReclaimed += blockSizeResult.value();
-        }
-        ++stats.blocksDeleted;
         notifyCollectionProgress(options, blockHash, stats);
         return;
     }
@@ -99,13 +95,11 @@ void processCollectibleBlock(ReferenceCounter& refCounter, StorageEngine& storag
     auto deleteResult = storageEngine.remove(blockHash);
     if (!deleteResult) {
         if (deleteResult.error().code == ErrorCode::ChunkNotFound) {
-            // File already absent on disk; still prune the zero-ref row to prevent GC starvation.
+            // File already absent on disk; still prune the zero-ref row to prevent GC starvation,
+            // while recording the missing-block error without counting it as deleted/reclaimed.
             if (txn) {
                 txn->pruneReference(blockHash);
             }
-            ++stats.blocksDeleted;
-            notifyCollectionProgress(options, blockHash, stats);
-            return;
         }
         stats.errors.push_back(yamsfmt::format("Failed to delete block {}: {}", blockHash,
                                                deleteResult.error().message));

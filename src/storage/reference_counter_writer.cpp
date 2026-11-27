@@ -174,12 +174,16 @@ std::future<Result<void>> RefCounterWriter::submit(RefTransactionBatch batch) {
         return readyFuture(Result<void>{});
     }
 
-    // Validate Increment sizes up front so an invalid caller fails individually instead of
-    // aborting a coalesced multi-caller SQLite transaction on a CHECK constraint violation.
-    for (const auto& op : batch.operations) {
+    // Validate and normalize Increment sizes up front so an invalid caller fails individually
+    // instead of aborting a coalesced multi-caller SQLite transaction on a CHECK violation.
+    for (auto& op : batch.operations) {
         if (op.type == RefDelta::Type::Increment) {
-            if (op.compressedSize == 0 ||
-                (op.uncompressedSize > 0 && op.uncompressedSize < op.compressedSize)) {
+            if (op.compressedSize == 0) {
+                return readyFuture(Result<void>(ErrorCode::InvalidArgument));
+            }
+            if (op.uncompressedSize == 0) {
+                op.uncompressedSize = op.compressedSize;
+            } else if (op.uncompressedSize < op.compressedSize) {
                 return readyFuture(Result<void>(ErrorCode::InvalidArgument));
             }
         }
