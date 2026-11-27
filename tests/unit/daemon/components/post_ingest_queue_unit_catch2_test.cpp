@@ -554,3 +554,30 @@ TEST_CASE("Post-ingest NL graph builder bounds edges without prescribing equal-c
                   [](const auto& node) { return node.nodeKey.starts_with("nl_entity:"); }) == 10);
     }
 }
+
+TEST_CASE("PostIngestQueue invokes lexical delta callback on commitBatchResults before full drain",
+          "[daemon][post-ingest][lexical-delta][catch2]") {
+    WorkCoordinator coordinator;
+    PostIngestQueue queue(nullptr, nullptr, {}, nullptr, nullptr, &coordinator, nullptr, 16);
+
+    bool drainCalled = false;
+    queue.setDrainCallback([&]() { drainCalled = true; });
+
+    std::size_t committedTotal = 0;
+    std::size_t callbackCalls = 0;
+    queue.setLexicalDeltaCommittedCallback([&](std::size_t completedDocs) {
+        ++callbackCalls;
+        committedTotal += completedDocs;
+    });
+
+    std::vector<PostIngestQueue::PreparedMetadataEntry> entries;
+    std::vector<PostIngestQueue::ExtractionFailure> failures;
+    failures.push_back(PostIngestQueue::ExtractionFailure{1, "hash-a", "extract failed"});
+    failures.push_back(PostIngestQueue::ExtractionFailure{2, "hash-b", "extract failed"});
+
+    queue.testing_commitBatchResults(entries, failures);
+
+    CHECK(callbackCalls == 1);
+    CHECK(committedTotal == 2);
+    CHECK_FALSE(drainCalled);
+}

@@ -2357,6 +2357,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                         "[ServiceManager] PostIngestQueue drained, signaling SearchEngineManager");
                     searchEngineManager_.signalIndexingDrained();
                 });
+                piq->setLexicalDeltaCommittedCallback([this](std::size_t completedDocs) {
+                    if (completedDocs > 0) {
+                        searchEngineManager_.noteLexicalDeltaPublished(completedDocs);
+                    }
+                });
             }
         }
     } catch (const std::exception& e) {
