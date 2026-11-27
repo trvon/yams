@@ -878,7 +878,7 @@ MetadataKgTopologyArtifactStore::loadResidentLatest() const {
         if (residentGeneration_ == generation) {
             resident_.reset();
             ++residentGeneration_;
-            return nullptr;
+            return std::shared_ptr<const ResidentSnapshot>{};
         }
         return resident_;
     }
@@ -899,7 +899,7 @@ MetadataKgTopologyArtifactStore::loadResidentLatest() const {
         if (residentGeneration_ == generation) {
             resident_.reset();
             ++residentGeneration_;
-            return nullptr;
+            return std::shared_ptr<const ResidentSnapshot>{};
         }
         return resident_;
     }
