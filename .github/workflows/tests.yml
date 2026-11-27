@@ -754,8 +754,9 @@ jobs:
               storage_submodule \
               work_coordinator
           elif [ "${{ matrix.suffix }}" = "linux-x86_64-mobile" ]; then
-            meson test -C ${{ env.BUILD_DIR }} --no-rebuild --print-errorlogs --timeout-multiplier 2 \
-              --suite mobile
+            env -u YAMS_DISABLE_VECTORS -u YAMS_SQLITE_VEC_SKIP_INIT -u YAMS_VDB_IN_MEMORY \
+              meson test -C ${{ env.BUILD_DIR }} --no-rebuild --print-errorlogs --timeout-multiplier 2 \
+                --suite mobile
           else
             # A failed test is rerun alone; one that then passes is reported as flaky, not fatal.
             meson test -C ${{ env.BUILD_DIR }} --suite unit --suite integration --print-errorlogs --timeout-multiplier 2 || \

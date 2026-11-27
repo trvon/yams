@@ -69,6 +69,7 @@ public:
         // Check TTL
         auto now = Clock::now();
         if (now - it->second.timestamp > ttl_) {
+            order_.erase(it->second.orderIt);
             map_.erase(it);
             return std::nullopt;
         }
@@ -555,6 +556,7 @@ private:
 
     // Per-stage arrays indexed by Stage enum (0..4)
     std::array<std::atomic<bool>, kStageCount>& stageStarted_ = lifecycle_->started;
+    std::array<std::atomic<bool>, kStageCount> stageSpawned_{};
     std::array<std::atomic<bool>, kStageCount> stagePaused_{};
     std::mutex stageActivityMutex_;
     std::array<bool, kStageCount> stageActivityPublished_{};

@@ -2220,7 +2220,7 @@ TEST_CASE("rebuildReferenceDatabase scans storage and populates refs.db",
     std::filesystem::create_directories(shardDir);
 
     std::string testHash = std::string(62, 'a') + "bb";
-    std::ofstream block(shardDir / (std::string(62, 'a') + "bb"));
+    std::ofstream block(shardDir / testHash.substr(2));
     block.write("test_block_content", 18);
     block.close();
 
@@ -2579,4 +2579,43 @@ TEST_CASE("ReferenceCounter init retries when the database is transiently locked
     REQUIRE_NOTHROW(refCounter = std::make_unique<ReferenceCounter>(std::move(config)));
 
     releaser.join();
+}
+
+TEST_CASE_METHOD(ReferenceCounterFixture,
+                 "ReferenceCounter commitTransactionBatches handles Prune and Transaction move",
+                 "[storage][refcount][prune][catch2]") {
+    SECTION("commitTransactionBatches succeeds with Prune op without CHECK violation") {
+        const std::string hash = generateHash(9001);
+        REQUIRE(refCounter->increment(hash, 256, 256).has_value());
+        REQUIRE(refCounter->decrement(hash).has_value());
+
+        RefTransactionBatch batch;
+        batch.operations.push_back(RefDelta{.type = RefDelta::Type::Prune, .blockHash = hash});
+        std::array<RefTransactionBatch, 1> batches{std::move(batch)};
+        auto res = refCounter->commitTransactionBatches(batches);
+        REQUIRE(res.has_value());
+
+        auto unref = refCounter->getUnreferencedBlocks(10, std::chrono::seconds(0));
+        REQUIRE(unref.has_value());
+        CHECK(unref.value().empty());
+    }
+
+    SECTION("Transaction move preserves queued pruneReference calls") {
+        const std::string hash = generateHash(9002);
+        REQUIRE(refCounter->increment(hash, 128, 128).has_value());
+        REQUIRE(refCounter->decrement(hash).has_value());
+
+        auto txnBase = refCounter->beginTransaction();
+        REQUIRE(txnBase != nullptr);
+        auto* rawTxn = dynamic_cast<ReferenceCounter::Transaction*>(txnBase.get());
+        REQUIRE(rawTxn != nullptr);
+        rawTxn->pruneReference(hash);
+
+        ReferenceCounter::Transaction movedTxn(std::move(*rawTxn));
+        REQUIRE(movedTxn.commit().has_value());
+
+        auto unref = refCounter->getUnreferencedBlocks(10, std::chrono::seconds(0));
+        REQUIRE(unref.has_value());
+        CHECK(unref.value().empty());
+    }
 }

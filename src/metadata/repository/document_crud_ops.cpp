@@ -1072,6 +1072,7 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
             stale.push_back(info.filePath);
         }
         invalidatePathCache(stale);
+        invalidateQueryCache();
     }
     return result;
 }
@@ -1228,7 +1229,8 @@ Result<void> MetadataRepository::deleteDocument(int64_t id) {
         invalidatePathCache(deleteResult.removedFilePath);
     }
 
-    // Signal enumeration cache invalidation (document deletion cascades to metadata)
+    // Signal enumeration & FTS query cache invalidation (document deletion cascades to metadata)
+    invalidateQueryCache();
     metadataChangeCounter_.fetch_add(1, std::memory_order_release);
     return Result<void>();
 }
@@ -1250,6 +1252,7 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             if (!beginResult) {
                 return beginResult.error();
             }
+            repository::ScopedRollbackGuard txGuard(db);
 
             DeleteDocumentsBatchResult batchResult;
 
@@ -1268,7 +1271,6 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             WHERE d.id = ?
         )");
             if (!checkStmtResult) {
-                db.execute("ROLLBACK");
                 return checkStmtResult.error();
             }
             auto& checkStmt = *checkStmtResult.value();
@@ -1276,10 +1278,16 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             // Prepare statement for deletion
             auto deleteStmtResult = db.prepareCached("DELETE FROM documents WHERE id = ?");
             if (!deleteStmtResult) {
-                db.execute("ROLLBACK");
                 return deleteStmtResult.error();
             }
             auto& deleteStmt = *deleteStmtResult.value();
+
+            // documents_fts is an own-content FTS5 virtual table and does not cascade on
+            // DELETE FROM documents; remove matching FTS rows explicitly in the same transaction.
+            auto deleteFtsStmtResult =
+                db.prepareCached("DELETE FROM documents_fts WHERE rowid = ?");
+            Statement* deleteFtsStmt =
+                deleteFtsStmtResult ? &(*deleteFtsStmtResult.value()) : nullptr;
 
             // Process each document
             for (int64_t id : ids) {
@@ -1294,16 +1302,13 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
                 YAMS_TRY_UNWRAP(metadataTagDelta, calculateDocumentDeleteTagDelta(db, id));
 
                 if (auto r = checkStmt.reset(); !r) {
-                    db.execute("ROLLBACK");
                     return r.error();
                 }
                 if (auto r = checkStmt.bind(1, id); !r) {
-                    db.execute("ROLLBACK");
                     return r.error();
                 }
                 auto stepRes = checkStmt.step();
                 if (!stepRes) {
-                    db.execute("ROLLBACK");
                     return stepRes.error();
                 }
                 if (stepRes.value()) {
@@ -1317,17 +1322,22 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
                     priorFilePath = checkStmt.getString(7);
                 }
 
+                // Delete FTS5 row (best-effort if documents_fts exists) before deleting document.
+                if (deleteFtsStmt != nullptr) {
+                    (void)deleteFtsStmt->reset();
+                    if (deleteFtsStmt->bind(1, id)) {
+                        (void)deleteFtsStmt->execute();
+                    }
+                }
+
                 // Delete document
                 if (auto r = deleteStmt.reset(); !r) {
-                    db.execute("ROLLBACK");
                     return r.error();
                 }
                 if (auto r = deleteStmt.bind(1, id); !r) {
-                    db.execute("ROLLBACK");
                     return r.error();
                 }
                 if (auto execRes = deleteStmt.execute(); !execRes) {
-                    db.execute("ROLLBACK");
                     return execRes.error();
                 }
 
@@ -1369,9 +1379,9 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
             // Commit transaction
             auto commitResult = db.execute("COMMIT");
             if (!commitResult) {
-                db.execute("ROLLBACK");
                 return commitResult.error();
             }
+            txGuard.dismiss();
 
             return batchResult;
         });
@@ -1402,6 +1412,7 @@ Result<size_t> MetadataRepository::deleteDocumentsBatch(const std::vector<int64_
                               batchResult.metadataTagDelta);
 
         invalidatePathCache(batchResult.removedFilePaths);
+        invalidateQueryCache();
 
         // Signal enumeration cache invalidation
         metadataChangeCounter_.fetch_add(1, std::memory_order_release);

@@ -20,6 +20,9 @@ KGWriteBuffer::KGWriteBuffer(KnowledgeGraphStore& kgStore, KGWriteBufferConfig c
 }
 
 KGWriteBuffer::~KGWriteBuffer() {
+    if (!config_.flushOnDestruct) {
+        return;
+    }
     // Best-effort flush on destruction — do not throw from destructor.
     static_cast<void>(flush());
 }

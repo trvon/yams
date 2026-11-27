@@ -685,15 +685,13 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
 
     auto has_dir_prefix = [&](std::string_view prefix) -> bool {
         size_t start = 0;
-        while (start <= filenameLower.size()) {
+        while (start < filenameLower.size()) {
             size_t end = filenameLower.find('/', start);
             if (end == std::string::npos)
-                end = filenameLower.size();
+                break; // Never match the final filename leaf as a directory prefix.
             auto segment = std::string_view(filenameLower).substr(start, end - start);
             if (segment.rfind(prefix, 0) == 0)
                 return true;
-            if (end == filenameLower.size())
-                break;
             start = end + 1;
         }
         return false;

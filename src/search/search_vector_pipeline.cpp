@@ -6,8 +6,10 @@
 #include <yams/vector/vector_database.h>
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <type_traits>
 #include <unordered_map>
 
@@ -138,12 +140,11 @@ size_t vectorRawCandidateLimit(const SearchEngineConfig& config, size_t limit,
 }
 
 template <typename RecordRange>
-std::unordered_map<std::string, std::string>
+std::optional<std::unordered_map<std::string, std::string>>
 batchLoadDocumentPaths(const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
                        const RecordRange& records) {
-    std::unordered_map<std::string, std::string> hashToPath;
     if (!metadataRepo) {
-        return hashToPath;
+        return std::nullopt;
     }
 
     std::vector<std::string> hashes;
@@ -154,14 +155,15 @@ batchLoadDocumentPaths(const std::shared_ptr<yams::metadata::MetadataRepository>
         }
     }
     if (hashes.empty()) {
-        return hashToPath;
+        return std::unordered_map<std::string, std::string>{};
     }
 
     auto docMapResult = metadataRepo->batchGetDocumentsByHash(hashes);
     if (!docMapResult) {
-        return hashToPath;
+        return std::nullopt;
     }
 
+    std::unordered_map<std::string, std::string> hashToPath;
     hashToPath.reserve(docMapResult.value().size());
     for (const auto& [hash, docInfo] : docMapResult.value()) {
         hashToPath.emplace(hash, docInfo.filePath);
@@ -179,7 +181,7 @@ aggregateChunkVectorScores(const std::vector<vector::VectorRecord>& vectorRecord
     std::unordered_map<std::string, vector::VectorRecord> bestByHash;
 
     for (const auto& vr : vectorRecords) {
-        if (vr.document_hash.empty()) {
+        if (vr.document_hash.empty() || !std::isfinite(vr.relevance_score)) {
             continue;
         }
         if (aggStrategy != Agg::MAX) {
@@ -263,7 +265,7 @@ dedupeEntityVectorRecords(std::vector<vector::EntityVectorRecord> entityRecords,
     deduped.reserve(entityRecords.size());
 
     for (const auto& er : entityRecords) {
-        if (er.document_hash.empty()) {
+        if (er.document_hash.empty() || !std::isfinite(er.relevance_score)) {
             continue;
         }
         auto it = bestByHash.find(er.document_hash);
@@ -370,18 +372,23 @@ queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& 
 
         const auto hashToPath = batchLoadDocumentPaths(metadataRepo, vectorRecords);
 
-        for (size_t rank = 0; rank < vectorRecords.size(); ++rank) {
-            const auto& vr = vectorRecords[rank];
+        for (const auto& vr : vectorRecords) {
+            std::string filePath;
+            if (hashToPath.has_value()) {
+                auto it = hashToPath->find(vr.document_hash);
+                if (it == hashToPath->end()) {
+                    // Skip orphaned/deleted documents no longer present in metadata.
+                    continue;
+                }
+                filePath = it->second;
+            }
 
             ComponentResult result;
             result.documentHash = vr.document_hash;
             result.score = vr.relevance_score;
             result.source = ComponentResult::Source::Vector;
-            result.rank = rank;
-
-            if (auto it = hashToPath.find(vr.document_hash); it != hashToPath.end()) {
-                result.filePath = it->second;
-            }
+            result.rank = results.size();
+            result.filePath = std::move(filePath);
             if (!vr.content.empty()) {
                 result.snippet = truncateSearchSnippet(vr.content, 200);
             }
@@ -746,19 +753,27 @@ queryEntityVectorsPipeline(const std::shared_ptr<yams::metadata::MetadataReposit
 
         const auto hashToPath = batchLoadDocumentPaths(metadataRepo, entityRecords);
 
-        for (size_t rank = 0; rank < entityRecords.size(); ++rank) {
-            const auto& er = entityRecords[rank];
+        for (const auto& er : entityRecords) {
+            std::string resolvedPath;
+            if (hashToPath.has_value()) {
+                auto it = hashToPath->find(er.document_hash);
+                if (it == hashToPath->end()) {
+                    // Skip orphaned/deleted documents no longer present in metadata.
+                    continue;
+                }
+                resolvedPath = it->second;
+            }
 
             ComponentResult result;
             result.documentHash = er.document_hash;
             result.score = er.relevance_score;
             result.source = ComponentResult::Source::EntityVector;
-            result.rank = rank;
+            result.rank = results.size();
 
             if (!er.file_path.empty()) {
                 result.filePath = er.file_path;
-            } else if (auto it = hashToPath.find(er.document_hash); it != hashToPath.end()) {
-                result.filePath = it->second;
+            } else if (!resolvedPath.empty()) {
+                result.filePath = std::move(resolvedPath);
             }
 
             if (!er.qualified_name.empty()) {

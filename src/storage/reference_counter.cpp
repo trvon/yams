@@ -482,6 +482,10 @@ constexpr auto kReferenceSchemaBootstrapSql = R"(
 )";
 
 constexpr auto kReferenceSchemaTriggersAndBackfillSql = R"(
+    DROP TRIGGER IF EXISTS update_stats_on_insert;
+    DROP TRIGGER IF EXISTS update_stats_on_update;
+    DROP TRIGGER IF EXISTS update_stats_on_delete;
+
     CREATE TRIGGER IF NOT EXISTS trg_blocks_after_insert
     AFTER INSERT ON block_references
     BEGIN
@@ -980,6 +984,7 @@ ReferenceCounter::Transaction::Transaction(Transaction&& other) noexcept
     active_ = other.active_;
     committed_ = other.committed_;
     operations_ = std::move(other.operations_);
+    prunedHashes_ = std::move(other.prunedHashes_);
     other.active_ = false;
     other.counter_ = nullptr;
 }
@@ -1000,6 +1005,7 @@ ReferenceCounter::Transaction::operator=(Transaction&& other) noexcept {
         active_ = other.active_;
         committed_ = other.committed_;
         operations_ = std::move(other.operations_);
+        prunedHashes_ = std::move(other.prunedHashes_);
 
         other.active_ = false;
         other.counter_ = nullptr;
@@ -1134,7 +1140,7 @@ Result<void> ReferenceCounter::Transaction::commit() {
 
             // Update statistics
             const auto updateStatsStart = std::chrono::steady_clock::now();
-            counter_->updateStatistics("transactions_completed", 1);
+            counter_->updateStatisticsLocked("transactions_completed", 1);
             recordRefCounterCommitPhase("update_stats", updateStatsStart);
 
             // Commit SQLite transaction
@@ -1184,7 +1190,7 @@ void ReferenceCounter::Transaction::rollback() {
         stmt.execute();
 
         // Update statistics
-        counter_->updateStatistics("transactions_rolled_back", 1);
+        counter_->updateStatisticsLocked("transactions_rolled_back", 1);
 
         // Log and clear queued operations, then mark as inactive
         size_t operationCount = operations_.size();
@@ -1207,8 +1213,11 @@ bool ReferenceCounter::Transaction::isActive() const {
     return active_;
 }
 
-// Update statistics
-Result<void> ReferenceCounter::updateStatistics(const std::string& statName, int64_t delta) {
+// Update statistics (caller must hold pImpl->dbMutex)
+Result<void> ReferenceCounter::updateStatisticsLocked(const std::string& statName, int64_t delta) {
+    if (!pImpl || !pImpl->stmtCache) {
+        return Result<void>(ErrorCode::NotInitialized);
+    }
     try {
         auto stmt = pImpl->stmtCache->get(ReferenceCounter::Impl::UPDATE_STATS_STMT, "");
         stmt.bind(1, delta);
@@ -1220,6 +1229,15 @@ Result<void> ReferenceCounter::updateStatistics(const std::string& statName, int
         spdlog::error("Failed to update statistic {}: {}", statName, e.what());
         return Result<void>(ErrorCode::DatabaseError);
     }
+}
+
+// Update statistics (public, thread-safe)
+Result<void> ReferenceCounter::updateStatistics(const std::string& statName, int64_t delta) {
+    if (!pImpl) {
+        return Result<void>(ErrorCode::NotInitialized);
+    }
+    std::unique_lock lock(pImpl->dbMutex);
+    return updateStatisticsLocked(statName, delta);
 }
 
 Result<void>
@@ -1278,6 +1296,11 @@ ReferenceCounter::commitTransactionBatches(std::span<const RefTransactionBatch> 
 
                 const auto auditRowsStart = std::chrono::steady_clock::now();
                 for (const auto& op : batch.operations) {
+                    // ref_transaction_ops enforces CHECK (operation IN ('INCREMENT', 'DECREMENT')).
+                    // Match Transaction::commit() by omitting Prune from the audit table.
+                    if (op.type == RefDelta::Type::Prune) {
+                        continue;
+                    }
                     insertOpStmt.reset();
                     insertOpStmt.bind(1, transactionId);
                     insertOpStmt.bind(2, op.blockHash);
@@ -1293,9 +1316,6 @@ ReferenceCounter::commitTransactionBatches(std::span<const RefTransactionBatch> 
                             insertOpStmt.bind(5, static_cast<int64_t>(op.compressedSize));
                             break;
                         case RefDelta::Type::Prune:
-                            insertOpStmt.bind(3, std::string_view{"PRUNE"});
-                            insertOpStmt.bind(4, 1);
-                            insertOpStmt.bind(5, static_cast<int64_t>(op.compressedSize));
                             break;
                     }
                     insertOpStmt.execute();
@@ -1392,6 +1412,15 @@ Result<void> ReferenceCounter::restore(const std::filesystem::path& srcPath) {
         // Close current database
         pImpl->stmtCache.reset();
         pImpl->db.reset();
+
+        // Remove stale WAL/SHM sidecars so SQLite does not replay old frames onto the backup.
+        std::error_code rmEc;
+        auto walPath = pImpl->config.databasePath;
+        walPath += "-wal";
+        auto shmPath = pImpl->config.databasePath;
+        shmPath += "-shm";
+        std::filesystem::remove(walPath, rmEc);
+        std::filesystem::remove(shmPath, rmEc);
 
         // Copy backup to database path
         std::filesystem::copy_file(srcPath, pImpl->config.databasePath,

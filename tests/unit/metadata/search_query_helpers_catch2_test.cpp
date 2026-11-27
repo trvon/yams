@@ -105,12 +105,16 @@ TEST_CASE("Search query helpers: hasAdvancedFts5Operators distinguishes power-us
     using yams::metadata::hasAdvancedFts5Operators;
 
     CHECK((hasAdvancedFts5Operators("title:hello")));
+    CHECK((hasAdvancedFts5Operators("content:hello")));
     CHECK((hasAdvancedFts5Operators("hello NEAR/3 world")));
     CHECK((hasAdvancedFts5Operators("\"exact phrase\"")));
     CHECK((hasAdvancedFts5Operators("(foo OR bar) NOT baz")));
 
     CHECK_FALSE((hasAdvancedFts5Operators("dendritic cells (DCs)")));
     CHECK_FALSE((hasAdvancedFts5Operators("path:/tmp/file.txt")));
+    CHECK_FALSE((hasAdvancedFts5Operators("name:foo")));
+    CHECK_FALSE((hasAdvancedFts5Operators("tags:release")));
+    CHECK_FALSE((hasAdvancedFts5Operators("mime_type:text")));
     CHECK_FALSE((hasAdvancedFts5Operators("hello and world")));
     CHECK_FALSE((hasAdvancedFts5Operators("plain terms only")));
 

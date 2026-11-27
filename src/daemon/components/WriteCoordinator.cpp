@@ -665,6 +665,11 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
 
     if (hasKgOps && kg_) {
         YAMS_ZONE_SCOPED_N("WriteCoordinator::applyKG");
+        if (config_.kgDedupEnabled) {
+            // Prefetch committed node keys before acquiring the write-batch connection so a
+            // single-connection pool cannot self-deadlock on nested connection acquisition.
+            prefetchDeferredNodeKeys(batches, nodeKeyToId);
+        }
         auto batchResult = kg_->beginWriteBatch();
         if (!batchResult) {
             settleGraphCompletions(batches, &batchResult.error());
@@ -679,12 +684,12 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
 
         std::optional<metadata::KGWriteBuffer> edgeBuffer;
         if (config_.kgDedupEnabled) {
-            prefetchDeferredNodeKeys(batches, nodeKeyToId);
             metadata::KGWriteBufferConfig bufferConfig;
             bufferConfig.maxDocs = 0;
             bufferConfig.maxEdges = 0;
             bufferConfig.maxEntities = 0;
             bufferConfig.autoFlush = false;
+            bufferConfig.flushOnDestruct = false;
             edgeBuffer.emplace(*kg_, bufferConfig);
         }
         metadata::KGWriteBuffer* bufferPtr = edgeBuffer ? &*edgeBuffer : nullptr;

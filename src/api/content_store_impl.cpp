@@ -329,7 +329,6 @@ public:
                 auto commitResult2 = commitReferenceBatch(std::move(refBatch));
                 if (!commitResult2) {
                     cleanupStoredObject(manifestHash);
-                    cleanupStoredObjects(storedChunks);
                     return Result<StoreResult>(commitResult2.error());
                 }
                 {
@@ -523,39 +522,62 @@ public:
     // Stream-based store operation
     Result<StoreResult> storeStream(std::istream& stream, const ContentMetadata& metadata,
                                     ProgressCallback progress) override {
-        // Create temporary file for streaming
-        auto tempPath = config_.storagePath / "temp" /
-                        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        static std::atomic<std::uint64_t> streamTempSeq{0};
+        const auto seq = streamTempSeq.fetch_add(1, std::memory_order_relaxed);
+        auto tempPath =
+            config_.storagePath / "temp" /
+            ("store_" +
+             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" +
+             std::to_string(seq));
         yams::common::ensureDirectories(tempPath.parent_path());
 
+        struct TempFileGuard {
+            std::filesystem::path path;
+            ~TempFileGuard() {
+                std::error_code ec;
+                std::filesystem::remove(path, ec);
+            }
+        } tempGuard{tempPath};
+
         // Write stream to temporary file
-        std::ofstream tempFile(tempPath, std::ios::binary);
-        if (!tempFile) {
-            return Result<StoreResult>(ErrorCode::PermissionDenied);
+        {
+            std::ofstream tempFile(tempPath, std::ios::binary);
+            if (!tempFile) {
+                return Result<StoreResult>(ErrorCode::PermissionDenied);
+            }
+
+            if (stream.peek() != std::istream::traits_type::eof()) {
+                tempFile << stream.rdbuf();
+            }
+            tempFile.flush();
+            if (!tempFile || stream.bad()) {
+                return Result<StoreResult>(ErrorCode::IOError);
+            }
         }
 
-        // Copy stream to file
-        tempFile << stream.rdbuf();
-        tempFile.close();
-
         // Store using file-based method
-        auto result = store(tempPath, metadata, progress);
-
-        // Clean up temporary file
-        std::filesystem::remove(tempPath);
-
-        return result;
+        return store(tempPath, metadata, progress);
     }
 
     // Stream-based retrieve operation
     Result<RetrieveResult> retrieveStream(const std::string& hash, std::ostream& output,
                                           ProgressCallback progress) override {
-        // Create temporary file for retrieval
+        static std::atomic<std::uint64_t> retrieveTempSeq{0};
+        const auto seq = retrieveTempSeq.fetch_add(1, std::memory_order_relaxed);
         auto tempPath =
             config_.storagePath / "temp" /
             (hash + "_" +
-             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" +
+             std::to_string(seq));
         yams::common::ensureDirectories(tempPath.parent_path());
+
+        struct TempFileGuard {
+            std::filesystem::path path;
+            ~TempFileGuard() {
+                std::error_code ec;
+                std::filesystem::remove(path, ec);
+            }
+        } tempGuard{tempPath};
 
         // Retrieve to temporary file
         auto result = retrieve(hash, tempPath, progress);
@@ -566,15 +588,16 @@ public:
         // Stream file to output
         std::ifstream tempFile(tempPath, std::ios::binary);
         if (!tempFile) {
-            std::filesystem::remove(tempPath);
             return Result<RetrieveResult>(ErrorCode::Unknown);
         }
 
-        output << tempFile.rdbuf();
-        tempFile.close();
-
-        // Clean up temporary file
-        std::filesystem::remove(tempPath);
+        if (tempFile.peek() != std::ifstream::traits_type::eof()) {
+            output << tempFile.rdbuf();
+        }
+        output.flush();
+        if (!output || tempFile.bad()) {
+            return Result<RetrieveResult>(ErrorCode::IOError);
+        }
 
         return result;
     }
@@ -712,11 +735,39 @@ public:
         const std::string dataHash = crypto::SHA256Hasher::hash(data);
         const std::scoped_lock contentLock(contentStripes_[contentStripe(dataHash)]);
 
-        // For small data, store directly without chunking
+        auto readDataRange = [data](uint64_t offset,
+                                    uint32_t size) -> Result<std::vector<std::byte>> {
+            if (offset > data.size() || size > data.size() - offset) {
+                return Error{ErrorCode::CorruptedData, "Manifest chunk lies outside the data"};
+            }
+            auto range = data.subspan(static_cast<std::size_t>(offset), size);
+            return std::vector<std::byte>(range.begin(), range.end());
+        };
+        if (auto existing = storeAgainstExistingManifest(dataHash, data.size(), metadata,
+                                                         readDataRange, startTime);
+            !existing) {
+            return Result<StoreResult>(existing.error());
+        } else if (existing.value()) {
+            return *existing.value();
+        }
+
+        // For small data with no existing manifest, store directly without chunking while
+        // still tracking persistent reference counts so duplicate stores and restarts remain safe.
         if (data.size() <= config_.chunkSize) {
             auto storeResult = storage_->store(dataHash, data);
             if (!storeResult) {
                 return Result<StoreResult>(storeResult.error());
+            }
+
+            if (refCounter_) {
+                auto tx = refCounter_->beginTransaction();
+                const size_t trackedSize = std::max<size_t>(1, data.size());
+                tx->increment(dataHash, trackedSize, trackedSize);
+                auto commitRes = tx->commit();
+                if (!commitRes) {
+                    tx->rollback();
+                    return Result<StoreResult>(commitRes.error());
+                }
             }
 
             // Store metadata
@@ -735,22 +786,6 @@ public:
                                .bytesStored = data.size(),
                                .bytesDeduped = 0,
                                .duration = duration};
-        }
-
-        auto readDataRange = [data](uint64_t offset,
-                                    uint32_t size) -> Result<std::vector<std::byte>> {
-            if (offset > data.size() || size > data.size() - offset) {
-                return Error{ErrorCode::CorruptedData, "Manifest chunk lies outside the data"};
-            }
-            auto range = data.subspan(static_cast<std::size_t>(offset), size);
-            return std::vector<std::byte>(range.begin(), range.end());
-        };
-        if (auto existing = storeAgainstExistingManifest(dataHash, data.size(), metadata,
-                                                         readDataRange, startTime);
-            !existing) {
-            return Result<StoreResult>(existing.error());
-        } else if (existing.value()) {
-            return *existing.value();
         }
 
         // For larger data, use in-memory chunking directly (avoid temp file I/O).
@@ -839,7 +874,6 @@ public:
                 auto commitResult2 = commitReferenceBatch(std::move(refBatch));
                 if (!commitResult2) {
                     cleanupStoredObject(manifestHash);
-                    cleanupStoredObjects(storedChunks);
                     return Result<StoreResult>(commitResult2.error());
                 }
                 {
@@ -928,12 +962,33 @@ public:
         // directly under their full-file SHA-256 hash. Checking direct storage first avoids a
         // manifest read + protobuf deserialize on every single-chunk document.
         if (auto dataResult = storage_->retrieve(hash); dataResult) {
-            auto data = std::move(dataResult.value());
-            if (data.size() > maxBytes) {
-                data.resize(maxBytes);
+            // Guard against resurrecting a zero-ref single-chunk object left on disk for GC after
+            // remove() deleted its manifest.
+            bool live = false;
+            if (auto mfExists = storage_->exists(hash + ".manifest");
+                mfExists && mfExists.value()) {
+                live = true;
+            } else if (refCounter_) {
+                if (auto rc = refCounter_->getRefCount(hash); rc && rc.value() > 0) {
+                    live = true;
+                }
             }
-            updateStats(0, 0, data.size(), 0, 0, 1, 0);
-            return data;
+            if (!live) {
+                std::shared_lock lock(metadataMutex_);
+                live = metadataStore_.contains(hash);
+            }
+            if (live) {
+                auto data = std::move(dataResult.value());
+                if (data.size() > maxBytes) {
+                    data.resize(maxBytes);
+                }
+                updateStats(0, 0, data.size(), 0, 0, 1, 0);
+                return data;
+            }
+        } else if (dataResult.error().code != ErrorCode::ChunkNotFound &&
+                   dataResult.error().code != ErrorCode::FileNotFound &&
+                   dataResult.error().code != ErrorCode::NotFound) {
+            return dataResult.error();
         }
 
         auto manifestHash = hash + ".manifest";
@@ -1017,10 +1072,31 @@ public:
             }
 
             // Small storeBytes() payloads are stored directly under their content hash.
-            // Require live metadata before taking this fallback: a chunked object's final
-            // manifest removal leaves zero-reference chunks for GC, and those chunks must
-            // not be mistaken for independently stored direct objects on a repeated remove.
-            {
+            // Use persistent refCounter_ counts when present (survives restart and prevents
+            // premature deletion on duplicate stores); fall back to live in-memory metadata only
+            // for legacy uncounted direct objects, never for zero-ref GC-pending chunks.
+            bool hasPersistentRef = false;
+            if (refCounter_) {
+                auto rc = refCounter_->getRefCount(hash);
+                if (!rc) {
+                    return Result<bool>(rc.error());
+                }
+                hasPersistentRef = rc.value() > 0;
+            }
+
+            if (hasPersistentRef) {
+                auto transaction = refCounter_->beginTransaction();
+                transaction->decrement(hash);
+                auto commitRes = transaction->commit();
+                if (!commitRes) {
+                    transaction->rollback();
+                    return Result<bool>(commitRes.error());
+                }
+                auto remaining = refCounter_->getRefCount(hash);
+                if (remaining && remaining.value() > 0) {
+                    return Result<bool>(true);
+                }
+            } else {
                 std::shared_lock lock(metadataMutex_);
                 if (!metadataStore_.contains(hash)) {
                     return Result<bool>(false);

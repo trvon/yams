@@ -4,6 +4,8 @@
 #include <yams/search/evidence_search_pipeline.h>
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -267,6 +269,48 @@ TEST_CASE("EvidenceSearchPipeline ConvexMinMax preserves score margins and handl
     CHECK(run.value().results[0].document.sha256Hash == "doc-runaway");
     CHECK(run.value().results[1].document.sha256Hash == "doc-vec-top");
     CHECK(run.value().results[2].document.sha256Hash == "doc-tie");
+}
+
+TEST_CASE("EvidenceSearchPipeline ConvexMinMax flat zero/negative pool and NaN safety",
+          "[search][evidence_pipeline][convex][nan][catch2]") {
+    SearchEngineConfig config;
+    config.fusionStrategy = SearchEngineConfig::FusionStrategy::ConvexMinMax;
+    config.textWeight = 0.60F;
+    config.vectorWeight = 0.40F;
+
+    SECTION("flat zero and negative score pools normalize to 0.0 instead of 1.0") {
+        const std::vector<ComponentResult> components{
+            makeComponent("doc-zero", 0.0F, ComponentResult::Source::Text, 0),
+            makeComponent("doc-neg", -0.5F, ComponentResult::Source::Vector, 0),
+        };
+        EvidenceSearchPipeline pipeline;
+        auto run = pipeline.execute(components, {}, config, 10);
+        REQUIRE(run);
+        REQUIRE(run.value().results.size() == 2);
+        for (const auto& res : run.value().results) {
+            CHECK(std::isfinite(res.score));
+            CHECK(res.score == Catch::Approx(0.0));
+        }
+    }
+
+    SECTION("non-finite component scores remain finite and preserve strict weak ordering") {
+        const float nanVal = std::numeric_limits<float>::quiet_NaN();
+        const float infVal = std::numeric_limits<float>::infinity();
+        const std::vector<ComponentResult> components{
+            makeComponent("doc-nan", nanVal, ComponentResult::Source::Text, 0),
+            makeComponent("doc-inf", infVal, ComponentResult::Source::Text, 1),
+            makeComponent("doc-good", 0.8F, ComponentResult::Source::Text, 2),
+        };
+
+        config.fusionStrategy = SearchEngineConfig::FusionStrategy::Rrf;
+        EvidenceSearchPipeline pipeline;
+        auto run = pipeline.execute(components, {}, config, 10);
+        REQUIRE(run);
+        REQUIRE(run.value().results.size() == 3);
+        for (const auto& res : run.value().results) {
+            CHECK(std::isfinite(res.score));
+        }
+    }
 }
 
 TEST_CASE("SearchEngineConfig::applyExecutionPolicyFrom preserves fusion and rerank settings",

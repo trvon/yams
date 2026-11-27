@@ -1067,6 +1067,73 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend vec0 PHSS search pat
     CHECK((searchResult.value()[0].chunk_id == "chunk_vec0_phss_0"));
 }
 
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend Vec0L2 empty/deleted/mismatched dim and non-finite SPQ query",
+                 "[vector][backend][search][vec0-edge][catch2]") {
+    skipIfNeeded();
+
+    SECTION("Vec0L2 returns empty results on empty index, dim mismatch, and after full delete") {
+        SqliteVecBackend::Config config;
+        config.search_engine = VectorSearchEngine::Vec0L2;
+        SqliteVecBackend backend(config);
+        REQUIRE((backend.initialize(":memory:").has_value()));
+        REQUIRE((backend.createTables(64).has_value()));
+
+        auto query64 = createEmbedding(64, 1.0f);
+        auto emptySingle = backend.searchSimilar(query64, 5, 0.0f, std::nullopt, {});
+        REQUIRE(emptySingle.has_value());
+        CHECK(emptySingle.value().empty());
+
+        auto emptyBatch = backend.searchSimilarBatch({query64, query64}, 5, 0.0f);
+        REQUIRE(emptyBatch.has_value());
+        REQUIRE(emptyBatch.value().size() == 2);
+        CHECK(emptyBatch.value()[0].empty());
+        CHECK(emptyBatch.value()[1].empty());
+
+        auto rec = createVectorRecord("vec0_edge_0", query64);
+        REQUIRE(backend.insertVector(rec).has_value());
+        auto found = backend.searchSimilar(query64, 5, 0.0f, std::nullopt, {});
+        REQUIRE(found.has_value());
+        REQUIRE(found.value().size() == 1);
+
+        auto query32 = createEmbedding(32, 1.0f);
+        auto mismatch = backend.searchSimilar(query32, 5, 0.0f, std::nullopt, {});
+        REQUIRE(mismatch.has_value());
+        CHECK(mismatch.value().empty());
+
+        REQUIRE(backend.deleteVector(rec.chunk_id).has_value());
+        auto afterDelete = backend.searchSimilar(query64, 5, 0.0f, std::nullopt, {});
+        REQUIRE(afterDelete.has_value());
+        CHECK(afterDelete.value().empty());
+    }
+
+    SECTION("SimeonPqAdc rejects NaN and zero-norm query embeddings cleanly") {
+        SqliteVecBackend::Config config;
+        config.search_engine = VectorSearchEngine::SimeonPqAdc;
+        config.simeon_pq_centroids = 4;
+        SqliteVecBackend backend(config);
+        REQUIRE((backend.initialize(":memory:").has_value()));
+        REQUIRE((backend.createTables(64).has_value()));
+
+        for (int i = 0; i < 12; ++i) {
+            auto emb = createEmbedding(64, static_cast<float>(i + 1));
+            REQUIRE(backend.insertVector(createVectorRecord("spq_nan_" + std::to_string(i), emb))
+                        .has_value());
+        }
+        REQUIRE(backend.buildIndex().has_value());
+
+        std::vector<float> nanQuery(64, std::numeric_limits<float>::quiet_NaN());
+        auto nanRes = backend.searchSimilar(nanQuery, 5, -1.0f, std::nullopt, {});
+        REQUIRE(nanRes.has_value());
+        CHECK(nanRes.value().empty());
+
+        std::vector<float> zeroQuery(64, 0.0f);
+        auto zeroRes = backend.searchSimilar(zeroQuery, 5, -1.0f, std::nullopt, {});
+        REQUIRE(zeroRes.has_value());
+        CHECK(zeroRes.value().empty());
+    }
+}
+
 TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend Simeon PQ search engine basic",
                  "[vector][backend][search][spq-basic][catch2]") {
     skipIfNeeded();

@@ -7,6 +7,7 @@
 #include <yams/metadata/query_helpers.h>
 #include <yams/repair/embedding_repair_util.h>
 #include <yams/vector/document_chunker.h>
+#include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 
 #include <nlohmann/json.hpp>
@@ -277,13 +278,38 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
     // Note: We no longer hold a long-lived exclusive DB lock across the entire repair.
     // Writes are serialized per-batch below; reads and compute proceed concurrently.
 
+    // Guard: probe the actual stored dimension in vectors.db (not config.embedding_dim, which
+    // stays at the caller's target dim when vectors_sentinel.json is missing/stale) so mixed-dim
+    // embeddings are never written into an existing vector DB.
+    std::error_code existsEc;
+    if (std::filesystem::exists(vdbConfig.database_path, existsEc) && !existsEc) {
+        try {
+            vector::SqliteVecBackend probeBackend;
+            if (auto openRes = probeBackend.initialize(vdbConfig.database_path); openRes) {
+                auto storedDim = probeBackend.getStoredEmbeddingDimension();
+                probeBackend.close();
+                if (storedDim && *storedDim > 0 && embeddingDim > 0 && *storedDim != embeddingDim) {
+                    std::string msg =
+                        "Embedding dimension mismatch: vector DB has dim=" +
+                        std::to_string(*storedDim) + ", but model '" + modelName + "' produces " +
+                        std::to_string(embeddingDim) +
+                        ". Install/select a model with dim=" + std::to_string(*storedDim) +
+                        " (e.g., all-MiniLM-L6-v2 for 384) or recreate the vector DB.";
+                    spdlog::error("[repair] {}", msg);
+                    return Error{ErrorCode::InvalidState, msg};
+                }
+            }
+        } catch (...) {
+            spdlog::debug("Embedding repair: existing vector dimension guard probe failed");
+        }
+    }
+
     auto vectorDb = std::make_unique<vector::VectorDatabase>(vdbConfig);
     if (auto init = vectorDb->initializeChecked(); !init) {
         return Error{init.error()};
     }
 
-    // Guard: if an existing DB has a fixed dimension that does not match the model provider,
-    // abort early with a clear diagnostic instead of failing during batch insert.
+    // Secondary guard against config-resolved dimension mismatch.
     try {
         size_t existing = vectorDb->getConfig().embedding_dim;
         if (existing > 0 && embeddingDim > 0 && existing != embeddingDim) {
@@ -338,12 +364,13 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
         }
     }
 
-    // Process documents in batches
-    for (size_t i = 0; i < documents.size(); i += config.batchSize) {
+    // Process documents in batches (clamp batchSize >= 1 to avoid infinite loop on 0).
+    const size_t batchSize = std::max<size_t>(1, config.batchSize);
+    for (size_t i = 0; i < documents.size(); i += batchSize) {
         if (cancelRequested()) {
             return Error{ErrorCode::OperationCancelled, "cancelled"};
         }
-        size_t end = std::min(i + config.batchSize, documents.size());
+        size_t end = std::min(i + batchSize, documents.size());
         std::vector<std::string> texts;
         std::vector<metadata::DocumentInfo> batchDocs;
         std::vector<metadata::EmbeddingDerivationToken> batchTokens;
@@ -568,14 +595,19 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
                     auto& docState = docStates[chunk.docIdx];
                     auto& embedding = batchEmbeddings[rel];
 
-                    if (!embedding.empty()) {
-                        if (docState.docEmbeddingSum.empty()) {
-                            docState.docEmbeddingSum.assign(embedding.size(), 0.0f);
-                        }
-                        for (size_t j = 0;
-                             j < docState.docEmbeddingSum.size() && j < embedding.size(); ++j) {
-                            docState.docEmbeddingSum[j] += embedding[j];
-                        }
+                    if (embedding.empty() || embedding.size() != embeddingDim) {
+                        spdlog::warn(
+                            "[repair] skipping chunk with invalid embedding size={} (expected={})",
+                            embedding.size(), embeddingDim);
+                        stats.failedOperations++;
+                        continue;
+                    }
+                    if (docState.docEmbeddingSum.empty()) {
+                        docState.docEmbeddingSum.assign(embedding.size(), 0.0f);
+                    }
+                    for (size_t j = 0; j < docState.docEmbeddingSum.size() && j < embedding.size();
+                         ++j) {
+                        docState.docEmbeddingSum[j] += embedding[j];
                     }
                     docState.sourceChunkIds.push_back(chunk.chunkId);
 
@@ -698,7 +730,7 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
 
         // Report progress
         if (progressCallback) {
-            progressCallback(std::min(i + config.batchSize, documents.size()), documents.size(),
+            progressCallback(std::min(i + batchSize, documents.size()), documents.size(),
                              "generated=" + std::to_string(stats.embeddingsGenerated) +
                                  " skipped=" + std::to_string(stats.embeddingsSkipped) +
                                  " failed=" + std::to_string(stats.failedOperations));

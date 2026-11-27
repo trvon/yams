@@ -140,6 +140,10 @@ public:
 
     Result<bool> exists(std::string_view hash) const noexcept { return underlying_->exists(hash); }
 
+    Result<void> replace(std::string_view hash, std::span<const std::byte> data) {
+        return underlying_->replace(hash, data);
+    }
+
     Result<void> remove(std::string_view hash) { return underlying_->remove(hash); }
 
     Result<uint64_t> size(std::string_view hash) {
@@ -311,7 +315,7 @@ public:
 
         // Replace with compressed version
         const auto& compressed = compressedResult.value();
-        return underlying_->store(hash, std::span<const std::byte>(compressed));
+        return underlying_->replace(hash, std::span<const std::byte>(compressed));
     }
 
     Result<void> decompressExisting(std::string_view hash) {
@@ -336,7 +340,7 @@ public:
 
         // Replace with decompressed version
         const auto& decompressed = decompressedResult.value();
-        return underlying_->store(hash, std::span<const std::byte>(decompressed));
+        return underlying_->replace(hash, std::span<const std::byte>(decompressed));
     }
 
     void setPolicyRules(compression::CompressionPolicy::Rules rules) {
@@ -736,6 +740,11 @@ CompressedStorageEngine::~CompressedStorageEngine() = default;
 Result<void> CompressedStorageEngine::store(std::string_view hash,
                                             std::span<const std::byte> data) {
     return pImpl->store(hash, data);
+}
+
+Result<void> CompressedStorageEngine::replace(std::string_view hash,
+                                              std::span<const std::byte> data) {
+    return pImpl->replace(hash, data);
 }
 
 Result<std::vector<std::byte>> CompressedStorageEngine::retrieve(std::string_view hash) const {

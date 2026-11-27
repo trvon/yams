@@ -379,3 +379,30 @@ TEST_CASE("KGWriteBuffer flushInto restores buffer on insert failure", "[kg_writ
     REQUIRE((h.buffer->entityCount() == 1));
     REQUIRE((h.buffer->totalEdgesFlushed() == 0));
 }
+
+TEST_CASE("KGWriteBuffer with flushOnDestruct=false does not flush or deadlock on failure",
+          "[kg_write_buffer]") {
+    TestHarness h;
+    auto [a, b] = h.insertTwoNodes();
+
+    auto batchResult = h.kgStore->beginWriteBatch();
+    REQUIRE(batchResult);
+    auto& wb = *batchResult.value();
+
+    {
+        KGWriteBufferConfig cfg;
+        cfg.autoFlush = false;
+        cfg.flushOnDestruct = false;
+        KGWriteBuffer buf(*h.kgStore, cfg);
+        REQUIRE(buf.addEdge(h.makeEdge(a, b, "uncommitted")));
+        REQUIRE(buf.edgeCount() == 1);
+        // Destroy buf while wb is still open and uncommitted: must not open a nested
+        // WriteBatch or commit the buffered edge.
+    }
+
+    batchResult.value().reset(); // Roll back outer batch
+
+    auto edges = h.kgStore->getEdgesFrom(a);
+    REQUIRE(edges);
+    CHECK(edges.value().empty());
+}

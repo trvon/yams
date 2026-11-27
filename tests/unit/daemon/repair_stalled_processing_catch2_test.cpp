@@ -11,6 +11,7 @@
 #include "../../common/metadata_test_db.h"
 #include "../../common/test_helpers_catch2.h"
 
+#include <yams/api/content_store_builder.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/metadata_repository.h>
@@ -267,4 +268,48 @@ TEST_CASE("Stalled repair reset reconciles and preserves attempt budget",
         REQUIRE(embedded.has_value());
         CHECK_FALSE(embedded.value());
     }
+}
+
+TEST_CASE("RepairService FTS5 dry-run does not mutate ghost-success extraction status",
+          "[unit][daemon][repair][fts5][dryrun][catch2]") {
+    RepairDbFixture fix;
+    const std::string hash = fix.insertPendingDocument("fts5-dryrun-ghost");
+    auto before = fix.document(hash);
+    REQUIRE(before.has_value());
+    REQUIRE(fix.repository_
+                ->updateDocumentExtractionStatus(before->id, true, ExtractionStatus::Success, "")
+                .has_value());
+
+    const auto storeDir = fix.dbPath_.parent_path() / "fts5_dryrun_store";
+    auto storeRes = yams::api::ContentStoreBuilder::createDefault(storeDir);
+    REQUIRE(storeRes.has_value());
+    std::shared_ptr<yams::api::IContentStore> contentStore = std::move(storeRes.value());
+
+    RepairServiceContext ctx;
+    ctx.getMetadataRepo = [&fix] { return fix.repository_; };
+    ctx.getContentStore = [&contentStore] { return contentStore; };
+    RepairService::Config cfg;
+    cfg.enable = false;
+    RepairService service(ctx, nullptr, [] { return std::size_t{0}; }, cfg);
+
+    RepairRequest req;
+    req.repairFts5 = true;
+    req.dryRun = true;
+    auto resp = service.executeRepair(req, nullptr);
+    CHECK(resp.success);
+    REQUIRE(resp.operationResults.size() == 1);
+    CHECK(resp.operationResults.front().processed == 1);
+    CHECK(resp.operationResults.front().skipped == 1);
+
+    // Dry-run must leave the ghost-success document's extraction status untouched.
+    auto after = fix.document(hash);
+    REQUIRE(after.has_value());
+    CHECK(after->extractionStatus == ExtractionStatus::Success);
+    CHECK(after->contentExtracted);
+
+    // stop() must remain safe even when background repair was never started.
+    service.stop();
+    contentStore.reset();
+    std::error_code ec;
+    std::filesystem::remove_all(storeDir, ec);
 }

@@ -1014,15 +1014,16 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
     }
 
     std::vector<bool> routeCandidates(artifacts.clusters.size(), true);
-    const bool bqRequested = alpha < 1.0F && queryNorm > 0.0F && request.limit > 0 &&
+    const bool hasValidQueryNorm = std::isfinite(queryNorm) && queryNorm > 0.0F;
+    const bool bqRequested = alpha < 1.0F && hasValidQueryNorm && request.limit > 0 &&
                              request.bqCandidateLimit > 0 && index.centroidBqIndex &&
                              artifacts.clusters.size() > request.bqCandidateLimit;
-    const bool denseAnnEligible = !bqRequested && alpha < 1.0F && queryNorm > 0.0F &&
+    const bool denseAnnEligible = !bqRequested && alpha < 1.0F && hasValidQueryNorm &&
                                   request.limit > 0 && request.denseAnnCandidateLimit > 0 &&
                                   index.centroidAnnIndex &&
                                   artifacts.clusters.size() > request.denseAnnCandidateLimit;
     const bool bqFallbackEligible =
-        !denseAnnEligible && !bqRequested && alpha < 1.0F && queryNorm > 0.0F &&
+        !denseAnnEligible && !bqRequested && alpha < 1.0F && hasValidQueryNorm &&
         request.limit > 0 && request.denseAnnCandidateLimit > 0 && !index.centroidAnnIndex &&
         index.centroidBqIndex && artifacts.clusters.size() > request.denseAnnCandidateLimit;
 
@@ -1082,12 +1083,14 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
             continue;
         }
         const auto& cluster = artifacts.clusters[clusterIndex];
-        if (queryNorm > 0.0F && !cluster.fittedRouteVector.empty() &&
+        if (hasValidQueryNorm && !cluster.fittedRouteVector.empty() &&
             cluster.fittedRouteVector.size() == request.queryEmbedding.size()) {
             const auto fitted =
                 dotProduct(request.queryEmbedding, cluster.fittedRouteVector) / queryNorm;
-            signals[clusterIndex].dense = std::clamp((fitted + 1.0F) * 0.5F, 0.0F, 1.0F);
-            signals[clusterIndex].denseObserved = true;
+            if (std::isfinite(fitted)) {
+                signals[clusterIndex].dense = std::clamp((fitted + 1.0F) * 0.5F, 0.0F, 1.0F);
+                signals[clusterIndex].denseObserved = true;
+            }
             if (work != nullptr) {
                 ++work->representativeDistanceEvaluations;
                 ++work->exactRepresentativeDistanceEvaluations;
@@ -1095,12 +1098,16 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
             continue;
         }
         const float centroidNorm = index.centroidNorms[clusterIndex];
-        if (queryNorm > 0.0F && centroidNorm > 0.0F && !cluster.centroidEmbedding.empty()) {
+        if (std::isfinite(queryNorm) && queryNorm > 0.0F && std::isfinite(centroidNorm) &&
+            centroidNorm > 0.0F &&
+            cluster.centroidEmbedding.size() == request.queryEmbedding.size()) {
             auto dense = dotProduct(request.queryEmbedding, cluster.centroidEmbedding) /
                          (queryNorm * centroidNorm);
-            // Map [-1,1] -> [0,1] so it composes with the bm25 mass cleanly.
-            signals[clusterIndex].dense = std::clamp((dense + 1.0F) * 0.5F, 0.0F, 1.0F);
-            signals[clusterIndex].denseObserved = true;
+            if (std::isfinite(dense)) {
+                // Map [-1,1] -> [0,1] so it composes with the bm25 mass cleanly.
+                signals[clusterIndex].dense = std::clamp((dense + 1.0F) * 0.5F, 0.0F, 1.0F);
+                signals[clusterIndex].denseObserved = true;
+            }
             if (work != nullptr) {
                 ++work->representativeDistanceEvaluations;
                 ++work->exactRepresentativeDistanceEvaluations;
@@ -1122,15 +1129,18 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
              ++representativeIndex) {
             const auto& representative = cluster.routingRepresentatives[representativeIndex];
             const auto representativeNorm = representativeNorms[representativeIndex];
-            if (queryNorm <= 0.0F || representativeNorm <= 0.0F ||
+            if (!std::isfinite(queryNorm) || queryNorm <= 0.0F ||
+                !std::isfinite(representativeNorm) || representativeNorm <= 0.0F ||
                 representative.embedding.size() != request.queryEmbedding.size()) {
                 continue;
             }
             const auto cosine = dotProduct(request.queryEmbedding, representative.embedding) /
                                 (queryNorm * representativeNorm);
-            const auto dense = std::clamp((cosine + 1.0F) * 0.5F, 0.0F, 1.0F);
-            signals[clusterIndex].dense = std::max(signals[clusterIndex].dense, dense);
-            signals[clusterIndex].denseObserved = true;
+            if (std::isfinite(cosine)) {
+                const auto dense = std::clamp((cosine + 1.0F) * 0.5F, 0.0F, 1.0F);
+                signals[clusterIndex].dense = std::max(signals[clusterIndex].dense, dense);
+                signals[clusterIndex].denseObserved = true;
+            }
             if (work != nullptr) {
                 ++work->representativeDistanceEvaluations;
                 ++work->exactRepresentativeDistanceEvaluations;

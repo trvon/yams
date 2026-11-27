@@ -936,11 +936,16 @@ MetadataRepository::getMetadataValueCounts(const std::vector<std::string>& keys,
                                       runResult.error().message, sql);
                         auto fallbackOpts = options;
                         fallbackOpts.containsUsesFts = false;
-                        return getMetadataValueCounts(keys, fallbackOpts);
+                        sql.clear();
+                        runResult =
+                            runMetadataValueCountQuery(db, keys, fallbackOpts, needsDocumentJoin,
+                                                       false, hasPathIndexing_, &sql);
                     }
-                    spdlog::error("MetadataRepository::getMetadataValueCounts query failed: "
-                                  "{}\nSQL: {}",
-                                  runResult.error().message, sql);
+                    if (!runResult) {
+                        spdlog::error("MetadataRepository::getMetadataValueCounts query failed: "
+                                      "{}\nSQL: {}",
+                                      runResult.error().message, sql);
+                    }
                 }
                 return runResult;
             });
@@ -1720,9 +1725,10 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& requested) {
     auto options = requested;
     options.usePathLocations = requested.usePathLocations && hasDocumentPaths_;
     options.containsUsesFts = requested.containsUsesFts && !options.usePathLocations;
-    return executeReadQuery<std::vector<DocumentInfo>>(
-        [&](Database& db) -> Result<std::vector<DocumentInfo>> {
-            const bool joinFtsForContains = options.containsFragment && options.containsUsesFts &&
+    return executeReadQuery<std::vector<DocumentInfo>>([&](Database& db)
+                                                           -> Result<std::vector<DocumentInfo>> {
+        const auto runOnce = [&](bool useFts) -> Result<std::vector<DocumentInfo>> {
+            const bool joinFtsForContains = useFts && options.containsFragment &&
                                             !options.containsFragment->empty() && pathFtsAvailable_;
 
             std::string sql = "SELECT ";
@@ -1735,9 +1741,11 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& requested) {
             if (joinFtsForContains)
                 sql += " JOIN documents_path_fts ON documents.id = documents_path_fts.rowid";
 
+            auto opts = options;
+            opts.containsUsesFts = useFts;
             std::vector<std::string> conditions;
             std::vector<BindParam> params;
-            appendDocumentQueryFilters(options, joinFtsForContains, hasPathIndexing_, conditions,
+            appendDocumentQueryFilters(opts, joinFtsForContains, hasPathIndexing_, conditions,
                                        params, true);
 
             if (!conditions.empty()) {
@@ -1749,44 +1757,50 @@ MetadataRepository::queryDocuments(const DocumentQueryOptions& requested) {
                 }
             }
 
-            if (options.orderByIdAsc) {
+            if (opts.orderByIdAsc) {
                 sql += " ORDER BY documents.id ASC";
-            } else if (options.orderByNameAsc) {
+            } else if (opts.orderByNameAsc) {
                 sql += " ORDER BY file_name ASC";
-            } else if (options.orderByIndexedDesc) {
+            } else if (opts.orderByIndexedDesc) {
                 sql += " ORDER BY indexed_time DESC";
             }
 
-            if (options.limit > 0) {
+            if (opts.limit > 0) {
                 sql += " LIMIT ?";
-                addIntParam(params, options.limit);
+                addIntParam(params, opts.limit);
             }
-            if (options.offset > 0) {
+            if (opts.offset > 0) {
                 sql += " OFFSET ?";
-                addIntParam(params, options.offset);
+                addIntParam(params, opts.offset);
             }
 
-            if (options.usePathLocations)
-                sql.insert(0, repository::documentPathQueryCte(options.currentPathsOnly));
+            if (opts.usePathLocations)
+                sql.insert(0, repository::documentPathQueryCte(opts.currentPathsOnly));
             auto execResult = executePreparedVectorQuery<DocumentInfo>(
                 db, sql, params, [&](const Statement& stmt) { return mapDocumentRow(stmt); },
                 [&](const DocumentInfo& doc) { storePathCache(doc); });
             if (!execResult) {
-                if (joinFtsForContains && options.containsUsesFts) {
+                if (joinFtsForContains) {
                     spdlog::debug("MetadataRepository::queryDocuments prepare failed (falling back "
                                   "to without FTS): {}\nSQL: {}",
                                   execResult.error().message, sql);
-                    auto fallbackOpts = options;
-                    fallbackOpts.containsUsesFts = false;
-                    return queryDocuments(fallbackOpts);
+                } else {
+                    spdlog::error("MetadataRepository::queryDocuments prepare failed: "
+                                  "{}\nSQL: {}",
+                                  execResult.error().message, sql);
                 }
-                spdlog::error("MetadataRepository::queryDocuments prepare failed: {}\nSQL: {}",
-                              execResult.error().message, sql);
-                return execResult.error();
             }
-
             return execResult;
-        });
+        };
+
+        const bool tryFts = options.containsFragment && options.containsUsesFts &&
+                            !options.containsFragment->empty() && pathFtsAvailable_;
+        auto execResult = runOnce(tryFts);
+        if (!execResult && tryFts) {
+            return runOnce(false);
+        }
+        return execResult;
+    });
 }
 
 Result<std::vector<DocumentInfo>>
@@ -2266,57 +2280,62 @@ MetadataRepository::queryDocumentsForListProjection(const DocumentQueryOptions& 
     YAMS_PLOT("metadata_repo::list_offset", static_cast<int64_t>(options.offset));
     auto result = executeReadQuery<std::vector<ListDocumentProjection>>(
         [&](Database& db) -> Result<std::vector<ListDocumentProjection>> {
-            const bool joinFtsForContains = options.containsFragment && options.containsUsesFts &&
-                                            !options.containsFragment->empty() && pathFtsAvailable_;
+            const auto runOnce = [&](bool useFts) -> Result<std::vector<ListDocumentProjection>> {
+                const bool joinFtsForContains = useFts && options.containsFragment &&
+                                                !options.containsFragment->empty() &&
+                                                pathFtsAvailable_;
 
-            std::string sql =
-                "SELECT documents.id, documents.file_path, documents.file_name, "
-                "documents.file_extension, documents.file_size, documents.sha256_hash, "
-                "documents.mime_type, documents.created_time, documents.modified_time, "
-                "documents.indexed_time, documents.extraction_status FROM documents";
-            if (joinFtsForContains)
-                sql += " JOIN documents_path_fts ON documents.id = documents_path_fts.rowid";
+                std::string sql =
+                    "SELECT documents.id, documents.file_path, documents.file_name, "
+                    "documents.file_extension, documents.file_size, documents.sha256_hash, "
+                    "documents.mime_type, documents.created_time, documents.modified_time, "
+                    "documents.indexed_time, documents.extraction_status FROM documents";
+                if (joinFtsForContains)
+                    sql += " JOIN documents_path_fts ON documents.id = documents_path_fts.rowid";
 
-            std::vector<std::string> conditions;
-            std::vector<BindParam> params;
-            appendDocumentQueryFilters(options, joinFtsForContains, hasPathIndexing_, conditions,
-                                       params, false);
+                auto opts = options;
+                opts.containsUsesFts = useFts;
+                std::vector<std::string> conditions;
+                std::vector<BindParam> params;
+                appendDocumentQueryFilters(opts, joinFtsForContains, hasPathIndexing_, conditions,
+                                           params, false);
 
-            if (!conditions.empty()) {
-                sql += " WHERE ";
-                for (size_t i = 0; i < conditions.size(); ++i) {
-                    if (i > 0)
-                        sql += " AND ";
-                    sql += conditions[i];
+                if (!conditions.empty()) {
+                    sql += " WHERE ";
+                    for (size_t i = 0; i < conditions.size(); ++i) {
+                        if (i > 0)
+                            sql += " AND ";
+                        sql += conditions[i];
+                    }
                 }
-            }
 
-            if (options.orderByNameAsc) {
-                sql += " ORDER BY file_name ASC";
-            } else if (options.orderByIndexedDesc) {
-                sql += " ORDER BY indexed_time DESC, id DESC";
-            }
-
-            if (options.limit > 0) {
-                sql += " LIMIT ?";
-                addIntParam(params, options.limit);
-            }
-            if (options.offset > 0) {
-                sql += " OFFSET ?";
-                addIntParam(params, options.offset);
-            }
-
-            if (options.usePathLocations)
-                sql.insert(0, repository::documentPathQueryCte(options.currentPathsOnly));
-            auto execResult = executePreparedVectorQuery<ListDocumentProjection>(
-                db, sql, params, [&](const Statement& stmt) { return mapListProjectionRow(stmt); });
-            if (!execResult) {
-                if (joinFtsForContains && options.containsUsesFts) {
-                    auto fallbackOpts = options;
-                    fallbackOpts.containsUsesFts = false;
-                    return queryDocumentsForListProjection(fallbackOpts);
+                if (opts.orderByNameAsc) {
+                    sql += " ORDER BY file_name ASC";
+                } else if (opts.orderByIndexedDesc) {
+                    sql += " ORDER BY indexed_time DESC, id DESC";
                 }
-                return execResult.error();
+
+                if (opts.limit > 0) {
+                    sql += " LIMIT ?";
+                    addIntParam(params, opts.limit);
+                }
+                if (opts.offset > 0) {
+                    sql += " OFFSET ?";
+                    addIntParam(params, opts.offset);
+                }
+
+                if (opts.usePathLocations)
+                    sql.insert(0, repository::documentPathQueryCte(opts.currentPathsOnly));
+                return executePreparedVectorQuery<ListDocumentProjection>(
+                    db, sql, params,
+                    [&](const Statement& stmt) { return mapListProjectionRow(stmt); });
+            };
+
+            const bool tryFts = options.containsFragment && options.containsUsesFts &&
+                                !options.containsFragment->empty() && pathFtsAvailable_;
+            auto execResult = runOnce(tryFts);
+            if (!execResult && tryFts) {
+                return runOnce(false);
             }
             return execResult;
         });
@@ -2337,67 +2356,71 @@ MetadataRepository::queryDocumentsForGrepCandidates(const DocumentQueryOptions& 
     YAMS_PLOT("metadata_repo::grep_candidates_offset", static_cast<int64_t>(options.offset));
     auto result = executeReadQuery<std::vector<GrepCandidateProjection>>(
         [&](Database& db) -> Result<std::vector<GrepCandidateProjection>> {
-            const bool joinFtsForContains = options.containsFragment && options.containsUsesFts &&
-                                            !options.containsFragment->empty() && pathFtsAvailable_;
+            const auto runOnce = [&](bool useFts) -> Result<std::vector<GrepCandidateProjection>> {
+                const bool joinFtsForContains = useFts && options.containsFragment &&
+                                                !options.containsFragment->empty() &&
+                                                pathFtsAvailable_;
 
-            // Lightweight projection: what grep needs for candidate discovery and hot/cold
-            // classification, plus the index time the CLI freshness check compares against.
-            std::string sql =
-                "SELECT documents.id, documents.file_path, documents.file_size, "
-                "documents.sha256_hash, documents.mime_type, documents.content_extracted, "
-                "documents.indexed_time "
-                "FROM documents";
-            if (joinFtsForContains)
-                sql += " JOIN documents_path_fts ON documents.id = documents_path_fts.rowid";
+                // Lightweight projection: what grep needs for candidate discovery and hot/cold
+                // classification, plus the index time the CLI freshness check compares against.
+                std::string sql =
+                    "SELECT documents.id, documents.file_path, documents.file_size, "
+                    "documents.sha256_hash, documents.mime_type, documents.content_extracted, "
+                    "documents.indexed_time "
+                    "FROM documents";
+                if (joinFtsForContains)
+                    sql += " JOIN documents_path_fts ON documents.id = documents_path_fts.rowid";
 
-            std::vector<std::string> conditions;
-            std::vector<BindParam> params;
-            appendDocumentQueryFilters(options, joinFtsForContains, hasPathIndexing_, conditions,
-                                       params, false);
+                auto opts = options;
+                opts.containsUsesFts = useFts;
+                std::vector<std::string> conditions;
+                std::vector<BindParam> params;
+                appendDocumentQueryFilters(opts, joinFtsForContains, hasPathIndexing_, conditions,
+                                           params, false);
 
-            if (!conditions.empty()) {
-                sql += " WHERE ";
-                for (size_t i = 0; i < conditions.size(); ++i) {
-                    if (i > 0)
-                        sql += " AND ";
-                    sql += conditions[i];
+                if (!conditions.empty()) {
+                    sql += " WHERE ";
+                    for (size_t i = 0; i < conditions.size(); ++i) {
+                        if (i > 0)
+                            sql += " AND ";
+                        sql += conditions[i];
+                    }
                 }
-            }
 
-            // Grep should prefer the freshest indexed snapshot when candidate caps apply,
-            // especially for path-scoped queries that may have multiple historical versions.
-            sql += " ORDER BY documents.indexed_time DESC, documents.id DESC";
+                // Grep should prefer the freshest indexed snapshot when candidate caps apply,
+                // especially for path-scoped queries that may have multiple historical versions.
+                sql += " ORDER BY documents.indexed_time DESC, documents.id DESC";
 
-            if (options.limit > 0) {
-                sql += " LIMIT ?";
-                addIntParam(params, options.limit);
-            }
-            if (options.offset > 0) {
-                sql += " OFFSET ?";
-                addIntParam(params, options.offset);
-            }
-
-            if (options.usePathLocations)
-                sql.insert(0, repository::documentPathQueryCte(options.currentPathsOnly));
-            auto execResult = executePreparedVectorQuery<GrepCandidateProjection>(
-                db, sql, params, [&](const Statement& stmt) {
-                    GrepCandidateProjection p;
-                    p.id = stmt.getInt64(0);
-                    p.filePath = stmt.getString(1);
-                    p.fileSize = stmt.getInt64(2);
-                    p.sha256Hash = stmt.getString(3);
-                    p.mimeType = stmt.getString(4);
-                    p.contentExtracted = stmt.getInt(5) != 0;
-                    p.indexedTime = stmt.getInt64(6);
-                    return p;
-                });
-            if (!execResult) {
-                if (joinFtsForContains && options.containsUsesFts) {
-                    auto fallbackOpts = options;
-                    fallbackOpts.containsUsesFts = false;
-                    return queryDocumentsForGrepCandidates(fallbackOpts);
+                if (opts.limit > 0) {
+                    sql += " LIMIT ?";
+                    addIntParam(params, opts.limit);
                 }
-                return execResult.error();
+                if (opts.offset > 0) {
+                    sql += " OFFSET ?";
+                    addIntParam(params, opts.offset);
+                }
+
+                if (opts.usePathLocations)
+                    sql.insert(0, repository::documentPathQueryCte(opts.currentPathsOnly));
+                return executePreparedVectorQuery<GrepCandidateProjection>(
+                    db, sql, params, [&](const Statement& stmt) {
+                        GrepCandidateProjection p;
+                        p.id = stmt.getInt64(0);
+                        p.filePath = stmt.getString(1);
+                        p.fileSize = stmt.getInt64(2);
+                        p.sha256Hash = stmt.getString(3);
+                        p.mimeType = stmt.getString(4);
+                        p.contentExtracted = stmt.getInt(5) != 0;
+                        p.indexedTime = stmt.getInt64(6);
+                        return p;
+                    });
+            };
+
+            const bool tryFts = options.containsFragment && options.containsUsesFts &&
+                                !options.containsFragment->empty() && pathFtsAvailable_;
+            auto execResult = runOnce(tryFts);
+            if (!execResult && tryFts) {
+                return runOnce(false);
             }
             return execResult;
         });
@@ -4204,7 +4227,7 @@ Result<void> MetadataRepository::removeSessionIdFromDocuments(const std::string&
 }
 
 Result<int64_t> MetadataRepository::deleteDocumentsBySessionId(const std::string& sessionId) {
-    return executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+    auto res = executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
         auto countResult = db.prepare(R"(
             SELECT COUNT(DISTINCT document_id)
             FROM metadata
@@ -4223,6 +4246,29 @@ Result<int64_t> MetadataRepository::deleteDocumentsBySessionId(const std::string
             return stepCount.error();
 
         int64_t count = countStmt.getInt64(0);
+        if (count == 0) {
+            return int64_t{0};
+        }
+
+        auto beginRes = db.beginTransaction();
+        if (!beginRes)
+            return beginRes.error();
+
+        // Remove matching FTS5 index entries before deleting documents (which cascades metadata).
+        auto ftsDeleteResult = db.prepare(R"(
+            DELETE FROM documents_fts
+            WHERE rowid IN (
+                SELECT DISTINCT document_id
+                FROM metadata
+                WHERE key = 'session_id' AND value = ?
+            )
+        )");
+        if (ftsDeleteResult) {
+            Statement ftsDeleteStmt = std::move(ftsDeleteResult).value();
+            if (auto bindFts = ftsDeleteStmt.bind(1, sessionId)) {
+                (void)ftsDeleteStmt.execute();
+            }
+        }
 
         auto deleteResult = db.prepare(R"(
             DELETE FROM documents
@@ -4232,20 +4278,36 @@ Result<int64_t> MetadataRepository::deleteDocumentsBySessionId(const std::string
                 WHERE key = 'session_id' AND value = ?
             )
         )");
-        if (!deleteResult)
+        if (!deleteResult) {
+            (void)db.rollback();
             return deleteResult.error();
+        }
 
         Statement deleteStmt = std::move(deleteResult).value();
         auto bindDelete = deleteStmt.bind(1, sessionId);
-        if (!bindDelete)
+        if (!bindDelete) {
+            (void)db.rollback();
             return bindDelete.error();
+        }
 
         auto execResult = deleteStmt.execute();
-        if (!execResult)
+        if (!execResult) {
+            (void)db.rollback();
             return execResult.error();
+        }
+
+        auto commitRes = db.commit();
+        if (!commitRes) {
+            (void)db.rollback();
+            return commitRes.error();
+        }
 
         return count;
     });
+    if (res && res.value() > 0) {
+        invalidateQueryCache();
+    }
+    return res;
 }
 
 Result<std::vector<DocumentInfo>>

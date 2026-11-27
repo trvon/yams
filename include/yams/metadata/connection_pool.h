@@ -110,7 +110,7 @@ private:
     std::chrono::steady_clock::time_point createdAt_{std::chrono::steady_clock::now()};
     std::chrono::steady_clock::time_point acquiredAt_{std::chrono::steady_clock::now()};
     std::string holderTag_;
-    bool returned_ = false;
+    std::atomic<bool> returned_{false};
     uint64_t generation_ = 0; // PBI-079: Track which refresh generation this connection is from
 };
 

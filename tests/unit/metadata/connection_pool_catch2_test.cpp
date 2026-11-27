@@ -435,6 +435,49 @@ TEST_CASE("Connection pool shutdown while connection is leased does not crash",
     auto afterShutdown = pool.acquire(std::chrono::milliseconds(0));
     REQUIRE_FALSE(afterShutdown.has_value());
     CHECK((afterShutdown.error().code == yams::ErrorCode::InvalidState));
+
+    // The active borrower's PooledConnection must still own a live Database until released
+    // (shutdown interrupts rather than closing/freeing db_ out from under the borrower).
+    CHECK(conn.value()->isValid());
+}
+
+TEST_CASE("Connection pool return rolls back leaked raw BEGIN IMMEDIATE transactions",
+          "[metadata][connection_pool][transaction]") {
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 1;
+    cfg.maxConnections = 1;
+    cfg.enableWAL = false;
+
+    ConnectionPool pool(make_db_path("pool_raw_tx_rollback_").string(), cfg);
+    REQUIRE(pool.initialize().has_value());
+
+    {
+        auto conn = pool.acquire();
+        REQUIRE(conn.has_value());
+        REQUIRE(
+            (*conn.value())->execute("CREATE TABLE tx_probe(id INTEGER PRIMARY KEY)").has_value());
+        // Simulate repository::beginTransactionWithRetry executing BEGIN IMMEDIATE directly
+        // and returning early without an explicit ROLLBACK.
+        REQUIRE((*conn.value())->execute("BEGIN IMMEDIATE").has_value());
+        REQUIRE((*conn.value())->execute("INSERT INTO tx_probe(id) VALUES (1)").has_value());
+    }
+
+    // Re-acquiring the single connection must succeed cleanly and start a fresh transaction,
+    // with the uncommitted row rolled back.
+    {
+        auto conn = pool.acquire();
+        REQUIRE(conn.has_value());
+        REQUIRE((*conn.value())->execute("BEGIN IMMEDIATE").has_value());
+        auto stmtRes = (*conn.value())->prepare("SELECT COUNT(*) FROM tx_probe");
+        REQUIRE(stmtRes.has_value());
+        auto stepRes = stmtRes.value().step();
+        REQUIRE(stepRes.has_value());
+        REQUIRE(stepRes.value());
+        CHECK(stmtRes.value().getInt64(0) == 0);
+        REQUIRE((*conn.value())->execute("COMMIT").has_value());
+    }
+
+    pool.shutdown();
 }
 
 // ============================================================================

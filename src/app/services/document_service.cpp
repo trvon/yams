@@ -281,11 +281,13 @@ public:
     Result<std::vector<metadata::DocumentInfo>> resolveAll(const std::string& query,
                                                            const ResolveOptions& opts = {}) {
         std::vector<metadata::DocumentInfo> results;
-        std::unordered_set<std::string> seenHashes;
+        std::unordered_set<std::string> seenKeys;
 
         auto addUnique = [&](const std::vector<metadata::DocumentInfo>& docs) {
             for (const auto& doc : docs) {
-                if (seenHashes.insert(doc.sha256Hash).second) {
+                std::string key =
+                    doc.filePath.empty() ? doc.sha256Hash : (doc.filePath + '\0' + doc.sha256Hash);
+                if (seenKeys.insert(std::move(key)).second) {
                     results.push_back(doc);
                 }
             }
@@ -707,61 +709,66 @@ buildDocumentInfo(const StoreDocumentRequest& req, const std::string& usePath,
     info.fileSize = static_cast<int64_t>(
         std::filesystem::exists(p, ec) ? std::filesystem::file_size(p, ec) : req.content.size());
     info.sha256Hash = hash;
-    // Detect MIME when not provided or generic
+    // Detect MIME when not provided or generic (unless --no-auto-mime is requested)
     info.mimeType = !req.mimeType.empty() ? req.mimeType : "";
-    if (info.mimeType.empty() || info.mimeType == "application/octet-stream") {
-        bool triedDetection = false;
-        if (!info.fileExtension.empty()) {
-            info.mimeType =
-                yams::detection::FileTypeDetector::getMimeTypeFromExtension(info.fileExtension);
-            if (!info.mimeType.empty() && info.mimeType != "application/octet-stream") {
-                triedDetection = true;
+    if (!req.disableAutoMime) {
+        if (info.mimeType.empty() || info.mimeType == "application/octet-stream") {
+            bool triedDetection = false;
+            if (!info.fileExtension.empty()) {
+                info.mimeType =
+                    yams::detection::FileTypeDetector::getMimeTypeFromExtension(info.fileExtension);
+                if (!info.mimeType.empty() && info.mimeType != "application/octet-stream") {
+                    triedDetection = true;
+                }
+            }
+            if (!triedDetection) {
+                try {
+                    (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
+                    auto& det = yams::detection::FileTypeDetector::instance();
+                    if (auto sig = det.detectFromFile(p)) {
+                        if (!sig.value().mimeType.empty())
+                            info.mimeType = sig.value().mimeType;
+                    }
+                    if (info.mimeType.empty()) {
+                        const auto& extForMime = info.fileExtension.empty() ? p.extension().string()
+                                                                            : info.fileExtension;
+                        info.mimeType =
+                            yams::detection::FileTypeDetector::getMimeTypeFromExtension(extForMime);
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::debug("MIME file detection failed for {}: {}; using fallback",
+                                  p.string(), e.what());
+                } catch (...) {
+                    spdlog::debug("MIME file detection failed for {}; using fallback", p.string());
+                }
             }
         }
-        if (!triedDetection) {
-            try {
-                (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
-                auto& det = yams::detection::FileTypeDetector::instance();
-                if (auto sig = det.detectFromFile(p)) {
-                    if (!sig.value().mimeType.empty())
+        if (info.mimeType.empty() || info.mimeType == "application/octet-stream") {
+            // For extensionless inline content, sniff the provided bytes instead of
+            // assuming everything piped on stdin is text.
+            if (!req.content.empty() && info.fileExtension.empty()) {
+                try {
+                    (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
+                    auto& det = yams::detection::FileTypeDetector::instance();
+                    auto bytes = std::as_bytes(std::span(req.content.data(), req.content.size()));
+                    if (auto sig = det.detectFromBuffer(bytes)) {
                         info.mimeType = sig.value().mimeType;
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::debug(
+                        "MIME buffer detection failed for {}: {}; retaining binary fallback",
+                        req.name, e.what());
+                    info.mimeType = "application/octet-stream";
+                } catch (...) {
+                    spdlog::debug("MIME buffer detection failed for {}; retaining binary fallback",
+                                  req.name);
+                    info.mimeType = "application/octet-stream";
                 }
-                if (info.mimeType.empty()) {
-                    const auto& extForMime =
-                        info.fileExtension.empty() ? p.extension().string() : info.fileExtension;
-                    info.mimeType =
-                        yams::detection::FileTypeDetector::getMimeTypeFromExtension(extForMime);
-                }
-            } catch (const std::exception& e) {
-                spdlog::debug("MIME file detection failed for {}: {}; using fallback", p.string(),
-                              e.what());
-            } catch (...) {
-                spdlog::debug("MIME file detection failed for {}; using fallback", p.string());
-            }
+            } else if (info.mimeType.empty())
+                info.mimeType = "application/octet-stream";
         }
-    }
-    if (info.mimeType.empty() || info.mimeType == "application/octet-stream") {
-        // For extensionless inline content, sniff the provided bytes instead of
-        // assuming everything piped on stdin is text.
-        if (!req.content.empty() && info.fileExtension.empty()) {
-            try {
-                (void)yams::detection::FileTypeDetector::initializeWithMagicNumbers();
-                auto& det = yams::detection::FileTypeDetector::instance();
-                auto bytes = std::as_bytes(std::span(req.content.data(), req.content.size()));
-                if (auto sig = det.detectFromBuffer(bytes)) {
-                    info.mimeType = sig.value().mimeType;
-                }
-            } catch (const std::exception& e) {
-                spdlog::debug("MIME buffer detection failed for {}: {}; retaining binary fallback",
-                              req.name, e.what());
-                info.mimeType = "application/octet-stream";
-            } catch (...) {
-                spdlog::debug("MIME buffer detection failed for {}; retaining binary fallback",
-                              req.name);
-                info.mimeType = "application/octet-stream";
-            }
-        } else if (info.mimeType.empty())
-            info.mimeType = "application/octet-stream";
+    } else if (info.mimeType.empty()) {
+        info.mimeType = "application/octet-stream";
     }
 
     // Clean up temp file after MIME detection (needs the file to exist)
@@ -815,10 +822,12 @@ private:
     using SnippetPreviewCache = std::unordered_map<int64_t, std::string>;
 
     static void addUniqueDeleteTargets(std::vector<DeleteTarget>& targets,
-                                       std::unordered_set<std::string>& seenHashes,
+                                       std::unordered_set<std::string>& seenKeys,
                                        const std::vector<metadata::DocumentInfo>& docs) {
         for (const auto& doc : docs) {
-            if (seenHashes.insert(doc.sha256Hash).second) {
+            std::string key =
+                doc.filePath.empty() ? doc.sha256Hash : (doc.filePath + '\0' + doc.sha256Hash);
+            if (seenKeys.insert(std::move(key)).second) {
                 DeleteTarget target;
                 target.doc = doc;
                 target.hash = doc.sha256Hash;
@@ -1485,6 +1494,15 @@ public:
         }
         std::string usePath = std::move(input.value().usePath);
         std::optional<std::filesystem::path> tmpToRemove = std::move(input.value().tmpToRemove);
+        struct TempInputGuard {
+            std::optional<std::filesystem::path>* path;
+            ~TempInputGuard() {
+                if (path && path->has_value()) {
+                    std::error_code ec;
+                    std::filesystem::remove(**path, ec);
+                }
+            }
+        } tmpGuard{&tmpToRemove};
 
         const auto contentStoreStart = std::chrono::steady_clock::now();
         auto storeRes = ctx_.store->store(usePath, md);
@@ -1514,6 +1532,7 @@ public:
             const auto metadataPrepareStart = std::chrono::steady_clock::now();
             auto now = std::chrono::system_clock::now();
             auto info = buildDocumentInfo(req, usePath, out.hash, tmpToRemove, now);
+            tmpToRemove.reset();
 
             auto tagPairs = buildMetadataTagPairs(md);
             auto snapshotRecord = buildIngestSnapshotRecord(req, info, snapshotId, now);
@@ -1528,6 +1547,7 @@ public:
             metadata::MetadataOpScope metadataScope("app_store_document");
             const auto repoInsertStart = std::chrono::steady_clock::now();
             if (!ctx_.metadataInsertWriter) {
+                (void)ctx_.store->remove(out.hash);
                 return Error{ErrorCode::InternalError,
                              "metadata insert writer unavailable in AppContext"};
             }
@@ -1539,8 +1559,10 @@ public:
                                                        .initializePathSeriesInTransaction = true};
             auto ins = ctx_.metadataInsertWriter->submit(std::move(insertRecord)).get();
             recordDocumentStorePhase("metadata_insert", repoInsertStart);
-            if (!ins)
+            if (!ins) {
+                (void)ctx_.store->remove(out.hash);
                 return ins.error();
+            }
             if (ins) {
                 const int64_t docId = ins.value().documentId;
                 out.documentId = docId;
@@ -1551,8 +1573,12 @@ public:
                 applyStorePathTree(req, info, docId);
                 syncStoreKnowledgeGraph(info, snapshotId);
                 auto pathStored = ctx_.metadataRepo->recordDocumentPath(info, docId, tagPairs);
-                if (!pathStored)
+                if (!pathStored) {
+                    if (auto deleted = ctx_.metadataRepo->deleteDocument(docId); deleted) {
+                        (void)ctx_.store->remove(out.hash);
+                    }
                     return pathStored.error();
+                }
                 enqueueStoreFuzzyTerms(info);
                 applyStoreInlineContentIndex(req, info, docId, usePath);
             }
@@ -2114,6 +2140,7 @@ public:
         if (!req.skipInlineContentIndexing && isTextMime(info.mimeType)) {
             std::string extractedText;
             std::string extractionMethod;
+            bool readOk = true;
             if (!req.content.empty()) {
                 extractedText = req.content;
                 extractionMethod = "inline_store_sync";
@@ -2124,12 +2151,25 @@ public:
                     oss << ifs.rdbuf();
                     extractedText = oss.str();
                     extractionMethod = "text_store_sync";
+                } else {
+                    readOk = false;
                 }
             }
-            if (!extractedText.empty()) {
-                (void)ingest::persist_content_and_index(*ctx_.metadataRepo, docId, info.fileName,
-                                                        extractedText, info.mimeType,
-                                                        extractionMethod);
+            bool indexedOk = readOk;
+            if (readOk && !extractedText.empty()) {
+                auto persistRes = ingest::persist_content_and_index(
+                    *ctx_.metadataRepo, docId, info.fileName, extractedText, info.mimeType,
+                    extractionMethod);
+                if (!persistRes) {
+                    indexedOk = false;
+                    spdlog::warn("Inline FTS5 indexing failed for doc {} ({}): {}; downgrading to "
+                                 "Pending",
+                                 docId, info.fileName, persistRes.error().message);
+                }
+            }
+            if (!indexedOk && ctx_.metadataRepo) {
+                (void)ctx_.metadataRepo->updateDocumentExtractionStatus(
+                    docId, false, metadata::ExtractionStatus::Pending, "inline_index_failed");
             }
         }
         recordDocumentStorePhase("inline_content_index", inlineContentStart);

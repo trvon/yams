@@ -186,6 +186,11 @@ Result<PathTreeNode> MetadataRepository::insertPathTreeNode(int64_t parentId,
 
 Result<void> MetadataRepository::incrementPathTreeDocCount(int64_t nodeId, int64_t documentId) {
     return executeQuery<void>([&](Database& db) -> Result<void> {
+        auto beginResult = beginTransactionWithRetry(db);
+        if (!beginResult)
+            return beginResult.error();
+        repository::ScopedRollbackGuard txGuard(db);
+
         // Use INSERT OR IGNORE to handle concurrent inserts atomically.
         // This avoids the race condition in check-then-insert pattern.
         auto insertStmtResult = db.prepare(
@@ -203,6 +208,10 @@ Result<void> MetadataRepository::incrementPathTreeDocCount(int64_t nodeId, int64
         // Only increment doc_count if a new row was actually inserted
         // (changes() returns 0 if INSERT was ignored due to conflict)
         if (db.changes() == 0) {
+            auto commitRes = db.execute("COMMIT");
+            if (!commitRes)
+                return commitRes.error();
+            txGuard.dismiss();
             return Result<void>(); // Already associated, nothing to update
         }
 
@@ -215,7 +224,14 @@ Result<void> MetadataRepository::incrementPathTreeDocCount(int64_t nodeId, int64
         auto updateStmt = std::move(updateStmtResult).value();
         if (auto bindNode = updateStmt.bind(1, nodeId); !bindNode)
             return bindNode.error();
-        return updateStmt.execute();
+        if (auto execUpdate = updateStmt.execute(); !execUpdate)
+            return execUpdate.error();
+
+        auto commitRes = db.execute("COMMIT");
+        if (!commitRes)
+            return commitRes.error();
+        txGuard.dismiss();
+        return Result<void>();
     });
 }
 

@@ -427,10 +427,13 @@ retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,
         telemetry->operations.fetch_add(1, std::memory_order_relaxed);
     }
 
-    metadata::MetadataOpScope metadataScope("client_search");
-    (void)metadataScope;
+    auto runAttempt = [&]() {
+        metadata::MetadataOpScope metadataScope("client_search");
+        (void)metadataScope;
+        return fn();
+    };
 
-    auto attempt = fn();
+    auto attempt = runAttempt();
     if (attempt) {
         co_return attempt;
     }
@@ -452,7 +455,7 @@ retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,
 
         delay = std::min(delay * 2, std::chrono::milliseconds(250));
 
-        attempt = fn();
+        attempt = runAttempt();
         if (attempt) {
             co_return attempt;
         }
@@ -627,10 +630,6 @@ public:
 
         auto searchExecutionContext =
             buildSearchExecutionContext(ctx_, normalizedReq, normalizedReq.query);
-        // Only trivially copyable fields (counters, flags, freshness) are read after this move.
-        search::SearchExecutionContextGuard searchExecutionContextGuard(
-            std::move(searchExecutionContext));
-        (void)searchExecutionContextGuard;
 
         if (!parsed.scope.name.empty()) {
             if (normalizedReq.pathPattern.empty()) {
@@ -769,9 +768,18 @@ public:
                     "Hybrid/semantic search not ready" +
                         (repairDetails_.empty() ? std::string{} : (" - " + repairDetails_))};
             }
+            // Scope the thread_local SearchExecutionContextGuard strictly around the synchronous
+            // hybridSearch() call so it is never held across a co_await suspension point.
+            search::SearchExecutionContextGuard searchExecutionContextGuard(searchExecutionContext);
+            (void)searchExecutionContextGuard;
             result = hybridSearch(effectiveReq, parsed.scope, &metadataTelemetry,
                                   effectiveReq.pathPattern);
         } else {
+            // Scope the thread_local SearchExecutionContextGuard around synchronous
+            // metadataSearch() so applyExtensionFacets() sees the active execution context without
+            // crossing co_await.
+            search::SearchExecutionContextGuard searchExecutionContextGuard(searchExecutionContext);
+            (void)searchExecutionContextGuard;
             result = metadataSearch(effectiveReq, &metadataTelemetry);
         }
 
@@ -1254,9 +1262,11 @@ private:
             if (v && !v.value().empty()) {
                 const auto& doc = v.value().front();
                 docsMap[doc.sha256Hash] = doc;
-                // Map path results to hash
+                // Map path results to hash so snippet content fetch populates them.
+                auto& bucket = hashToIndices[doc.sha256Hash];
                 for (size_t idx : indices) {
                     resp.results[idx].hash = doc.sha256Hash;
+                    bucket.push_back(idx);
                 }
             }
         }
@@ -1301,7 +1311,8 @@ private:
         for (const auto& [hash, doc] : docsMap) {
             docIds.push_back(doc.id);
             if (auto it = hashToIndices.find(hash); it != hashToIndices.end()) {
-                docIdToIndices[doc.id] = it->second;
+                auto& dest = docIdToIndices[doc.id];
+                dest.insert(dest.end(), it->second.begin(), it->second.end());
             }
         }
 
@@ -1865,12 +1876,41 @@ private:
             return false;
         };
 
+        // EvidenceSearchPipeline only populates id/sha256Hash/filePath on SearchResult::document;
+        // hydrate full DocumentInfo before post-filtering when metadata-dependent filters are set.
+        const bool needsDocHydration =
+            !reqExtLower.empty() || !reqMimeLower.empty() || !reqFileTypeLower.empty() ||
+            req.textOnly || req.binaryOnly || createdAfterEpoch.has_value() ||
+            createdBeforeEpoch.has_value() || modifiedAfterEpoch.has_value() ||
+            modifiedBeforeEpoch.has_value() || indexedAfterEpoch.has_value() ||
+            indexedBeforeEpoch.has_value();
+        std::unordered_map<std::string, metadata::DocumentInfo> hydratedDocsByHash;
+        if (needsDocHydration && ctx_.metadataRepo && !vec.empty()) {
+            std::vector<std::string> hashesToHydrate;
+            hashesToHydrate.reserve(vec.size());
+            std::unordered_set<std::string> seenHashes;
+            seenHashes.reserve(vec.size());
+            for (const auto& r : vec) {
+                if (!r.document.sha256Hash.empty() &&
+                    seenHashes.insert(r.document.sha256Hash).second) {
+                    hashesToHydrate.push_back(r.document.sha256Hash);
+                }
+            }
+            if (!hashesToHydrate.empty()) {
+                if (auto batchRes = ctx_.metadataRepo->batchGetDocumentsByHash(hashesToHydrate)) {
+                    hydratedDocsByHash = std::move(batchRes.value());
+                }
+            }
+        }
+
         for (const auto& r : vec) {
             if (tagDocHashes && tagDocHashes->count(r.document.sha256Hash) == 0) {
                 continue;
             }
 
-            const auto& doc = r.document;
+            const auto hydratedIt = hydratedDocsByHash.find(r.document.sha256Hash);
+            const auto& doc =
+                hydratedIt != hydratedDocsByHash.end() ? hydratedIt->second : r.document;
 
             if (!matchesPathFilters(doc.filePath)) {
                 continue;
@@ -2044,27 +2084,23 @@ private:
         YAMS_ZONE_SCOPED_N("search_service::keyword_pipeline");
         metadata::MetadataOpScope metadataScope("client_search");
 
-        // Prepare query - escape regex if literalText is requested
+        // Keep raw query for FTS5/fuzzy/substring matching (do not inject regex escapes).
         std::string processedQuery = req.query;
-
-        if (req.literalText) {
-            // Escape regex special characters
-            processedQuery = yams::common::escapeRegex(req.query);
-        }
 
         // Get docIds for tags if provided
         std::optional<std::vector<int64_t>> docIds;
         if (!req.tags.empty()) {
             auto docsResult = ctx_.metadataRepo->findDocumentsByTags(req.tags, req.matchAllTags);
-            if (docsResult) {
-                std::vector<int64_t> ids;
-                const auto& docsVec = docsResult.value();
-                ids.reserve(docsVec.size());
-                for (const auto& doc : docsVec) {
-                    ids.push_back(doc.id);
-                }
-                docIds = std::move(ids);
+            if (!docsResult) {
+                return docsResult.error();
             }
+            std::vector<int64_t> ids;
+            const auto& docsVec = docsResult.value();
+            ids.reserve(docsVec.size());
+            for (const auto& doc : docsVec) {
+                ids.push_back(doc.id);
+            }
+            docIds = std::move(ids);
         }
 
         // Pre-filter by pathPatterns using SQL-level glob matching (like grep does)
@@ -2131,27 +2167,28 @@ private:
             }
             if (!sessionId.empty()) {
                 auto sessionDocsRes = ctx_.metadataRepo->findDocumentsBySessionId(sessionId);
-                if (sessionDocsRes) {
-                    std::unordered_set<int64_t> sessionDocIds;
-                    for (const auto& doc : sessionDocsRes.value()) {
-                        sessionDocIds.insert(doc.id);
-                    }
-                    if (!docIds.has_value()) {
-                        std::vector<int64_t> ids(sessionDocIds.begin(), sessionDocIds.end());
-                        docIds = std::move(ids);
-                    } else {
-                        std::vector<int64_t> intersected;
-                        for (int64_t id : docIds.value()) {
-                            if (sessionDocIds.count(id) > 0) {
-                                intersected.push_back(id);
-                            }
-                        }
-                        docIds = std::move(intersected);
-                    }
-                    sessionFilterApplied = true;
-                    spdlog::debug("[SearchService] Session filter: {} docs in session '{}'",
-                                  docIds->size(), sessionId);
+                if (!sessionDocsRes) {
+                    return sessionDocsRes.error();
                 }
+                std::unordered_set<int64_t> sessionDocIds;
+                for (const auto& doc : sessionDocsRes.value()) {
+                    sessionDocIds.insert(doc.id);
+                }
+                if (!docIds.has_value()) {
+                    std::vector<int64_t> ids(sessionDocIds.begin(), sessionDocIds.end());
+                    docIds = std::move(ids);
+                } else {
+                    std::vector<int64_t> intersected;
+                    for (int64_t id : docIds.value()) {
+                        if (sessionDocIds.count(id) > 0) {
+                            intersected.push_back(id);
+                        }
+                    }
+                    docIds = std::move(intersected);
+                }
+                sessionFilterApplied = true;
+                spdlog::debug("[SearchService] Session filter: {} docs in session '{}'",
+                              docIds->size(), sessionId);
             }
         }
 
@@ -2204,7 +2241,7 @@ private:
                 const size_t effectiveLimit =
                     req.limit > 0 ? req.limit : metadataDocsResult.value().size();
                 for (const auto& doc : metadataDocsResult.value()) {
-                    if (!allowedIds.empty() && allowedIds.count(doc.id) == 0) {
+                    if (docIds.has_value() && allowedIds.count(doc.id) == 0) {
                         continue;
                     }
 
@@ -2500,6 +2537,9 @@ private:
             }
 
             resp.results = convertResults(res);
+            // Normalize negative FTS5 BM25 scores into [0, 1] before merging positive overlay
+            // scores and sorting descending so highest-relevance FTS5 hits are not inverted.
+            normalizeScores(resp.results, resp.type);
             if (!overlayResults.empty()) {
                 std::unordered_set<std::string> seenHashes;
                 for (const auto& item : resp.results) {
@@ -2530,7 +2570,6 @@ private:
                 resp.searchStats["lexical_overlay_candidates_added"] =
                     std::to_string(overlayResults.size());
             }
-            normalizeScores(resp.results, resp.type);
             annotateRecentLexicalDeltaHits(resp, recentLexicalDeltaHashes);
             if (!searchReq.pathsOnly) {
                 applyExtensionFacets(resp);

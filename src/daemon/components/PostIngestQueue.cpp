@@ -157,17 +157,31 @@ std::size_t PostIngestQueue::maxExtractionConcurrent() {
 }
 
 std::size_t PostIngestQueue::maxKgConcurrent() {
-    return static_cast<std::size_t>(TuneAdvisor::postKgConcurrent());
+    const uint32_t mask = TuneAdvisor::postIngestStageActiveMask();
+    if ((mask & (1u << static_cast<uint8_t>(TuneAdvisor::PostIngestStage::KnowledgeGraph))) == 0u) {
+        return 0;
+    }
+    // Guarantee forward progress for active KG pollers on low-budget (1-2 core) hosts;
+    // pausing KG is controlled by stagePaused_, not a 0 concurrency budget.
+    return std::max<std::size_t>(1u, static_cast<std::size_t>(TuneAdvisor::postKgConcurrent()));
 }
 
 std::size_t PostIngestQueue::maxEntityConcurrent() {
-    return static_cast<std::size_t>(TuneAdvisor::postEntityConcurrent());
+    const uint32_t mask = TuneAdvisor::postIngestStageActiveMask();
+    if ((mask & (1u << static_cast<uint8_t>(TuneAdvisor::PostIngestStage::Entity))) == 0u) {
+        return 0;
+    }
+    return std::max<std::size_t>(1u, static_cast<std::size_t>(TuneAdvisor::postEntityConcurrent()));
 }
 
 std::size_t PostIngestQueue::maxTitleConcurrent() {
+    const uint32_t mask = TuneAdvisor::postIngestStageActiveMask();
+    if ((mask & (1u << static_cast<uint8_t>(TuneAdvisor::PostIngestStage::Title))) == 0u) {
+        return 0;
+    }
     // Title extraction shares ONNX resources with embeddings, so limit concurrency
     // to allow both to run in parallel without starving each other
-    return static_cast<std::size_t>(TuneAdvisor::postTitleConcurrent());
+    return std::max<std::size_t>(1u, static_cast<std::size_t>(TuneAdvisor::postTitleConcurrent()));
 }
 
 PostIngestQueue::PostIngestQueue(
@@ -371,7 +385,13 @@ void PostIngestQueue::start() {
         return;
     }
 
-    stop_.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        stop_.store(false, std::memory_order_release);
+        for (auto& spawned : stageSpawned_) {
+            spawned.store(false, std::memory_order_release);
+        }
+    }
     refreshStageAvailability();
     logStageAvailabilitySnapshot();
     initializeGradientLimiters();
@@ -384,19 +404,41 @@ void PostIngestQueue::start() {
     }
     const bool startTitle = hasTitleExtractor();
 
-    spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
-    coordinator_->spawnDetached(coordinator_->makeStrand(), channelPoller());
-    if (startKg) {
+    bool spawnExtraction = false;
+    bool spawnKg = false;
+    bool spawnEntity = false;
+    bool spawnTitle = false;
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        if (!stop_.load(std::memory_order_acquire)) {
+            spawnExtraction = !stageSpawned_[0].exchange(true, std::memory_order_acq_rel);
+            if (startKg) {
+                spawnKg = !stageSpawned_[1].exchange(true, std::memory_order_acq_rel);
+            }
+            if (startEntity) {
+                spawnEntity = !stageSpawned_[3].exchange(true, std::memory_order_acq_rel);
+            }
+            if (startTitle) {
+                spawnTitle = !stageSpawned_[4].exchange(true, std::memory_order_acq_rel);
+            }
+        }
+    }
+
+    if (spawnExtraction) {
+        spdlog::info("[PostIngestQueue] Spawning channelPoller coroutine...");
+        coordinator_->spawnDetached(coordinator_->makeStrand(), channelPoller());
+    }
+    if (spawnKg) {
         spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
         coordinator_->spawnDetached(coordinator_->makeStrand(), kgPoller());
     }
-    if (startEntity) {
+    if (spawnEntity) {
         spdlog::info("[PostIngestQueue] Spawning entityPoller coroutine...");
         auto* entityCoordinator = entityCoordinator_ ? entityCoordinator_ : coordinator_;
         auto entityExec = entityCoordinator->makeStrand();
         entityCoordinator->spawnDetached(entityExec, entityPoller());
     }
-    if (startTitle) {
+    if (spawnTitle) {
         spdlog::info("[PostIngestQueue] Spawning titlePoller coroutine...");
         coordinator_->spawnDetached(coordinator_->makeStrand(), titlePoller());
     }
@@ -429,9 +471,9 @@ void PostIngestQueue::start() {
 
 void PostIngestQueue::stop() {
     {
-        // Share the KG admission lock so stop() has a strict boundary: an enqueue either
-        // linearizes before this store or observes stop_ and is rejected/accounted below.
-        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        // Share lifecycleMutex_ + pendingKgMutex_ so stop() has a strict boundary against both
+        // KG admission and late-bind poller spawning.
+        std::scoped_lock lock(lifecycleMutex_, pendingKgMutex_);
         stop_.store(true, std::memory_order_release);
     }
     cancelPendingKgJobs(true, "queue shutdown");
@@ -485,7 +527,13 @@ void PostIngestQueue::stop() {
     // clearWakeTimers() destroys the shared_ptr<steady_timer> instances.
     // This is safe only when all pollers have exited, because a suspended
     // coroutine referencing a destroyed timer will SIGSEGV.
-    startGuard_.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        for (auto& spawned : stageSpawned_) {
+            spawned.store(false, std::memory_order_release);
+        }
+        startGuard_.store(false, std::memory_order_release);
+    }
     clearWakeTimers();
 }
 
@@ -602,7 +650,23 @@ void PostIngestQueue::setEntityProviders(
     }
     refreshStageAvailability();
     if (!hadProviders && hasProviders) {
-        signalWakeTimer(Stage::Entity);
+        bool shouldSpawn = false;
+        {
+            std::lock_guard<std::mutex> lock(lifecycleMutex_);
+            if (startGuard_.load(std::memory_order_acquire) &&
+                !stop_.load(std::memory_order_acquire) && coordinator_ != nullptr) {
+                shouldSpawn = !stageSpawned_[3].exchange(true, std::memory_order_acq_rel);
+            }
+        }
+        if (shouldSpawn) {
+            spdlog::info(
+                "[PostIngestQueue] Spawning entityPoller coroutine (late provider bind)...");
+            auto* entityCoordinator = entityCoordinator_ ? entityCoordinator_ : coordinator_;
+            auto entityExec = entityCoordinator->makeStrand();
+            entityCoordinator->spawnDetached(entityExec, entityPoller());
+        } else {
+            signalWakeTimer(Stage::Entity);
+        }
     }
 
     if (!hadProviders && hasProviders && processed_.load(std::memory_order_relaxed) > 0) {
@@ -621,7 +685,21 @@ void PostIngestQueue::setTitleExtractor(search::EntityExtractionFunc extractor) 
     }
     refreshStageAvailability();
     if (!hadExtractor && hasExtractor) {
-        signalWakeTimer(Stage::Title);
+        bool shouldSpawn = false;
+        {
+            std::lock_guard<std::mutex> lock(lifecycleMutex_);
+            if (startGuard_.load(std::memory_order_acquire) &&
+                !stop_.load(std::memory_order_acquire) && coordinator_ != nullptr) {
+                shouldSpawn = !stageSpawned_[4].exchange(true, std::memory_order_acq_rel);
+            }
+        }
+        if (shouldSpawn) {
+            spdlog::info(
+                "[PostIngestQueue] Spawning titlePoller coroutine (late extractor bind)...");
+            coordinator_->spawnDetached(coordinator_->makeStrand(), titlePoller());
+        } else {
+            signalWakeTimer(Stage::Title);
+        }
     }
 }
 
@@ -2194,6 +2272,15 @@ void PostIngestQueue::dispatchToTitleChannel(
             "[PostIngestQueue] Title channel full after retry, dropping async title for {}",
             hash.substr(0, 12));
         InternalEventBus::instance().incTitleDropped();
+        if (jobCopy.knowledgeGraphCompletion && !jobCopy.knowledgeGraphToken.empty() &&
+            writeCoordinator_) {
+            auto batch = std::make_unique<WriteBatch>();
+            batch->source = "PostIngestQueue::titleDispatch/dropAcknowledgement";
+            batch->ops.emplace_back(AcknowledgeKnowledgeGraphOp{
+                jobCopy.documentId, jobCopy.knowledgeGraphToken, jobCopy.knowledgeGraphCompletion});
+            enqueueWithBackpressure(*writeCoordinator_, std::move(batch),
+                                    "title+NL drop acknowledgement", stop_);
+        }
     } else {
         spdlog::debug("[PostIngestQueue] Dispatched title+NL extraction job for {}",
                       hash.substr(0, 12));
@@ -2747,7 +2834,7 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
         entries.reserve(successes.size());
 
         for (auto& prepared : successes) {
-            if (prepared.shouldDispatchKg &&
+            if (prepared.shouldDispatchKg && graphComponent_ != nullptr &&
                 knowledgeGraphEnabled_.load(std::memory_order_acquire) &&
                 prepared.knowledgeGraphToken.empty()) {
                 prepared.knowledgeGraphToken = yams::core::generateId("kg");
@@ -2926,12 +3013,15 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         job.updateSemanticGraph = selectionCfg.updateSemanticGraphDuringIngest;
 
         constexpr auto kEnqueueTimeout = std::chrono::milliseconds(100);
+        constexpr uint32_t kMaxEmbedEnqueueWaits = 50u; // 5s cap to avoid starving WorkCoordinator
         uint32_t waits = 0;
+        bool pushed = false;
         const auto enqueueStart = std::chrono::steady_clock::now();
-        while (!stop_.load(std::memory_order_acquire)) {
+        while (!stop_.load(std::memory_order_acquire) && waits < kMaxEmbedEnqueueWaits) {
             // push_wait moves `job` only when it returns true.
             // NOLINTNEXTLINE(bugprone-use-after-move)
             if (embedQ->push_wait(std::move(job), kEnqueueTimeout)) {
+                pushed = true;
                 InternalEventBus::instance().incEmbedQueued(batchSize);
                 embedJobsEmitted_.fetch_add(1, std::memory_order_relaxed);
                 embedDocsEmitted_.fetch_add(batchSize, std::memory_order_relaxed);
@@ -2955,7 +3045,7 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
             }
         }
         dispatchTimings.embedEnqueue.add(std::chrono::steady_clock::now() - enqueueStart);
-        if (stop_.load(std::memory_order_acquire)) {
+        if (!pushed) {
             InternalEventBus::instance().incEmbedDropped(batchSize);
         }
         embedPreparedBatch.clear();

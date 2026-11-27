@@ -207,14 +207,17 @@ static bool pathFilterMatch(const std::string& filePath, const std::vector<std::
             // the minimal glob matcher.
             auto dd = f.find("**");
             if (dd != std::string::npos) {
-                std::string prefix = f.substr(0, dd);
-                auto normPrefix = normalizePathForCompare(prefix);
-                if (!normPrefix.empty()) {
-                    if (!normPrefix.empty() && normPrefix.back() != '/')
-                        normPrefix.push_back('/');
-                    if (normalizedDoc.size() >= normPrefix.size() &&
-                        normalizedDoc.compare(0, normPrefix.size(), normPrefix) == 0)
-                        return true;
+                const std::string_view suffix = std::string_view(f).substr(dd);
+                if (suffix == "**" || suffix == "**/*") {
+                    std::string prefix = f.substr(0, dd);
+                    auto normPrefix = normalizePathForCompare(prefix);
+                    if (!normPrefix.empty()) {
+                        if (normPrefix.back() != '/')
+                            normPrefix.push_back('/');
+                        if (normalizedDoc.size() >= normPrefix.size() &&
+                            normalizedDoc.compare(0, normPrefix.size(), normPrefix) == 0)
+                            return true;
+                    }
                 }
             }
         } else {
@@ -518,7 +521,7 @@ public:
             } else if (!req.pattern.empty() && isLikelyFtsPattern(req.pattern) &&
                        retrievalMode != search::QueryRetrievalMode::Literal &&
                        retrievalMode != search::QueryRetrievalMode::Path &&
-                       !req.filesWithoutMatch) {
+                       !req.filesWithoutMatch && !req.invert) {
                 auto sRes = retryMetadataOp(
                     [&]() { return ctx_.metadataRepo->search(req.pattern, max_docs_hot * 2); }, 4,
                     std::chrono::milliseconds(25), &metadataTelemetry);
@@ -589,8 +592,8 @@ public:
         const auto literalFtsFilterStart = GrepClock::now();
         {
             YAMS_ZONE_SCOPED_N("grep_service::literal_fts_filter");
-            if (req.literalText && !req.pattern.empty() && !docs.empty() &&
-                retrievalMode != search::QueryRetrievalMode::Literal &&
+            if (req.literalText && !req.pattern.empty() && !docs.empty() && !req.invert &&
+                !req.filesWithoutMatch && retrievalMode != search::QueryRetrievalMode::Literal &&
                 retrievalMode != search::QueryRetrievalMode::Path && !usedFtsForInitialCandidates) {
                 auto sRes = retryMetadataOp(
                     [&]() { return ctx_.metadataRepo->search(req.pattern, max_docs_hot); }, 4,
@@ -668,7 +671,8 @@ public:
                               docs.size());
             }
 
-            if (docs.empty() && pathTreeEnabled_ && !req.paths.empty()) {
+            if (docs.empty() && pathTreeEnabled_ && !req.paths.empty() && req.tags.empty() &&
+                req.includePatterns.empty()) {
                 collectDocsFromPathTree(req, addDocs, metadataTelemetry);
                 if (!docs.empty()) {
                     spdlog::debug("[GrepService] Path-tree traversal supplied {} candidate docs",
@@ -1040,8 +1044,12 @@ public:
                         }
                         size_t n = countMatches(line);
                         bool matched = (n > 0);
-                        if (req.invert)
+                        if (req.invert) {
                             matched = !matched;
+                            if (matched) {
+                                n = 1;
+                            }
+                        }
                         if (!matched)
                             return;
 
@@ -1367,7 +1375,7 @@ public:
         std::sort(response.filesWith.begin(), response.filesWith.end());
         std::sort(response.filesWithout.begin(), response.filesWithout.end());
         if (req.pathsOnly) {
-            const auto& source = req.invert ? response.filesWithout : response.filesWith;
+            const auto& source = req.filesWithoutMatch ? response.filesWithout : response.filesWith;
             std::unordered_set<std::string> seen;
             for (const auto& path : source) {
                 path_projection::appendUniquePath(response.pathsOnly, seen, path);
@@ -1396,7 +1404,8 @@ public:
         const auto semanticPhaseStart = GrepClock::now();
         {
             YAMS_ZONE_SCOPED_N("grep_service::semantic_phase");
-            if (!req.regexOnly && req.semanticLimit > 0 &&
+            if (!req.regexOnly && req.semanticLimit > 0 && !req.invert && !req.filesWithoutMatch &&
+                !req.pathsOnly && !req.count &&
                 retrievalMode != search::QueryRetrievalMode::Literal &&
                 retrievalMode != search::QueryRetrievalMode::Path) {
                 try {
@@ -1480,17 +1489,23 @@ public:
                                             }
                                             auto dd = p.find("**");
                                             if (!ok && dd != std::string::npos) {
-                                                std::string prefix = p.substr(0, dd);
-                                                auto normPrefix = normalizePathForCompare(prefix);
-                                                if (!normPrefix.empty()) {
-                                                    if (normPrefix.back() != '/')
-                                                        normPrefix.push_back('/');
-                                                    auto normDoc = normalizePathForCompare(path);
-                                                    if (normDoc.size() >= normPrefix.size() &&
-                                                        normDoc.compare(0, normPrefix.size(),
-                                                                        normPrefix) == 0) {
-                                                        ok = true;
-                                                        break;
+                                                const std::string_view suffix =
+                                                    std::string_view(p).substr(dd);
+                                                if (suffix == "**" || suffix == "**/*") {
+                                                    std::string prefix = p.substr(0, dd);
+                                                    auto normPrefix =
+                                                        normalizePathForCompare(prefix);
+                                                    if (!normPrefix.empty()) {
+                                                        if (normPrefix.back() != '/')
+                                                            normPrefix.push_back('/');
+                                                        auto normDoc =
+                                                            normalizePathForCompare(path);
+                                                        if (normDoc.size() >= normPrefix.size() &&
+                                                            normDoc.compare(0, normPrefix.size(),
+                                                                            normPrefix) == 0) {
+                                                            ok = true;
+                                                            break;
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1604,7 +1619,8 @@ public:
         response.searchStats["fts_candidate_mode"] =
             usedFtsForInitialCandidates ? "initial" : "off";
         response.searchStats["fts_literal_filter"] =
-            (req.literalText && retrievalMode != search::QueryRetrievalMode::Literal &&
+            (req.literalText && !req.invert && !req.filesWithoutMatch &&
+             retrievalMode != search::QueryRetrievalMode::Literal &&
              retrievalMode != search::QueryRetrievalMode::Path)
                 ? "eligible"
                 : "off";

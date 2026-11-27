@@ -151,11 +151,17 @@ Result<RowOutcome> reconcileRow(sqlite3* db, sqlite3_stmt* select, sqlite3_stmt*
                                 int64_t uncompressedSize, StatisticsDelta& delta) {
     sqlite3_reset(select);
     sqlite3_bind_text(select, 1, blockHash.c_str(), -1, SQLITE_TRANSIENT);
-    if (sqlite3_step(select) != SQLITE_ROW) {
+    const int stepRc = sqlite3_step(select);
+    if (stepRc == SQLITE_DONE) {
         sqlite3_reset(select);
         // Object without a refs.db row: unexpected, but not this repair's job.
         spdlog::debug("Block refs repair: {} not in refs.db", blockHash.substr(0, 8));
         return RowOutcome::NoRow;
+    }
+    if (stepRc != SQLITE_ROW) {
+        auto error = dbError(db, "Failed to query block_references");
+        sqlite3_reset(select);
+        return error;
     }
     const int64_t currentBlockSize = sqlite3_column_int64(select, 0);
     const bool hasUncompressed = sqlite3_column_type(select, 1) != SQLITE_NULL;
@@ -256,8 +262,8 @@ Result<BlockRefsRepairResult> repairBlockReferences(const fs::path& objectsPath,
     }
 
     sqlite3* rawDb = nullptr;
-    const int openRc =
-        sqlite3_open_v2(refsDbPath.string().c_str(), &rawDb, SQLITE_OPEN_READWRITE, nullptr);
+    const int openFlags = dryRun ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE;
+    const int openRc = sqlite3_open_v2(refsDbPath.string().c_str(), &rawDb, openFlags, nullptr);
     DbHandle db(rawDb);
     if (openRc != SQLITE_OK) {
         return Error{ErrorCode::DatabaseError,
@@ -265,8 +271,10 @@ Result<BlockRefsRepairResult> repairBlockReferences(const fs::path& objectsPath,
                          (rawDb ? sqlite3_errmsg(rawDb) : sqlite3_errstr(openRc))};
     }
     sqlite3_busy_timeout(db.get(), static_cast<int>(options.busyTimeout.count()));
-    // WAL for concurrency with the daemon; best effort, as for the rest of the storage layer.
-    sqlite3_exec(db.get(), "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+    if (!dryRun) {
+        // WAL for concurrency with the daemon; best effort, as for the rest of the storage layer.
+        sqlite3_exec(db.get(), "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+    }
 
     auto selectStmt = prepare(db.get(), "SELECT block_size, uncompressed_size, ref_count FROM "
                                         "block_references WHERE block_hash = ?");

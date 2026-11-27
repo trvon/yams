@@ -69,16 +69,13 @@ Result<void> upsertPathTreeForDocumentInTransaction(Database& db, const Document
         return Result<void>();
     }
 
-    YAMS_TRY_UNWRAP(findStmtHolder, db.prepareCached("SELECT node_id FROM path_tree_nodes "
-                                                     "WHERE parent_id IS ? AND path_segment = ?"));
+    YAMS_TRY_UNWRAP(findStmtHolder,
+                    db.prepareCached("SELECT node_id FROM path_tree_nodes WHERE full_path = ?"));
     auto& findStmt = *findStmtHolder;
     YAMS_TRY_UNWRAP(insertStmtHolder,
                     db.prepareCached("INSERT OR IGNORE INTO path_tree_nodes "
                                      "(parent_id, path_segment, full_path) VALUES (?, ?, ?)"));
     auto& insertStmt = *insertStmtHolder;
-    YAMS_TRY_UNWRAP(selectStmtHolder,
-                    db.prepareCached("SELECT node_id FROM path_tree_nodes WHERE full_path = ?"));
-    auto& selectStmt = *selectStmtHolder;
     YAMS_TRY_UNWRAP(assocStmtHolder,
                     db.prepareCached("INSERT OR IGNORE INTO path_tree_node_documents "
                                      "(node_id, document_id) VALUES (?, ?)"));
@@ -100,8 +97,7 @@ Result<void> upsertPathTreeForDocumentInTransaction(Database& db, const Document
         currentPath += part;
 
         YAMS_TRY(findStmt.reset());
-        YAMS_TRY(bindPathTreeParentId(findStmt, 1, parentNodeId));
-        YAMS_TRY(findStmt.bind(2, part));
+        YAMS_TRY(findStmt.bind(1, currentPath));
         YAMS_TRY_UNWRAP(foundNode, findStmt.step());
 
         int64_t nodeId = 0;
@@ -114,13 +110,13 @@ Result<void> upsertPathTreeForDocumentInTransaction(Database& db, const Document
             YAMS_TRY(insertStmt.bind(3, currentPath));
             YAMS_TRY(insertStmt.execute());
 
-            YAMS_TRY(selectStmt.reset());
-            YAMS_TRY(selectStmt.bind(1, currentPath));
-            YAMS_TRY_UNWRAP(selectedNode, selectStmt.step());
+            YAMS_TRY(findStmt.reset());
+            YAMS_TRY(findStmt.bind(1, currentPath));
+            YAMS_TRY_UNWRAP(selectedNode, findStmt.step());
             if (!selectedNode) {
                 return Error{ErrorCode::Unknown, "Failed to fetch inserted path tree node"};
             }
-            nodeId = selectStmt.getInt64(0);
+            nodeId = findStmt.getInt64(0);
         }
 
         YAMS_TRY(assocStmt.reset());

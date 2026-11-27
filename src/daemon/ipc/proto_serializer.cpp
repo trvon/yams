@@ -3792,6 +3792,7 @@ template <> struct ProtoBinding<RepairRequest> {
         o->set_embedding_model(r.embeddingModel);
         set_string_list(r.includeMime, o->mutable_include_mime());
         o->set_max_retries(r.maxRetries);
+        o->set_remove_corrupt(r.removeCorrupt);
     }
     static RepairRequest get(const Envelope& env) {
         const auto& i = env.repair_request();
@@ -3817,6 +3818,7 @@ template <> struct ProtoBinding<RepairRequest> {
         r.embeddingModel = i.embedding_model();
         r.includeMime = get_string_list(i.include_mime());
         r.maxRetries = i.max_retries();
+        r.removeCorrupt = i.remove_corrupt();
         return r;
     }
 };

@@ -1170,6 +1170,22 @@ void ServiceManager::quiesceServicesBeforeWorkerShutdown(
         spdlog::info("[ServiceManager] Phase 3.6: CheckpointManager stopped");
     }
 
+    // Stop producer (IngestService) before consumer (PostIngestQueue -> EmbeddingService)
+    // so in-flight store batches finish enqueuing post-ingest work before the queue tears down.
+    spdlog::info("[ServiceManager] Phase 3.6.2: Quiescing ingest service");
+    if (ingestService_) {
+        try {
+            ingestService_->stop();
+            ingestService_.reset();
+            spdlog::info("[ServiceManager] Phase 3.6.2: Ingest service quiesced");
+        } catch (const std::exception& e) {
+            spdlog::warn("[ServiceManager] Phase 3.6.2: IngestService quiesce failed: {}",
+                         e.what());
+        }
+    } else {
+        spdlog::info("[ServiceManager] Phase 3.6.2: No ingest service to quiesce");
+    }
+
     spdlog::info("[ServiceManager] Phase 3.6.5: Quiescing post-ingest queue");
     auto postIngestHold = std::atomic_exchange_explicit(
         &postIngest_, std::shared_ptr<PostIngestQueue>{}, std::memory_order_acq_rel);
@@ -1208,19 +1224,6 @@ void ServiceManager::quiesceServicesBeforeWorkerShutdown(
         }
     } else {
         spdlog::info("[ServiceManager] Phase 3.7: No embedding service to quiesce");
-    }
-
-    spdlog::info("[ServiceManager] Phase 3.8: Quiescing ingest service");
-    if (ingestService_) {
-        try {
-            ingestService_->stop();
-            ingestService_.reset();
-            spdlog::info("[ServiceManager] Phase 3.8: Ingest service quiesced");
-        } catch (const std::exception& e) {
-            spdlog::warn("[ServiceManager] Phase 3.8: IngestService quiesce failed: {}", e.what());
-        }
-    } else {
-        spdlog::info("[ServiceManager] Phase 3.8: No ingest service to quiesce");
     }
 
     spdlog::info("[ServiceManager] Phase 3.9: Stopping blocking I/O pool");

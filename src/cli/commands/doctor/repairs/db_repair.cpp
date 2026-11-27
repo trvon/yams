@@ -49,6 +49,7 @@ void DbRepairCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg)
             rcfg.preferredModel = embeddingPolicy.preferredModel;
             rcfg.skipExisting = true;
             bool daemonRepairAlreadyAttempted = false;
+            bool daemonEmbeddingsDone = false;
 
             if (!cfg.noDaemonRepair) {
                 const bool tty = stdout_is_tty();
@@ -210,7 +211,7 @@ void DbRepairCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg)
                                           ", failed=" + std::to_string(embeddingOp->failed);
                             }
                             os << "  " << ui::status_ok(summary) << "\n";
-                            return;
+                            daemonEmbeddingsDone = true;
                         }
                     } else {
                         os << "  "
@@ -230,366 +231,416 @@ void DbRepairCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg)
                        << "\n";
                 }
             }
-            rcfg.dataPath = cli->getDataPath();
-            rcfg.cancelRequested = &doctor::DoctorSignalGuard::cancelFlag();
-            auto emb = cli->getEmbeddingGenerator();
-            std::shared_ptr<yams::daemon::IModelProvider> localProvider;
-            auto getLocalProvider = [&]() -> std::shared_ptr<yams::daemon::IModelProvider> {
-                if (!localProvider) {
-                    localProvider = cli->getLocalModelProvider();
+            if (!daemonEmbeddingsDone) {
+                rcfg.dataPath = cli->getDataPath();
+                rcfg.cancelRequested = &doctor::DoctorSignalGuard::cancelFlag();
+                auto emb = cli->getEmbeddingGenerator();
+                std::shared_ptr<yams::daemon::IModelProvider> localProvider;
+                auto getLocalProvider = [&]() -> std::shared_ptr<yams::daemon::IModelProvider> {
+                    if (!localProvider) {
+                        localProvider = cli->getLocalModelProvider();
+                    }
+                    return localProvider;
+                };
+                if (!emb) {
+                    localProvider = getLocalProvider();
                 }
-                return localProvider;
-            };
-            if (!emb) {
-                localProvider = getLocalProvider();
-            }
-            if (!emb && !localProvider) {
-                os << "  Embedding generation unavailable -- ensure model provider is "
-                      "configured.\n";
-            } else {
-                // Guard: abort repair if DB schema dim mismatches configured target
-                try {
-                    namespace fs = std::filesystem;
-                    fs::path dbPath = cli->getDataPath() / "vectors.db";
-                    auto readDbDim = [&](const fs::path& p) -> std::optional<size_t> {
-                        sqlite3* db = nullptr;
-                        if (sqlite3_open(p.string().c_str(), &db) != SQLITE_OK) {
-                            if (db)
-                                sqlite3_close(db);
-                            return std::nullopt;
-                        }
-                        const char* sql =
-                            "SELECT sql FROM sqlite_master WHERE name='doc_embeddings' LIMIT 1";
-                        sqlite3_stmt* stmt = nullptr;
-                        std::optional<size_t> out{};
-                        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-                            if (sqlite3_step(stmt) == SQLITE_ROW) {
-                                const unsigned char* txt = sqlite3_column_text(stmt, 0);
-                                if (txt) {
-                                    std::string ddl(reinterpret_cast<const char*>(txt));
-                                    auto pos = ddl.find("float[");
-                                    if (pos != std::string::npos) {
-                                        auto end = ddl.find(']', pos);
-                                        if (end != std::string::npos && end > pos + 6) {
-                                            std::string num = ddl.substr(pos + 6, end - (pos + 6));
-                                            try {
-                                                out = static_cast<size_t>(std::stoul(num));
-                                            } catch (...) {
-                                                spdlog::debug(
-                                                    "db_repair: failed to parse vector dim");
+                if (!emb && !localProvider) {
+                    os << "  Embedding generation unavailable -- ensure model provider is "
+                          "configured.\n";
+                } else {
+                    // Guard: abort repair if DB schema dim mismatches configured target
+                    bool dimMismatchAborted = false;
+                    try {
+                        namespace fs = std::filesystem;
+                        fs::path dbPath = cli->getDataPath() / "vectors.db";
+                        auto readDbDim = [&](const fs::path& p) -> std::optional<size_t> {
+                            std::error_code existsEc;
+                            if (!fs::exists(p, existsEc)) {
+                                return std::nullopt;
+                            }
+                            sqlite3* db = nullptr;
+                            if (sqlite3_open_v2(p.string().c_str(), &db, SQLITE_OPEN_READONLY,
+                                                nullptr) != SQLITE_OK) {
+                                if (db)
+                                    sqlite3_close(db);
+                                return std::nullopt;
+                            }
+                            std::optional<size_t> out{};
+                            // Probe V2 `vectors` table first.
+                            sqlite3_stmt* v2Stmt = nullptr;
+                            if (sqlite3_prepare_v2(
+                                    db,
+                                    "SELECT COALESCE(NULLIF(embedding_dim, 0), LENGTH(embedding) / "
+                                    "4) "
+                                    "FROM vectors WHERE embedding IS NOT NULL LIMIT 1",
+                                    -1, &v2Stmt, nullptr) == SQLITE_OK) {
+                                if (sqlite3_step(v2Stmt) == SQLITE_ROW) {
+                                    auto d = sqlite3_column_int64(v2Stmt, 0);
+                                    if (d > 0) {
+                                        out = static_cast<size_t>(d);
+                                    }
+                                }
+                                sqlite3_finalize(v2Stmt);
+                            }
+                            if (!out.has_value()) {
+                                const char* sql = "SELECT sql FROM sqlite_master WHERE "
+                                                  "name='doc_embeddings' LIMIT 1";
+                                sqlite3_stmt* stmt = nullptr;
+                                if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+                                    if (sqlite3_step(stmt) == SQLITE_ROW) {
+                                        const unsigned char* txt = sqlite3_column_text(stmt, 0);
+                                        if (txt) {
+                                            std::string ddl(reinterpret_cast<const char*>(txt));
+                                            auto pos = ddl.find("float[");
+                                            if (pos != std::string::npos) {
+                                                auto end = ddl.find(']', pos);
+                                                if (end != std::string::npos && end > pos + 6) {
+                                                    std::string num =
+                                                        ddl.substr(pos + 6, end - (pos + 6));
+                                                    try {
+                                                        out = static_cast<size_t>(std::stoul(num));
+                                                    } catch (...) {
+                                                        spdlog::debug("db_repair: failed to parse "
+                                                                      "vector dim");
+                                                    }
+                                                }
                                             }
                                         }
                                     }
+                                    sqlite3_finalize(stmt);
                                 }
                             }
-                            sqlite3_finalize(stmt);
+                            sqlite3_close(db);
+                            return out;
+                        };
+                        auto dbDim = readDbDim(dbPath);
+                        auto dimResolved =
+                            vecutil::resolveEmbeddingDimension(cli, cli->getDataPath());
+                        size_t targetDim = dimResolved.dimension;
+                        if (targetDim == 0 && !emb) {
+                            localProvider = getLocalProvider();
                         }
-                        sqlite3_close(db);
-                        return out;
-                    };
-                    auto dbDim = readDbDim(dbPath);
-                    auto dimResolved = vecutil::resolveEmbeddingDimension(cli, cli->getDataPath());
-                    size_t targetDim = dimResolved.dimension;
-                    if (targetDim == 0 && !emb) {
-                        localProvider = getLocalProvider();
-                    }
-                    if (targetDim == 0 && localProvider) {
-                        targetDim = localProvider->getEmbeddingDim(cli->getEmbeddingModelName());
-                    }
-                    if (targetDim == 0 && emb) {
-                        targetDim = emb->getEmbeddingDimension();
-                    }
-                    if (dbDim && *dbDim != targetDim) {
-                        os << "  "
-                           << ui::status_error(
-                                  "Schema dimension mismatch (db=" + std::to_string(*dbDim) +
-                                  ", target=" + std::to_string(targetDim) + ") — aborting repair.")
-                           << "\n";
-                        os << "    Run: yams doctor (recreate vector tables), then yams "
-                              "repair --embeddings\n";
-                        return;
-                    }
-                } catch (...) {
-                    spdlog::debug("db_repair: db dimension check failed");
-                }
-                if (!stdout_is_tty()) {
-                    os << "  " << ui::status_pending("Scanning for documents missing embeddings")
-                       << "\n"
-                       << std::flush;
-                }
-                SpinnerRunner spin;
-                spin.start("Scanning for documents missing embeddings");
-                auto missing = yams::repair::getDocumentsMissingEmbeddings(appCtx->metadataRepo,
-                                                                           cli->getDataPath(), 0);
-                spin.stop();
-                if (!missing) {
-                    os << "  Could not query missing embeddings: " << missing.error().message
-                       << "\n";
-                } else if (missing.value().empty()) {
-                    os << "  " << ui::status_ok("No documents missing embeddings") << "\n";
-                } else {
-                    const bool tty = stdout_is_tty();
-                    auto progressStarted = std::chrono::steady_clock::now();
-                    auto lastPrint = progressStarted;
-                    auto renderEmbeddingProgress = [&](size_t current, size_t total,
-                                                       const std::string& details) {
-                        auto now = std::chrono::steady_clock::now();
-                        if (!tty && (current % 200 != 0)) {
-                            return;
+                        if (targetDim == 0 && localProvider) {
+                            targetDim =
+                                localProvider->getEmbeddingDim(cli->getEmbeddingModelName());
                         }
-                        if (tty && (now - lastPrint) < std::chrono::milliseconds(200)) {
-                            return;
+                        if (targetDim == 0 && emb) {
+                            targetDim = emb->getEmbeddingDimension();
                         }
-                        uint64_t elapsed_s = static_cast<uint64_t>(
-                            std::chrono::duration_cast<std::chrono::seconds>(now - progressStarted)
-                                .count());
-                        std::string detail = details;
-                        if (!detail.empty()) {
-                            detail = truncate_to_width(detail, 60);
-                        }
-                        std::ostringstream oss;
-                        oss << status_pending("Embeddings") << " ";
-                        if (total > 0) {
-                            double frac =
-                                (static_cast<double>(current) / static_cast<double>(total));
-                            oss << progress_with_stats(
-                                frac, 18,
-                                std::make_optional(std::make_pair(static_cast<uint64_t>(current),
-                                                                  static_cast<uint64_t>(total))),
-                                "docs");
-                        } else {
-                            oss << colorize("working", Ansi::DIM);
-                        }
-                        oss << " " << colorize("elapsed " + format_duration(elapsed_s), Ansi::DIM);
-                        if (!detail.empty()) {
-                            oss << " " << colorize(detail, Ansi::DIM);
-                        }
-
-                        if (tty) {
-                            os << "\r\033[K" << oss.str() << std::flush;
-                        } else {
-                            os << "  " << oss.str() << "\n" << std::flush;
-                        }
-                        lastPrint = now;
-                    };
-                    auto finishEmbeddingProgress = [&]() {
-                        if (tty) {
-                            os << "\n";
-                        }
-                    };
-
-                    bool attemptedDaemon = false;
-                    bool skipDaemon = cfg.noDaemonRepair || daemonRepairAlreadyAttempted;
-                    if (skipDaemon) {
-                        const std::string reason = daemonRepairAlreadyAttempted
-                                                       ? "Skipping second daemon embedding "
-                                                         "attempt after fallback"
-                                                       : "Skipping daemon embedding RPC "
-                                                         "(--no-daemon)";
-                        os << "  " << ui::status_info(reason) << "\n";
-                    }
-                    {
-                        try {
-                            if (skipDaemon) {
-                                throw std::runtime_error("skipped");
-                            }
-                            yams::daemon::ClientConfig cfg;
-                            cfg.dataDir = cli->getDataPath();
-                            // Configurable RPC timeout (default 60s)
-                            int rpc_ms = 60000;
-                            if (const auto environment =
-                                    yams::config::getenv_nonempty("YAMS_DOCTOR_RPC_TIMEOUT_MS")) {
-                                try {
-                                    rpc_ms = std::max(1000, std::stoi(*environment));
-                                } catch (...) {
-                                    spdlog::debug("db_repair: failed to parse RPC timeout");
-                                }
-                            }
-                            cfg.requestTimeout = std::chrono::milliseconds(rpc_ms);
-                            auto leaseRes = yams::cli::acquire_cli_daemon_client_shared(cfg);
-                            if (!leaseRes) {
-                                throw std::runtime_error(leaseRes.error().message);
-                            }
-                            auto leaseHandle = std::move(leaseRes.value());
-                            auto& client = **leaseHandle;
-                            auto daemonStatus = yams::cli::run_result<yams::daemon::StatusResponse>(
-                                client.status(true), std::chrono::milliseconds(rpc_ms));
-                            if (daemonStatus) {
-                                const auto expectedDir =
-                                    std::filesystem::weakly_canonical(cli->getDataPath()).string();
-                                const auto expectedMetadataDb = std::filesystem::weakly_canonical(
-                                                                    cli->getDataPath() / "yams.db")
-                                                                    .string();
-                                const auto expectedVectorDb = std::filesystem::weakly_canonical(
-                                                                  cli->getDataPath() / "vectors.db")
-                                                                  .string();
-                                const auto normalizePath =
-                                    [](const std::string& raw) -> std::string {
-                                    if (raw.empty()) {
-                                        return {};
-                                    }
-                                    return std::filesystem::weakly_canonical(raw).string();
-                                };
-                                if (!daemonStatus.value().dataDir.empty()) {
-                                    const auto daemonDir =
-                                        normalizePath(daemonStatus.value().dataDir);
-                                    if (daemonDir != expectedDir) {
-                                        throw std::runtime_error(
-                                            "Connected daemon is serving a different data "
-                                            "directory (" +
-                                            daemonDir + ") than the CLI corpus (" + expectedDir +
-                                            ")");
-                                    }
-                                }
-                                if (!daemonStatus.value().metadataDbPath.empty()) {
-                                    const auto daemonMetadataDb =
-                                        normalizePath(daemonStatus.value().metadataDbPath);
-                                    if (daemonMetadataDb != expectedMetadataDb) {
-                                        throw std::runtime_error(
-                                            "Connected daemon has metadata DB open at " +
-                                            daemonMetadataDb + " but CLI expects " +
-                                            expectedMetadataDb);
-                                    }
-                                }
-                                if (!daemonStatus.value().vectorDbPath.empty()) {
-                                    const auto daemonVectorDb =
-                                        normalizePath(daemonStatus.value().vectorDbPath);
-                                    if (daemonVectorDb != expectedVectorDb) {
-                                        throw std::runtime_error(
-                                            "Connected daemon has vector DB open at " +
-                                            daemonVectorDb + " but CLI expects " +
-                                            expectedVectorDb);
-                                    }
-                                }
-                            }
-                            yams::daemon::RepairRequest repairReq;
-                            repairReq.repairEmbeddings = true;
-                            repairReq.foreground = true;
-                            repairReq.embeddingModel = embeddingPolicy.preferredModel;
+                        if (dbDim && targetDim > 0 && *dbDim != targetDim) {
                             os << "  "
-                               << ui::status_pending("Daemon: generating missing embeddings")
+                               << ui::status_error(
+                                      "Schema dimension mismatch (db=" + std::to_string(*dbDim) +
+                                      ", target=" + std::to_string(targetDim) +
+                                      ") — aborting repair.")
+                               << "\n";
+                            os << "    Run: yams doctor (recreate vector tables), then yams "
+                                  "repair --embeddings\n";
+                            dimMismatchAborted = true;
+                        }
+                    } catch (...) {
+                        spdlog::debug("db_repair: db dimension check failed");
+                    }
+                    if (!dimMismatchAborted && ensureAppCtx() && appCtx->metadataRepo) {
+                        if (!stdout_is_tty()) {
+                            os << "  "
+                               << ui::status_pending("Scanning for documents missing embeddings")
                                << "\n"
                                << std::flush;
-                            auto er = yams::cli::run_result<yams::daemon::RepairResponse>(
-                                client.callRepair(repairReq,
-                                                  [&](const yams::daemon::RepairEvent& ev) {
-                                                      if (ev.operation == "embeddings" &&
-                                                          ev.phase == "repairing") {
-                                                          renderEmbeddingProgress(
-                                                              static_cast<size_t>(ev.processed),
-                                                              static_cast<size_t>(ev.total),
-                                                              ev.message);
-                                                      }
-                                                  }),
-                                std::chrono::milliseconds{0});
-                            finishEmbeddingProgress();
-                            if (er) {
-                                const auto& daemonResp = er.value();
-                                const yams::daemon::RepairOperationResult* embeddingOp = nullptr;
-                                for (const auto& op : daemonResp.operationResults) {
-                                    if (op.operation == "embeddings") {
-                                        embeddingOp = &op;
-                                        break;
+                        }
+                        SpinnerRunner spin;
+                        spin.start("Scanning for documents missing embeddings");
+                        auto missing = yams::repair::getDocumentsMissingEmbeddings(
+                            appCtx->metadataRepo, cli->getDataPath(), 0);
+                        spin.stop();
+                        if (!missing) {
+                            os << "  Could not query missing embeddings: "
+                               << missing.error().message << "\n";
+                        } else if (missing.value().empty()) {
+                            os << "  " << ui::status_ok("No documents missing embeddings") << "\n";
+                        } else {
+                            const bool tty = stdout_is_tty();
+                            auto progressStarted = std::chrono::steady_clock::now();
+                            auto lastPrint = progressStarted;
+                            auto renderEmbeddingProgress = [&](size_t current, size_t total,
+                                                               const std::string& details) {
+                                auto now = std::chrono::steady_clock::now();
+                                if (!tty && (current % 200 != 0)) {
+                                    return;
+                                }
+                                if (tty && (now - lastPrint) < std::chrono::milliseconds(200)) {
+                                    return;
+                                }
+                                uint64_t elapsed_s = static_cast<uint64_t>(
+                                    std::chrono::duration_cast<std::chrono::seconds>(
+                                        now - progressStarted)
+                                        .count());
+                                std::string detail = details;
+                                if (!detail.empty()) {
+                                    detail = truncate_to_width(detail, 60);
+                                }
+                                std::ostringstream oss;
+                                oss << status_pending("Embeddings") << " ";
+                                if (total > 0) {
+                                    double frac =
+                                        (static_cast<double>(current) / static_cast<double>(total));
+                                    oss << progress_with_stats(frac, 18,
+                                                               std::make_optional(std::make_pair(
+                                                                   static_cast<uint64_t>(current),
+                                                                   static_cast<uint64_t>(total))),
+                                                               "docs");
+                                } else {
+                                    oss << colorize("working", Ansi::DIM);
+                                }
+                                oss << " "
+                                    << colorize("elapsed " + format_duration(elapsed_s), Ansi::DIM);
+                                if (!detail.empty()) {
+                                    oss << " " << colorize(detail, Ansi::DIM);
+                                }
+
+                                if (tty) {
+                                    os << "\r\033[K" << oss.str() << std::flush;
+                                } else {
+                                    os << "  " << oss.str() << "\n" << std::flush;
+                                }
+                                lastPrint = now;
+                            };
+                            auto finishEmbeddingProgress = [&]() {
+                                if (tty) {
+                                    os << "\n";
+                                }
+                            };
+
+                            bool attemptedDaemon = false;
+                            bool skipDaemon = cfg.noDaemonRepair || daemonRepairAlreadyAttempted;
+                            if (skipDaemon) {
+                                const std::string reason = daemonRepairAlreadyAttempted
+                                                               ? "Skipping second daemon embedding "
+                                                                 "attempt after fallback"
+                                                               : "Skipping daemon embedding RPC "
+                                                                 "(--no-daemon)";
+                                os << "  " << ui::status_info(reason) << "\n";
+                            }
+                            {
+                                try {
+                                    if (skipDaemon) {
+                                        throw std::runtime_error("skipped");
+                                    }
+                                    yams::daemon::ClientConfig cfg;
+                                    cfg.dataDir = cli->getDataPath();
+                                    // Configurable RPC timeout (default 60s)
+                                    int rpc_ms = 60000;
+                                    if (const auto environment = yams::config::getenv_nonempty(
+                                            "YAMS_DOCTOR_RPC_TIMEOUT_MS")) {
+                                        try {
+                                            rpc_ms = std::max(1000, std::stoi(*environment));
+                                        } catch (...) {
+                                            spdlog::debug("db_repair: failed to parse RPC timeout");
+                                        }
+                                    }
+                                    cfg.requestTimeout = std::chrono::milliseconds(rpc_ms);
+                                    auto leaseRes =
+                                        yams::cli::acquire_cli_daemon_client_shared(cfg);
+                                    if (!leaseRes) {
+                                        throw std::runtime_error(leaseRes.error().message);
+                                    }
+                                    auto leaseHandle = std::move(leaseRes.value());
+                                    auto& client = **leaseHandle;
+                                    auto daemonStatus =
+                                        yams::cli::run_result<yams::daemon::StatusResponse>(
+                                            client.status(true), std::chrono::milliseconds(rpc_ms));
+                                    if (daemonStatus) {
+                                        const auto expectedDir =
+                                            std::filesystem::weakly_canonical(cli->getDataPath())
+                                                .string();
+                                        const auto expectedMetadataDb =
+                                            std::filesystem::weakly_canonical(cli->getDataPath() /
+                                                                              "yams.db")
+                                                .string();
+                                        const auto expectedVectorDb =
+                                            std::filesystem::weakly_canonical(cli->getDataPath() /
+                                                                              "vectors.db")
+                                                .string();
+                                        const auto normalizePath =
+                                            [](const std::string& raw) -> std::string {
+                                            if (raw.empty()) {
+                                                return {};
+                                            }
+                                            return std::filesystem::weakly_canonical(raw).string();
+                                        };
+                                        if (!daemonStatus.value().dataDir.empty()) {
+                                            const auto daemonDir =
+                                                normalizePath(daemonStatus.value().dataDir);
+                                            if (daemonDir != expectedDir) {
+                                                throw std::runtime_error(
+                                                    "Connected daemon is serving a different data "
+                                                    "directory (" +
+                                                    daemonDir + ") than the CLI corpus (" +
+                                                    expectedDir + ")");
+                                            }
+                                        }
+                                        if (!daemonStatus.value().metadataDbPath.empty()) {
+                                            const auto daemonMetadataDb =
+                                                normalizePath(daemonStatus.value().metadataDbPath);
+                                            if (daemonMetadataDb != expectedMetadataDb) {
+                                                throw std::runtime_error(
+                                                    "Connected daemon has metadata DB open at " +
+                                                    daemonMetadataDb + " but CLI expects " +
+                                                    expectedMetadataDb);
+                                            }
+                                        }
+                                        if (!daemonStatus.value().vectorDbPath.empty()) {
+                                            const auto daemonVectorDb =
+                                                normalizePath(daemonStatus.value().vectorDbPath);
+                                            if (daemonVectorDb != expectedVectorDb) {
+                                                throw std::runtime_error(
+                                                    "Connected daemon has vector DB open at " +
+                                                    daemonVectorDb + " but CLI expects " +
+                                                    expectedVectorDb);
+                                            }
+                                        }
+                                    }
+                                    yams::daemon::RepairRequest repairReq;
+                                    repairReq.repairEmbeddings = true;
+                                    repairReq.foreground = true;
+                                    repairReq.embeddingModel = embeddingPolicy.preferredModel;
+                                    os << "  "
+                                       << ui::status_pending(
+                                              "Daemon: generating missing embeddings")
+                                       << "\n"
+                                       << std::flush;
+                                    auto er = yams::cli::run_result<yams::daemon::RepairResponse>(
+                                        client.callRepair(
+                                            repairReq,
+                                            [&](const yams::daemon::RepairEvent& ev) {
+                                                if (ev.operation == "embeddings" &&
+                                                    ev.phase == "repairing") {
+                                                    renderEmbeddingProgress(
+                                                        static_cast<size_t>(ev.processed),
+                                                        static_cast<size_t>(ev.total), ev.message);
+                                                }
+                                            }),
+                                        std::chrono::milliseconds{0});
+                                    finishEmbeddingProgress();
+                                    if (er) {
+                                        const auto& daemonResp = er.value();
+                                        const yams::daemon::RepairOperationResult* embeddingOp =
+                                            nullptr;
+                                        for (const auto& op : daemonResp.operationResults) {
+                                            if (op.operation == "embeddings") {
+                                                embeddingOp = &op;
+                                                break;
+                                            }
+                                        }
+                                        if (!daemonResp.success || embeddingOp == nullptr) {
+                                            os << "  "
+                                               << ui::status_warning(
+                                                      "Daemon embeddings returned an invalid "
+                                                      "repair result; falling back to local "
+                                                      "mode.")
+                                               << "\n";
+                                        } else {
+                                            std::string summary;
+                                            if (!embeddingOp->message.empty() &&
+                                                embeddingOp->succeeded == 0 &&
+                                                embeddingOp->failed == 0) {
+                                                summary = embeddingOp->message;
+                                            } else {
+                                                summary = "Daemon embeddings: processed=" +
+                                                          std::to_string(embeddingOp->processed) +
+                                                          ", embedded=" +
+                                                          std::to_string(embeddingOp->succeeded) +
+                                                          ", skipped=" +
+                                                          std::to_string(embeddingOp->skipped) +
+                                                          ", failed=" +
+                                                          std::to_string(embeddingOp->failed);
+                                            }
+                                            os << "  " << ui::status_ok(summary) << "\n";
+                                            attemptedDaemon = true;
+                                        }
+                                    } else {
+                                        os << "  "
+                                           << ui::status_warning(
+                                                  "Daemon embeddings failed (" +
+                                                  er.error().message +
+                                                  ") — falling back to local mode. Use "
+                                                  "'--no-daemon' to skip RPC.")
+                                           << "\n";
+                                    }
+                                } catch (const std::exception& ex) {
+                                    finishEmbeddingProgress();
+                                    if (skipDaemon && std::string(ex.what()) == "skipped") {
+                                        // Intentional local-mode path; no warning needed.
+                                    } else {
+                                        os << "  "
+                                           << ui::status_warning(
+                                                  std::string("Daemon embeddings exception (") +
+                                                  ex.what() +
+                                                  ") — falling back to local mode. Use "
+                                                  "'--no-daemon' to skip RPC.")
+                                           << "\n";
                                     }
                                 }
-                                if (!daemonResp.success || embeddingOp == nullptr) {
+                            }
+                            if (!attemptedDaemon) {
+                                if (!ensureAppCtx()) {
+                                    return;
+                                }
+                                progressStarted = std::chrono::steady_clock::now();
+                                lastPrint = progressStarted;
+                                auto onProgress = [&](size_t current, size_t total,
+                                                      const std::string& details) {
+                                    renderEmbeddingProgress(current, total, details);
+                                };
+
+                                Result<yams::repair::EmbeddingRepairStats> stats =
+                                    Error{ErrorCode::NotInitialized,
+                                          "No embedding generation path available"};
+                                localProvider = getLocalProvider();
+                                if (localProvider) {
+                                    std::string modelName = cli->getEmbeddingModelName();
+                                    if (modelName.empty()) {
+                                        modelName = rcfg.preferredModel;
+                                    }
+                                    if (!modelName.empty()) {
+                                        rcfg.preferredModel = modelName;
+                                    }
+                                    stats = yams::repair::repairMissingEmbeddings(
+                                        appCtx->store, appCtx->metadataRepo, localProvider,
+                                        modelName, rcfg, missing.value(), onProgress,
+                                        appCtx->contentExtractors);
+                                } else if (emb) {
+                                    stats = yams::repair::repairMissingEmbeddings(
+                                        appCtx->store, appCtx->metadataRepo, emb, rcfg,
+                                        missing.value(), onProgress, appCtx->contentExtractors);
+                                }
+
+                                finishEmbeddingProgress();
+                                if (!stats) {
+                                    if (stats.error().code == ErrorCode::OperationCancelled) {
+                                        os << "  "
+                                           << ui::status_warning(
+                                                  "Cancelled by user (partial results may exist)")
+                                           << "\n";
+                                        return;
+                                    }
                                     os << "  "
-                                       << ui::status_warning(
-                                              "Daemon embeddings returned an invalid "
-                                              "repair result; falling back to local "
-                                              "mode.")
+                                       << ui::status_error("Embedding repair failed: " +
+                                                           stats.error().message)
                                        << "\n";
                                 } else {
-                                    std::string summary;
-                                    if (!embeddingOp->message.empty() &&
-                                        embeddingOp->succeeded == 0 && embeddingOp->failed == 0) {
-                                        summary = embeddingOp->message;
-                                    } else {
-                                        summary =
-                                            "Daemon embeddings: processed=" +
-                                            std::to_string(embeddingOp->processed) +
-                                            ", embedded=" + std::to_string(embeddingOp->succeeded) +
-                                            ", skipped=" + std::to_string(embeddingOp->skipped) +
-                                            ", failed=" + std::to_string(embeddingOp->failed);
-                                    }
-                                    os << "  " << ui::status_ok(summary) << "\n";
-                                    attemptedDaemon = true;
+                                    os << "  "
+                                       << ui::status_ok(
+                                              "Embeddings generated=" +
+                                              std::to_string(stats.value().embeddingsGenerated) +
+                                              ", skipped=" +
+                                              std::to_string(stats.value().embeddingsSkipped) +
+                                              ", failed=" +
+                                              std::to_string(stats.value().failedOperations))
+                                       << "\n";
                                 }
-                            } else {
-                                os << "  "
-                                   << ui::status_warning("Daemon embeddings failed (" +
-                                                         er.error().message +
-                                                         ") — falling back to local mode. Use "
-                                                         "'--no-daemon' to skip RPC.")
-                                   << "\n";
                             }
-                        } catch (const std::exception& ex) {
-                            finishEmbeddingProgress();
-                            if (skipDaemon && std::string(ex.what()) == "skipped") {
-                                // Intentional local-mode path; no warning needed.
-                            } else {
-                                os << "  "
-                                   << ui::status_warning(
-                                          std::string("Daemon embeddings exception (") + ex.what() +
-                                          ") — falling back to local mode. Use "
-                                          "'--no-daemon' to skip RPC.")
-                                   << "\n";
-                            }
-                        }
-                    }
-                    if (!attemptedDaemon) {
-                        if (!ensureAppCtx()) {
-                            return;
-                        }
-                        progressStarted = std::chrono::steady_clock::now();
-                        lastPrint = progressStarted;
-                        auto onProgress = [&](size_t current, size_t total,
-                                              const std::string& details) {
-                            renderEmbeddingProgress(current, total, details);
-                        };
-
-                        Result<yams::repair::EmbeddingRepairStats> stats = Error{
-                            ErrorCode::NotInitialized, "No embedding generation path available"};
-                        localProvider = getLocalProvider();
-                        if (localProvider) {
-                            std::string modelName = cli->getEmbeddingModelName();
-                            if (modelName.empty()) {
-                                modelName = rcfg.preferredModel;
-                            }
-                            if (!modelName.empty()) {
-                                rcfg.preferredModel = modelName;
-                            }
-                            stats = yams::repair::repairMissingEmbeddings(
-                                appCtx->store, appCtx->metadataRepo, localProvider, modelName, rcfg,
-                                missing.value(), onProgress, appCtx->contentExtractors);
-                        } else if (emb) {
-                            stats = yams::repair::repairMissingEmbeddings(
-                                appCtx->store, appCtx->metadataRepo, emb, rcfg, missing.value(),
-                                onProgress, appCtx->contentExtractors);
-                        }
-
-                        finishEmbeddingProgress();
-                        if (!stats) {
-                            if (stats.error().code == ErrorCode::OperationCancelled) {
-                                os << "  "
-                                   << ui::status_warning(
-                                          "Cancelled by user (partial results may exist)")
-                                   << "\n";
-                                return;
-                            }
-                            os << "  "
-                               << ui::status_error("Embedding repair failed: " +
-                                                   stats.error().message)
-                               << "\n";
-                        } else {
-                            os << "  "
-                               << ui::status_ok(
-                                      "Embeddings generated=" +
-                                      std::to_string(stats.value().embeddingsGenerated) +
-                                      ", skipped=" +
-                                      std::to_string(stats.value().embeddingsSkipped) +
-                                      ", failed=" + std::to_string(stats.value().failedOperations))
-                               << "\n";
                         }
                     }
                 }
@@ -686,12 +737,15 @@ void DbRepairCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg)
 
                         auto rr = yams::cli::run_result<yams::daemon::RepairResponse>(
                             client.callRepair(req, onEvent), std::chrono::minutes(10));
-                        if (rr) {
+                        if (rr && rr.value().success) {
                             return;
                         }
+                        const std::string errMsg =
+                            !rr ? rr.error().message
+                                : (!rr.value().errors.empty() ? rr.value().errors.front()
+                                                              : "unknown error");
                         os << "  "
-                           << ui::status_warning("Daemon FTS5 repair failed (" +
-                                                 rr.error().message +
+                           << ui::status_warning("Daemon FTS5 repair failed (" + errMsg +
                                                  ") — falling back to local mode")
                            << "\n";
                     }

@@ -71,6 +71,16 @@ RepairHealthSnapshot RepairHealthProbe::probe(const RepairHealthOptions& options
         }
     }
 
+    if (checkGraph && snapshot.graphIntegrityOk && kgStore_ &&
+        options.semanticNeighborGapProbeLimit > 0) {
+        auto missing = kgStore_->findNodesLackingOutboundEdges(
+            std::string_view{"document"}, std::string_view{"semantic_neighbor"},
+            options.semanticNeighborGapProbeLimit);
+        if (missing) {
+            snapshot.semanticNeighborEdgeGap = static_cast<std::uint64_t>(missing.value().size());
+        }
+    }
+
     const bool needDocScan = checkFts5 || checkEmbeddings || (checkGraph && options.scanDocuments);
     if (!needDocScan) {
         return snapshot;
@@ -132,18 +142,9 @@ RepairHealthSnapshot RepairHealthProbe::probe(const RepairHealthOptions& options
         }
     }
 
-    if (checkGraph && snapshot.graphDocNodes > 0 &&
+    if (checkGraph && snapshot.graphIntegrityOk &&
         snapshot.documentsScanned > snapshot.graphDocNodes) {
         snapshot.graphDocNodeGap = snapshot.documentsScanned - snapshot.graphDocNodes;
-    }
-
-    if (checkGraph && kgStore_ && options.semanticNeighborGapProbeLimit > 0) {
-        auto missing = kgStore_->findNodesLackingOutboundEdges(
-            std::string_view{"document"}, std::string_view{"semantic_neighbor"},
-            options.semanticNeighborGapProbeLimit);
-        if (missing) {
-            snapshot.semanticNeighborEdgeGap = static_cast<std::uint64_t>(missing.value().size());
-        }
     }
 
     return snapshot;

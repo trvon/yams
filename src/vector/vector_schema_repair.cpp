@@ -28,6 +28,9 @@ Result<void> openBackend(SqliteVecBackend& backend, const std::filesystem::path&
 
 // Drop and recreate every vector table on an open backend; the caller closes it.
 Result<void> dropAndCreateTables(SqliteVecBackend& backend, std::size_t dim) {
+    if (dim == 0) {
+        return Error{ErrorCode::InvalidArgument, "Vector dimension must be greater than zero"};
+    }
     if (auto dropped = backend.dropTables(); !dropped)
         return dropped;
     return backend.createTables(dim);
@@ -113,12 +116,22 @@ Result<SchemaState> probeSchemaState(SqliteVecBackend& backend, std::size_t targ
             return rows.error();
         state.vectorsHasRows = rows.value();
 
-        auto stale = queryFlag(db,
-                               "SELECT EXISTS(SELECT 1 FROM vectors WHERE embedding_dim > 0 "
-                               "AND embedding_dim != ?1) OR "
-                               "EXISTS(SELECT 1 FROM vectors WHERE embedding_dim IS NULL "
-                               "AND LENGTH(embedding) / 4 > 0 AND LENGTH(embedding) / 4 != ?1)",
-                               targetDim);
+        auto hasDimCol = queryFlag(db,
+                                   "SELECT EXISTS(SELECT 1 FROM pragma_table_info('vectors') WHERE "
+                                   "name = 'embedding_dim')",
+                                   std::nullopt);
+        if (!hasDimCol)
+            return hasDimCol.error();
+
+        const char* staleSql =
+            hasDimCol.value() ? "SELECT EXISTS(SELECT 1 FROM vectors WHERE embedding_dim > 0 "
+                                "AND embedding_dim != ?1) OR "
+                                "EXISTS(SELECT 1 FROM vectors WHERE (embedding_dim IS NULL OR "
+                                "embedding_dim <= 0) "
+                                "AND LENGTH(embedding) / 4 > 0 AND LENGTH(embedding) / 4 != ?1)"
+                              : "SELECT EXISTS(SELECT 1 FROM vectors WHERE "
+                                "LENGTH(embedding) / 4 > 0 AND LENGTH(embedding) / 4 != ?1)";
+        auto stale = queryFlag(db, staleSql, targetDim);
         if (!stale)
             return stale.error();
         state.stale.vectors = stale.value();
@@ -162,6 +175,10 @@ Result<SchemaState> probeSchemaState(SqliteVecBackend& backend, std::size_t targ
 
 Result<void> ensureVectorSchemaAligned(const std::filesystem::path& dataDir, std::size_t targetDim,
                                        bool recreateIfMismatch) {
+    if (targetDim == 0) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Target vector dimension must be greater than zero"};
+    }
     try {
         const auto dbPath = vectorsDbPath(dataDir);
         std::error_code ec;
@@ -195,6 +212,9 @@ Result<void> ensureVectorSchemaAligned(const std::filesystem::path& dataDir, std
 }
 
 Result<void> recreateVectorTables(const std::filesystem::path& dataDir, std::size_t dim) {
+    if (dim == 0) {
+        return Error{ErrorCode::InvalidArgument, "Vector dimension must be greater than zero"};
+    }
     try {
         SqliteVecBackend backend;
         if (auto open = openBackend(backend, vectorsDbPath(dataDir)); !open)

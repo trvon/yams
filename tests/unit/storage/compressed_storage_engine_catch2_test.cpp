@@ -317,6 +317,44 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine toggle compr
     CHECK((engine->isCompressionEnabled()));
 }
 
+TEST_CASE_METHOD(CompressedStorageFixture,
+                 "CompressedStorageEngine compressExisting and decompressExisting rewrite on disk",
+                 "[storage][compressed][catch2]") {
+    CompressedStorageEngine::Config config;
+    config.enableCompression = false;
+    config.asyncCompression = false;
+
+    auto engine = std::make_unique<CompressedStorageEngine>(underlying, config);
+
+    std::string hash(64, 'e');
+    auto data = generateCompressibleData(8192);
+
+    // Store uncompressed first.
+    REQUIRE(engine->store(hash, data).has_value());
+    auto rawBefore = underlying->retrieveRaw(hash);
+    REQUIRE(rawBefore.has_value());
+    CHECK_FALSE(rawBefore.value().header.has_value());
+    CHECK(rawBefore.value().data.size() == data.size());
+
+    // compressExisting(force=true) must replace the on-disk object with compressed bytes.
+    REQUIRE(engine->compressExisting(hash, true).has_value());
+    auto rawCompressed = underlying->retrieveRaw(hash);
+    REQUIRE(rawCompressed.has_value());
+    CHECK(rawCompressed.value().header.has_value());
+    CHECK(rawCompressed.value().data.size() < data.size());
+
+    auto roundTrip = engine->retrieve(hash);
+    REQUIRE(roundTrip.has_value());
+    CHECK(roundTrip.value() == data);
+
+    // decompressExisting() must replace the on-disk object back with uncompressed bytes.
+    REQUIRE(engine->decompressExisting(hash).has_value());
+    auto rawDecompressed = underlying->retrieveRaw(hash);
+    REQUIRE(rawDecompressed.has_value());
+    CHECK_FALSE(rawDecompressed.value().header.has_value());
+    CHECK(rawDecompressed.value().data == data);
+}
+
 TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine statistics",
                  "[storage][compressed][stats][catch2]") {
     CompressedStorageEngine::Config config;

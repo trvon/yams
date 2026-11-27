@@ -1002,14 +1002,17 @@ public:
         if (!cfg_.enable_alias_fts) {
             return resolveAliasExact(aliasQuery, limit);
         }
-        return readPool()->withConnection(
-            [&](Database& db) -> Result<std::vector<AliasResolution>> {
-                // Use FTS if available; fall back to exact if table is missing
+        bool fallbackToExact = false;
+        auto res =
+            readPool()->withConnection([&](Database& db) -> Result<std::vector<AliasResolution>> {
+                // Use FTS if available; fall back to exact after releasing the connection so
+                // single-connection pools cannot self-deadlock on nested acquire.
                 auto existsR = db.tableExists("kg_aliases_fts");
                 if (!existsR)
                     return existsR.error();
                 if (!existsR.value()) {
-                    return resolveAliasExact(aliasQuery, limit);
+                    fallbackToExact = true;
+                    return std::vector<AliasResolution>{};
                 }
 
                 auto stmtR = db.prepareCached("SELECT a.node_id, 1.0 AS score "
@@ -1049,6 +1052,10 @@ public:
                 }
                 return out;
             });
+        if (fallbackToExact) {
+            return resolveAliasExact(aliasQuery, limit);
+        }
+        return res;
     }
 
     Result<void> removeAliasById(std::int64_t aliasId) override {
@@ -3025,16 +3032,20 @@ private:
 
 class SqliteWriteBatch final : public KnowledgeGraphStore::WriteBatch {
 public:
-    SqliteWriteBatch(SqliteKnowledgeGraphStore* owner, std::unique_ptr<PooledConnection> conn)
-        : owner_(owner), conn_(std::move(conn)), committed_(false) {
-        // Begin transaction immediately
-        auto result = (*conn_)->beginTransaction();
-        if (!result) {
-            spdlog::error("SqliteWriteBatch: failed to begin transaction: {}",
-                          result.error().message);
-            transactionStarted_ = false;
-        } else {
-            transactionStarted_ = true;
+    SqliteWriteBatch(SqliteKnowledgeGraphStore* owner, std::unique_ptr<PooledConnection> conn,
+                     bool transactionAlreadyStarted = false)
+        : owner_(owner), conn_(std::move(conn)), committed_(false),
+          transactionStarted_(transactionAlreadyStarted) {
+        if (!transactionStarted_) {
+            // Begin transaction immediately
+            auto result = (*conn_)->beginTransaction();
+            if (!result) {
+                spdlog::error("SqliteWriteBatch: failed to begin transaction: {}",
+                              result.error().message);
+                transactionStarted_ = false;
+            } else {
+                transactionStarted_ = true;
+            }
         }
     }
 
@@ -4154,8 +4165,15 @@ SqliteKnowledgeGraphStore::beginWriteBatch() {
     if (!connResult) {
         return Error{ErrorCode::ResourceExhausted, "Failed to acquire connection for write batch"};
     }
-    std::unique_ptr<WriteBatch> batch =
-        std::make_unique<SqliteWriteBatch>(this, std::move(connResult).value());
+    auto conn = std::move(connResult).value();
+    auto txResult = (*conn)->beginTransaction();
+    if (!txResult) {
+        spdlog::error("SqliteWriteBatch: failed to begin transaction: {}",
+                      txResult.error().message);
+        return txResult.error();
+    }
+    std::unique_ptr<WriteBatch> batch = std::make_unique<SqliteWriteBatch>(
+        this, std::move(conn), /*transactionAlreadyStarted=*/true);
     return batch;
 }
 

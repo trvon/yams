@@ -27,7 +27,9 @@ void RepairServiceHost::start(Config cfg, StateComponent* state,
     RepairService::Config rcfg;
     rcfg.enable = cfg.enable;
     rcfg.dataDir = std::move(cfg.dataDir);
-    rcfg.maxBatch = cfg.maxBatch;
+    if (cfg.maxBatch > 0) {
+        rcfg.maxBatch = cfg.maxBatch;
+    }
     rcfg.autoRebuildOnDimMismatch = cfg.autoRebuildOnDimMismatch;
     rcfg.maxPendingRepairs = cfg.maxPendingRepairs;
     rcfg.vectorVacuumInterval = cfg.vectorVacuumInterval;
