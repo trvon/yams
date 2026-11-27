@@ -157,16 +157,28 @@ std::size_t PostIngestQueue::maxExtractionConcurrent() {
 }
 
 std::size_t PostIngestQueue::maxKgConcurrent() {
+    const uint32_t mask = TuneAdvisor::postIngestStageActiveMask();
+    if ((mask & (1u << static_cast<uint8_t>(TuneAdvisor::PostIngestStage::KnowledgeGraph))) == 0u) {
+        return 0;
+    }
     // Guarantee forward progress for active KG pollers on low-budget (1-2 core) hosts;
     // pausing KG is controlled by stagePaused_, not a 0 concurrency budget.
     return std::max<std::size_t>(1u, static_cast<std::size_t>(TuneAdvisor::postKgConcurrent()));
 }
 
 std::size_t PostIngestQueue::maxEntityConcurrent() {
+    const uint32_t mask = TuneAdvisor::postIngestStageActiveMask();
+    if ((mask & (1u << static_cast<uint8_t>(TuneAdvisor::PostIngestStage::Entity))) == 0u) {
+        return 0;
+    }
     return std::max<std::size_t>(1u, static_cast<std::size_t>(TuneAdvisor::postEntityConcurrent()));
 }
 
 std::size_t PostIngestQueue::maxTitleConcurrent() {
+    const uint32_t mask = TuneAdvisor::postIngestStageActiveMask();
+    if ((mask & (1u << static_cast<uint8_t>(TuneAdvisor::PostIngestStage::Title))) == 0u) {
+        return 0;
+    }
     // Title extraction shares ONNX resources with embeddings, so limit concurrency
     // to allow both to run in parallel without starving each other
     return std::max<std::size_t>(1u, static_cast<std::size_t>(TuneAdvisor::postTitleConcurrent()));
